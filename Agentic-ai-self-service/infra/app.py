@@ -17,6 +17,7 @@ from pathlib import Path
 
 import aws_cdk as cdk
 import cdk_nag
+from release_regions import require_release_region
 from stacks.platform_stack import PlatformStack
 
 
@@ -76,6 +77,10 @@ app = cdk.App()
 
 environment_name = get_context_value(app, "environment_name", default="dev")
 aws_region = get_context_value(app, "aws_region", default="us-east-1")
+# Same decision scripts/deploy.sh makes before touching AWS, made again here so a direct
+# `cdk synth`/`cdk deploy` cannot stand the platform up outside the release envelope.
+# Raised before PlatformStack exists, so nothing is synthesized for a refused Region.
+aws_region = require_release_region(aws_region)
 project_name = get_context_value(app, "project_name", default="agentcore-workflow")
 
 # Optional platform OTEL defaults. When otel_endpoint is provided, every agent

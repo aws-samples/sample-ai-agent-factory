@@ -54,18 +54,34 @@ def test_a_grammatical_arn_is_accepted(block):
     assert result.returncode == 0 and result.stdout.strip().endswith("ACCEPTED"), (result.stdout, result.stderr)
 
 
-@pytest.mark.parametrize("name_len", [1, 2, 255, 256, 511, 512])
+# An exported LiteLLM key reference must name a secret in the producer-owned
+# ``agentcore-connector/`` namespace (the same rule ``validate_export_references`` applies
+# at the API), so the 1..512 name-length bound is measured on the whole captured name
+# INCLUDING that 20-character prefix.
+NAMESPACE = "agentcore-connector/"
+
+
+@pytest.mark.parametrize("name_len", [len(NAMESPACE) + 1, len(NAMESPACE) + 2, 255, 256, 511, 512])
 def test_secret_name_lengths_inside_the_bound_are_accepted(block, name_len):
-    arn = f"arn:aws:secretsmanager:{HOME_REGION}:123456789012:secret:{'a' * name_len}"
+    name = NAMESPACE + "a" * (name_len - len(NAMESPACE))
+    arn = f"arn:aws:secretsmanager:{HOME_REGION}:123456789012:secret:{name}"
     result = _run(block, arn)
     assert result.returncode == 0 and result.stdout.strip().endswith("ACCEPTED"), (name_len, result.stdout)
 
 
-@pytest.mark.parametrize("name_len", [0, 513, 600])
+@pytest.mark.parametrize("name_len", [len(NAMESPACE), 513, 600])
 def test_secret_name_lengths_outside_the_bound_are_refused(block, name_len):
-    arn = f"arn:aws:secretsmanager:{HOME_REGION}:123456789012:secret:{'a' * name_len}"
+    name = NAMESPACE + "a" * (name_len - len(NAMESPACE))
+    arn = f"arn:aws:secretsmanager:{HOME_REGION}:123456789012:secret:{name}"
     result = _run(block, arn)
     assert result.returncode != 0 and "is not a Secrets Manager ARN" in result.stdout, (name_len, result.stdout)
+
+
+@pytest.mark.parametrize("name", ["a" * 8, "other-namespace/key", "agentcore-provider/key"])
+def test_a_secret_outside_the_connector_namespace_is_refused(block, name):
+    arn = f"arn:aws:secretsmanager:{HOME_REGION}:123456789012:secret:{name}"
+    result = _run(block, arn)
+    assert result.returncode != 0 and "is not a Secrets Manager ARN" in result.stdout, (name, result.stdout)
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,16 @@ def test_disabled_target_catalog_exposes_only_the_platform_default(monkeypatch):
     assert result == {
         "enabled": False,
         "home_region": "us-east-1",
+        "home_region_admissible": True,
+        "release_regions": [
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-2",
+            "eu-west-3",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
         "regions": [],
         "region_targets": [],
         "accounts": [],
@@ -69,6 +79,16 @@ def test_target_catalog_is_sanitized_sorted_and_contains_no_role_arns(monkeypatc
     assert result == {
         "enabled": True,
         "home_region": "us-east-1",
+        "home_region_admissible": True,
+        "release_regions": [
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-2",
+            "eu-west-3",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        ],
         "regions": ["eu-west-1", "us-west-2"],
         "region_targets": [
             {"region": "eu-west-1", "production_promotion_supported": True},

@@ -9,14 +9,16 @@ afterEach(() => {
 });
 
 describe('AwsRegistryPanel regional availability', () => {
-  it('makes no API call and names the DynamoDB fallback in Frankfurt', () => {
-    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+  it('makes no API call and names the DynamoDB fallback in Paris', () => {
+    // Paris is the selected release Region without AWS Agent Registry federation; Frankfurt
+    // (which this test once used) has had it since the schema-2 matrix review.
+    vi.stubEnv('VITE_AWS_REGION', 'eu-west-3');
     const getClient = vi.spyOn(api, 'getApiClient');
 
     render(<AwsRegistryPanel />);
 
     expect(screen.getByText('Unavailable in this Region')).toBeTruthy();
-    expect(screen.getByRole('status')).toHaveTextContent('Europe (Frankfurt)');
+    expect(screen.getByRole('status')).toHaveTextContent('Europe (Paris)');
     expect(screen.getByRole('status')).toHaveTextContent(
       'built-in DynamoDB agent registry remains available',
     );

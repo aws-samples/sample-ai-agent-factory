@@ -28,23 +28,41 @@
       "working_directory": "backend",
       "selector_type": "pytest",
       "commands": [
-        ["{backend_python}", "-m", "pytest", "-m", "not integration and not policy_scan and not terraform_scan and not shell_scan", "-q"]
+        ["{backend_python}", "-m", "pytest", "-m", "not integration and not policy_scan and not terraform_scan and not shell_scan", "-q", "--junit-xml={junit_xml}", "-o", "junit_family=xunit1"]
       ],
       "timeout_seconds": 7200
     },
     {
       "id": "export-gate",
       "working_directory": "backend",
-      "selector_type": "command",
-      "check_ids": ["customer-export-contract-policy"],
+      "selector_type": "pytest",
       "commands": [
-        ["{backend_python}", "-m", "pytest", "tests/test_cfn_export_contract.py", "tests/test_the_exported_template_can_actually_deploy.py", "tests/test_litellm_secret_region_is_enforced_in_the_template.py", "-q"]
+        [
+          "{backend_python}",
+          "-m",
+          "pytest",
+          "tests/test_downloadable_asset_contract.py",
+          "tests/test_python_exporter.py",
+          "tests/test_cfn_export_contract.py",
+          "tests/test_the_exported_template_can_actually_deploy.py",
+          "tests/test_export_bundle_staging.py",
+          "tests/test_export_bundle_isolation.py",
+          "tests/test_litellm_secret_region_is_enforced_in_the_template.py",
+          "tests/test_release_documentation_contract.py",
+          "tests/test_ci_workflow_gates.py",
+          "-q",
+          "--junit-xml={junit_xml}",
+          "-o",
+          "junit_family=xunit1"
+        ],
+        ["{actionlint}", "../../.github/workflows/agentic-ai-self-service-ci.yml"]
       ],
       "required_tools": {
         "cfn-lint": "1.57.0",
         "checkov": "3.3.1",
         "terraform": "1.14.6",
-        "shellcheck": "0.11.0"
+        "shellcheck": "0.11.0",
+        "actionlint": "1.7.12"
       },
       "required_environment": ["CI"],
       "timeout_seconds": 7200
@@ -55,7 +73,7 @@
       "selector_type": "pytest",
       "check_ids": ["all-infrastructure-tests"],
       "commands": [
-        ["{infra_python}", "-m", "pytest", "tests/", "-q"]
+        ["{infra_python}", "-m", "pytest", "tests/", "-q", "--junit-xml={junit_xml}", "-o", "junit_family=xunit1"]
       ],
       "timeout_seconds": 3600
     },
@@ -67,7 +85,7 @@
       "commands": [
         ["{npm}", "audit", "--audit-level=high"],
         ["{npm}", "run", "lint"],
-        ["{npm}", "run", "test"],
+        ["{npm}", "run", "test", "--", "--reporter=default", "--reporter=junit", "--outputFile={junit_xml}"],
         ["{npm}", "run", "build"],
         ["{npm}", "run", "verify:production-build"]
       ],
@@ -93,8 +111,11 @@
       "id": "strict-synth",
       "working_directory": "infra",
       "selector_type": "command",
-      "check_ids": ["production-supported-emea-regions-cdk-nag"],
+      "check_ids": ["production-certified-regions-cdk-nag"],
       "commands": [
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-us-east-1", "-c", "environment_name=production", "-c", "aws_region=us-east-1", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-us-east-2", "-c", "environment_name=production", "-c", "aws_region=us-east-2", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-us-west-2", "-c", "environment_name=production", "-c", "aws_region=us-west-2", "-c", "project_name=acf"],
         ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-central-1", "-c", "environment_name=production", "-c", "aws_region=eu-central-1", "-c", "project_name=acf"],
         ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-1", "-c", "environment_name=production", "-c", "aws_region=eu-west-1", "-c", "project_name=acf"],
         ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-2", "-c", "environment_name=production", "-c", "aws_region=eu-west-2", "-c", "project_name=acf"],
@@ -114,9 +135,9 @@
           {"suite": "frontend", "selector": "lint-test-build-verify"},
           {"suite": "static", "selector": "all-python-lint-format"},
           {"suite": "secret-scan", "selector": "tracked-files-against-baseline"},
-          {"suite": "export-gate", "selector": "customer-export-contract-policy"},
+          {"suite": "export-gate", "selector": "backend/tests/test_downloadable_asset_contract.py::test_clean_authenticated_recipient_starts_from_the_actual_endpoint"},
           {"suite": "backend-package", "selector": "wheel-and-sdist"},
-          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
+          {"suite": "strict-synth", "selector": "production-certified-regions-cdk-nag"}
         ],
         "offline_adversarial": [
           {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_start_rejects_dirty_source"}
@@ -342,21 +363,538 @@
       }
     },
     {
-      "id": "regional.emea_core",
+      "id": "delivery.downloadable_assets",
       "evidence": {
         "offline_positive": [
-          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_emea_matrix_matches_documented_feature_boundaries"},
-          {"suite": "infra", "selector": "infra/tests/test_same_account_non_home_region_iam.py::test_target_resource_grants_reach_any_region_but_only_this_account"},
-          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
+          {"suite": "export-gate", "selector": "backend/tests/test_downloadable_asset_contract.py::test_clean_authenticated_recipient_starts_from_the_actual_endpoint"},
+          {"suite": "export-gate", "selector": "backend/tests/test_python_exporter.py::test_requirements_are_exact_and_constrained_by_the_accepted_lock"},
+          {"suite": "export-gate", "selector": "backend/tests/test_cfn_export_contract.py::test_the_deploy_script_uploads_to_a_key_it_derived_from_the_bytes"},
+          {"suite": "export-gate", "selector": "backend/tests/test_the_exported_template_can_actually_deploy.py::test_cfn_lint_would_object_to_a_broken_template"},
+          {"suite": "export-gate", "selector": "backend/tests/test_export_bundle_staging.py::test_an_export_is_keyed_by_the_owner_hash_with_the_fixed_tags"},
+          {"suite": "export-gate", "selector": "backend/tests/test_export_bundle_isolation.py::test_only_the_two_export_routes_call_the_stager"},
+          {"suite": "export-gate", "selector": "backend/tests/test_release_documentation_contract.py::test_release_contract_documents_are_internally_consistent"}
         ],
         "offline_adversarial": [
-          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_live_region_requires_a_selected_matrix_region"}
+          {"suite": "export-gate", "selector": "backend/tests/test_downloadable_asset_contract.py::test_every_adversarial_archive_mutation_fails_closed"},
+          {"suite": "export-gate", "selector": "backend/tests/test_export_bundle_staging.py::test_a_read_only_caller_cannot_export"},
+          {"suite": "export-gate", "selector": "backend/tests/test_export_bundle_isolation.py::test_the_presigned_url_is_only_ever_returned"}
         ],
         "offline_mutation": [
-          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_contract_validator_rejects_missing_region_selector"}
+          {"suite": "export-gate", "selector": "backend/tests/test_downloadable_asset_contract.py::test_security_and_inertness_have_removal_controls"},
+          {"suite": "export-gate", "selector": "backend/tests/test_downloadable_asset_contract.py::test_exact_workflow_integrity_command_passes_in_a_real_git_checkout_and_remains_strict"},
+          {"suite": "export-gate", "selector": "backend/tests/test_release_documentation_contract.py::test_legacy_scope_cannot_return_to_authoritative_documents"}
+        ],
+        "clean_clone": ["downloadable-assets-independent-detached-clean-clone"],
+        "exact_commit": ["downloadable-assets-source-contract-and-archive-digests-match"],
+        "live_positive": [
+          "deployed-api-authenticated-cfn-download-archive-digest-manifest-verified",
+          "deployed-api-authenticated-python-download-archive-digest-manifest-verified"
+        ],
+        "live_adversarial": [
+          "tampered-archive-or-manifest-rejected-before-use",
+          "python-missing-or-incompatible-dependency-rejected",
+          "cfn-wrong-account-or-region-refused",
+          "generated-ci-defaults-remain-inert"
+        ],
+        "ui_cloudfront": ["deployed-cloudfront-ui-authenticated-cfn-python-downloads-verified"],
+        "rollback": ["downloaded-cfn-update-rollback-restores-prior-behavior"],
+        "teardown_zero": ["downloaded-cfn-teardown-direct-service-inventories-zero"],
+        "live_region": [
+          "api-authenticated-cfn-download-clean-recipient-deploy-invoke-update-rollback-teardown",
+          "ui-authenticated-python-download-clean-recipient-lock-install-compile-start-invoke"
+        ]
+      }
+    },
+    {
+      "id": "regional.certified_core",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_release_documentation_contract.py::test_certified_region_matrix_and_runtime_envelope_are_exact"},
+          {"suite": "infra", "selector": "infra/tests/test_same_account_non_home_region_iam.py::test_target_resource_grants_reach_any_region_but_only_this_account"},
+          {"suite": "strict-synth", "selector": "production-certified-regions-cdk-nag"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_release_documentation_contract.py::test_uncertified_regions_remain_excluded"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_release_documentation_contract.py::test_strict_synth_covers_every_certified_region"}
         ],
         "live_region": ["core-runtime-gateway-identity-policy-evaluation"]
       }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "aliasless-kms-and-log-groups-zero",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "api-authenticated-cfn-download-clean-recipient-deploy-invoke-update-rollback-teardown",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 7200,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "arbitrary-version-rollback-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "audit-store-outage-blocks-mutation",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "batch-evaluation-pass-and-production-promotion",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "budget-store-outage-denies-before-dispatch",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "cedar-authorized-tool-call",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "cedar-unauthorized-tool-call-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "cfn-wrong-account-or-region-refused",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "changed-body-same-id-conflicts",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "cloudfront-widget-invokes-production-alias",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "concurrent-claim-conflicts-and-recovers",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "concurrent-rejection-cannot-win",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "concurrent-transaction-reservations-stay-within-limit",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "connector-cedar-denial",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "connector-tool-guardrail-denial",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "connector-tools-list-and-authorized-call",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "core-runtime-gateway-identity-policy-evaluation",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 7200,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "degraded-result-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "deployed-api-authenticated-cfn-download-archive-digest-manifest-verified",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "deployed-api-authenticated-python-download-archive-digest-manifest-verified",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "deployed-cloudfront-ui-authenticated-cfn-python-downloads-verified",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "direct-runtime-bypass-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "direct-service-inventories-zero",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "downloadable-assets-independent-detached-clean-clone",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}"],
+      "timeout_seconds": 10800,
+      "required_artifacts": ["report"],
+      "provenance": false
+    },
+    {
+      "id": "downloadable-assets-source-contract-and-archive-digests-match",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}"],
+      "timeout_seconds": 900,
+      "required_artifacts": ["report"],
+      "provenance": false
+    },
+    {
+      "id": "downloaded-cfn-teardown-direct-service-inventories-zero",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "downloaded-cfn-update-rollback-restores-prior-behavior",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "exhausted-budget-denies-before-dispatch",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "foreign-decoys-preserved",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "forged-or-stale-evidence-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "gateway-policy-mutation-request-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "generated-ci-defaults-remain-inert",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "guardrail-outage-fails-closed",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "identical-replay-is-idempotent",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "independent-detached-clone-full-gates",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}"],
+      "timeout_seconds": 10800,
+      "required_artifacts": ["report"],
+      "provenance": false
+    },
+    {
+      "id": "leased-approval-applies-exact-policy",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "model-and-tool-content-allowed",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "mutation-intent-and-outcome-visible",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "production-serves-exact-previous-version",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 5400,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "prompt-attack-blocked",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "python-missing-or-incompatible-dependency-rejected",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "real-browser-cloudfront-widget-flow",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "runtime-role-update-gateway-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "signed-delivery-executes-once",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "source-commit-tree-and-contract-digests-match",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}"],
+      "timeout_seconds": 900,
+      "required_artifacts": ["report"],
+      "provenance": false
+    },
+    {
+      "id": "substituted-subject-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "tampered-archive-or-manifest-rejected-before-use",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "tampered-row-read-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "target-cmk-encrypts-batch-evaluation",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "tool-argument-blocked",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "tool-result-blocked",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "ui-authenticated-python-download-clean-recipient-lock-install-compile-start-invoke",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 7200,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "widget-model-output-renders-inert",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "widget-target-injection-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "widget-token-attribute-ignored",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "workforce-token-exchange-whoami",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "wrong-account-key-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
+    },
+    {
+      "id": "wrong-region-key-denied",
+      "working_directory": ".",
+      "command": ["{backend_python}", "-I", "release/scenarios/run_scenario.py", "{scenario_id}", "--run-dir", "{run_dir}", "--artifact-dir", "{artifact_dir}", "--region", "{region}", "--account-id", "{account_id}"],
+      "timeout_seconds": 3600,
+      "required_artifacts": ["provenance", "report"],
+      "provenance": true
     }
   ]
 }

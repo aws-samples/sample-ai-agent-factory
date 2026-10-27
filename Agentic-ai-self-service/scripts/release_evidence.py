@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """Append-only, exact-commit evidence recorder for production-readiness runs.
 
-The recorder stores only bounded scalar facts and file digests. It never stores
-credentials, command lines, environment variables, or raw AWS/API responses.
-Every mutation rechecks that the Agentic-ai-self-service Git tree is still the
-clean tree captured when the run started.
+Evidence is EXECUTED, never asserted. The only way an event enters a run is by
+this recorder running a command the release contract declares -- an offline
+suite or a live scenario -- and writing a receipt: the resolved argv, the exact
+tool binaries (path + digest + reported version), exit codes, timing, the JUnit
+file it parsed to verify each mapped test selector, the live provenance the
+scenario emitted (account, Region, stack, deployed commit), and digests of every
+artifact the command produced. A status of ``pass`` is derived from those facts
+and re-derived on every load, so a hand-written event cannot earn credit.
+
+The recorder never stores environment variable VALUES, credentials, or raw
+AWS/API responses; it stores the contract's own command text, file digests, and
+bounded scalars. Every mutation rechecks that the Agentic-ai-self-service tree
+AND the repository's CI workflow are still the clean objects captured when the
+run started.
 """
 
 from __future__ import annotations
@@ -15,10 +25,14 @@ import hashlib
 import json
 import math
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
+import time
 import uuid
+import xml.etree.ElementTree as ElementTree
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,17 +41,76 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "build" / "release-evidence"
 CONTROLS_PATH = PROJECT_ROOT / "release" / "production-readiness-controls.json"
-REGIONS_PATH = PROJECT_ROOT / "release" / "emea-agentcore-regions.json"
+REGIONS_PATH = PROJECT_ROOT / "release" / "agentcore-regions.json"
 TRACEABILITY_PATH = PROJECT_ROOT / "release" / "production-readiness-traceability.json"
+#: The repository-root CI workflow is executable release infrastructure that lives OUTSIDE
+#: the project subtree. Its blob hash is part of the run identity and its dirty state
+#: blocks recording, exactly like the project tree.
+ROOT_WORKFLOW_RELATIVE = ".github/workflows/agentic-ai-self-service-ci.yml"
+RECORDER_VERSION = "2.0.0"
+RUN_SCHEMA_VERSION = 2
+EVENT_SCHEMA_VERSION = 2
 _STATUS_VALUES = frozenset({"pass", "fail", "blocked"})
+#: A scenario or suite command signals "cannot run here yet" (prerequisite missing,
+#: scenario not implemented) with this exit status. It records as ``blocked``, never pass.
+BLOCKED_EXIT_STATUS = 3
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SAFE_REGION = re.compile(r"^(?:local|[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d)$")
 _SAFE_ACCOUNT_ID = re.compile(r"^\d{12}$")
+_SAFE_GIT_OBJECT = re.compile(r"^[0-9a-f]{40}$")
+_SAFE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+#: Tool placeholders are resolved to absolute executables supplied by the operator and
+#: recorded by path AND digest. Context placeholders are filled by the recorder itself.
+_TOOL_PLACEHOLDERS = frozenset({"backend_python", "infra_python", "actionlint", "npm", "uv", "cdk"})
+_CONTEXT_PLACEHOLDERS = frozenset({"artifact_dir", "junit_xml", "run_dir", "region", "account_id", "scenario_id"})
+_PASSTHROUGH_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "USER", "SHELL")
+_MAX_ARTIFACT_FILES = 20_000
+_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
+_MAX_JUNIT_BYTES = 64 * 1024 * 1024
+_PROVENANCE_LABEL = "provenance"
+_PROVENANCE_REQUIRED_KEYS = frozenset({"account_id", "region", "stack_id", "deployed_commit", "deployed_project_tree"})
+_PROVENANCE_OPTIONAL_KEYS = frozenset({"endpoint", "archive_sha256", "artifact_manifest_sha256", "deployed_build"})
 _SENSITIVE_KEY = re.compile(r"(?i)(token|secret|password|credential|authorization|cookie|private.?key|session.?key)")
 _TOKEN_VALUE = re.compile(
     r"(?:AKIA|ASIA)[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.|"
     r"AWS4-HMAC-SHA256|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 )
+_REGION_MATRIX_SCHEMA_VERSION = 2
+_REGION_MATRIX_PROFILES = frozenset({"full", "reduced", "excluded"})
+_REGION_MATRIX_BOOLEAN_FIELDS = frozenset(
+    {"core", "production_release", "memory", "agent_registry", "web_search", "harness"}
+)
+# The ONLY capability tuples a selected Region may carry, keyed
+# (core, production_release, memory, agent_registry, web_search, harness). A "reduced"
+# Region is one of exactly two reviewed shapes -- without managed Web Search but with AWS
+# Agent Registry (Frankfurt, London), or without both (Paris). A generic "not all true"
+# rule used to admit shapes nobody reviewed, such as Web Search without Agent Registry.
+_REGION_MATRIX_PROFILE_TUPLES: dict[str, frozenset[tuple[bool, ...]]] = {
+    "full": frozenset({(True, True, True, True, True, True)}),
+    "reduced": frozenset(
+        {
+            (True, True, True, True, False, True),
+            (True, True, True, False, False, True),
+        }
+    ),
+}
+_REGION_MATRIX_TUPLE_ORDER = ("core", "production_release", "memory", "agent_registry", "web_search", "harness")
+_REGION_MATRIX_ENVELOPE_KEYS = frozenset(
+    {"partition", "deployment_mode", "harness", "a2a", "gateway_provider", "notes"}
+)
+_REGION_MATRIX_CORE_FEATURES = frozenset(
+    {
+        "runtime_microvm",
+        "gateway",
+        "identity",
+        "built_in_tools",
+        "observability",
+        "policy",
+        "evaluations",
+    }
+)
+_REGION_MATRIX_SOURCE_URL = "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html"
 
 
 class EvidenceError(RuntimeError):
@@ -181,6 +254,12 @@ def _source_identity() -> dict[str, Any]:
     project_rel = PROJECT_ROOT.resolve().relative_to(repo).as_posix()
     commit = _git(repo, "rev-parse", "HEAD")
     tree = _git(repo, "rev-parse", f"{commit}:{project_rel}")
+    # The CI workflow lives at the repository root, outside the project subtree. It is
+    # release infrastructure (the gates that admit the candidate), so it is part of the
+    # identity: its committed blob is recorded and its working copy must be clean.
+    workflow_blob = _git(repo, "rev-parse", f"{commit}:{ROOT_WORKFLOW_RELATIVE}")
+    if not _SAFE_GIT_OBJECT.fullmatch(workflow_blob):
+        raise EvidenceError("Repository CI workflow is not a committed blob")
     dirty = _git(
         repo,
         "status",
@@ -188,12 +267,15 @@ def _source_identity() -> dict[str, Any]:
         "--untracked-files=all",
         "--",
         project_rel,
+        ROOT_WORKFLOW_RELATIVE,
     )
     return {
         "repo": str(repo),
         "project_rel": project_rel,
         "commit": commit,
         "project_tree": tree,
+        "root_workflow": ROOT_WORKFLOW_RELATIVE,
+        "root_workflow_blob": workflow_blob,
         "branch": _git(repo, "branch", "--show-current"),
         "clean": not bool(dirty),
     }
@@ -201,17 +283,17 @@ def _source_identity() -> dict[str, Any]:
 
 def _require_same_clean_source(expected: dict[str, Any]) -> dict[str, Any]:
     current = _source_identity()
-    for key in ("project_rel", "commit", "project_tree"):
+    for key in ("project_rel", "commit", "project_tree", "root_workflow", "root_workflow_blob"):
         if current.get(key) != expected.get(key):
             raise EvidenceError(f"Source identity changed at {key}; start a new evidence run")
     if not current["clean"]:
-        raise EvidenceError("Project tree is dirty; evidence must bind to a clean commit")
+        raise EvidenceError("Project tree or repository CI workflow is dirty; evidence must bind to a clean commit")
     return current
 
 
-def _load_contract(path: Path) -> dict[str, Any]:
+def _load_contract(path: Path, *, expected_schema_version: int = 1) -> dict[str, Any]:
     value = _read_json(path)
-    if value.get("schema_version") != 1:
+    if value.get("schema_version") != expected_schema_version:
         raise EvidenceError(f"Unsupported contract schema in {path}")
     return value
 
@@ -246,6 +328,8 @@ def _public_source(identity: dict[str, Any]) -> dict[str, Any]:
         "project_rel": identity["project_rel"],
         "commit": identity["commit"],
         "project_tree": identity["project_tree"],
+        "root_workflow": identity["root_workflow"],
+        "root_workflow_blob": identity["root_workflow_blob"],
         "branch": identity["branch"],
     }
 
@@ -305,9 +389,12 @@ def _validate_contracts(
     ):
         raise EvidenceError("global_required_kinds must contain unique declared kinds")
 
-    source_url = regions.get("source_url")
-    if not isinstance(source_url, str) or not source_url.startswith("https://docs.aws.amazon.com/"):
-        raise EvidenceError("Region matrix must cite an AWS Documentation source URL")
+    if regions.get("schema_version") != _REGION_MATRIX_SCHEMA_VERSION:
+        raise EvidenceError("Region matrix must use schema_version 2")
+    if regions.get("partition") != "aws":
+        raise EvidenceError("Region matrix must be explicitly scoped to the commercial aws partition")
+    if regions.get("source_url") != _REGION_MATRIX_SOURCE_URL:
+        raise EvidenceError("Region matrix must cite the reviewed AgentCore Regions documentation URL")
     accessed_at = regions.get("accessed_at")
     try:
         datetime.strptime(str(accessed_at), "%Y-%m-%d")
@@ -317,6 +404,12 @@ def _validate_contracts(
     raw_regions = regions.get("regions")
     if not isinstance(raw_regions, list) or not raw_regions:
         raise EvidenceError("Region matrix must define at least one Region")
+    expected_entry_fields = {"region", "name", "profile"} | set(_REGION_MATRIX_BOOLEAN_FIELDS)
+    selectors = {
+        str(control["region_selector"])
+        for control in control_map.values()
+        if control.get("required_region_kind") is not None
+    }
     region_map: dict[str, dict[str, Any]] = {}
     for entry in raw_regions:
         if not isinstance(entry, dict):
@@ -324,29 +417,64 @@ def _validate_contracts(
         region = entry.get("region")
         if not isinstance(region, str) or region == "local" or not _SAFE_REGION.fullmatch(region):
             raise EvidenceError(f"Invalid AWS Region: {region}")
+        if region.startswith(("cn-", "us-gov-")):
+            raise EvidenceError(f"Region {region} is outside the reviewed commercial aws partition")
         if region in region_map:
             raise EvidenceError(f"Duplicate AWS Region: {region}")
-        if not isinstance(entry.get("name"), str) or not entry["name"].strip():
-            raise EvidenceError(f"Region {region} needs a display name")
-        for selector in {
-            str(control["region_selector"])
-            for control in control_map.values()
-            if control.get("required_region_kind") is not None
-        }:
+        for selector in selectors:
+            if selector not in _REGION_MATRIX_BOOLEAN_FIELDS:
+                raise EvidenceError(f"Region selector {selector} is not a reviewed capability flag")
             if not isinstance(entry.get(selector), bool):
                 raise EvidenceError(f"Region {region} lacks boolean selector {selector}")
+        if set(entry) != expected_entry_fields:
+            raise EvidenceError(f"Region {region} fields do not match the matrix schema")
+        if not isinstance(entry.get("name"), str) or not entry["name"].strip():
+            raise EvidenceError(f"Region {region} needs a display name")
+        profile = entry.get("profile")
+        if profile not in _REGION_MATRIX_PROFILES:
+            raise EvidenceError(f"Region {region} has an invalid capability profile")
+        for field in _REGION_MATRIX_BOOLEAN_FIELDS:
+            if not isinstance(entry.get(field), bool):
+                raise EvidenceError(f"Region {region} lacks boolean capability {field}")
+        capability_tuple = tuple(entry[field] for field in _REGION_MATRIX_TUPLE_ORDER)
+        if profile == "excluded":
+            if entry["production_release"]:
+                raise EvidenceError(f"Region {region} excluded profile cannot be selected for production")
+        elif capability_tuple not in _REGION_MATRIX_PROFILE_TUPLES[profile]:
+            raise EvidenceError(f"Region {region} {profile} profile is not one of the reviewed capability shapes")
         region_map[region] = entry
 
     core_features = regions.get("core_features")
     if (
         not isinstance(core_features, list)
-        or not core_features
-        or any(not isinstance(item, str) or not _SAFE_NAME.fullmatch(item) for item in core_features)
+        or set(core_features) != _REGION_MATRIX_CORE_FEATURES
         or len(core_features) != len(set(core_features))
     ):
-        raise EvidenceError("Region matrix core_features must be unique safe names")
-    if not isinstance(regions.get("production_envelope"), dict):
+        raise EvidenceError("Region matrix core_features do not match the reviewed Runtime profile")
+    production_envelope = regions.get("production_envelope")
+    if not isinstance(production_envelope, dict):
         raise EvidenceError("Region matrix must define a production_envelope")
+    if set(production_envelope) != _REGION_MATRIX_ENVELOPE_KEYS:
+        raise EvidenceError("Region matrix production envelope must carry exactly the reviewed keys")
+    if (
+        production_envelope.get("partition") != "aws"
+        or production_envelope.get("deployment_mode") != "runtime"
+        or production_envelope.get("harness") is not False
+        or production_envelope.get("a2a") is not False
+        or production_envelope.get("gateway_provider") != "agentcore"
+    ):
+        raise EvidenceError(
+            "Region matrix production envelope must be commercial Runtime-only on the AgentCore gateway "
+            "without Harness or A2A"
+        )
+    notes = production_envelope.get("notes")
+    if not isinstance(notes, list) or not notes or not all(isinstance(note, str) and note.strip() for note in notes):
+        raise EvidenceError("Region matrix production envelope notes must be a non-empty list of strings")
+    selected = {region for region, entry in region_map.items() if entry["production_release"]}
+    if not selected:
+        raise EvidenceError("Region matrix selects no production release Region")
+    if any(region_map[region]["profile"] == "excluded" for region in selected):
+        raise EvidenceError("Region matrix selects an excluded Region for production")
     return control_map, region_map
 
 
@@ -378,13 +506,11 @@ def _validate_traceability(
         commands = suite.get("commands")
         if not isinstance(commands, list) or not commands:
             raise EvidenceError(f"Release suite {suite_id} must define commands")
+        junit_commands = 0
         for command in commands:
-            if (
-                not isinstance(command, list)
-                or not command
-                or any(not isinstance(part, str) or not part or len(part) > 500 or "\x00" in part for part in command)
-            ):
-                raise EvidenceError(f"Release suite {suite_id} has an invalid command array")
+            _validate_command_array(command, f"Release suite {suite_id}")
+            if any("{junit_xml}" in part for part in command):
+                junit_commands += 1
         timeout = suite.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 14400:
             raise EvidenceError(f"Release suite {suite_id} has an invalid timeout")
@@ -416,7 +542,18 @@ def _validate_traceability(
             raise EvidenceError(f"Release suite {suite_id} has invalid check_ids")
         if selector_type == "command" and not check_ids:
             raise EvidenceError(f"Command suite {suite_id} must define check_ids")
+        # Selector-verified suites must tell the recorder where their JUnit report lands,
+        # because a pass is credited per mapped selector found passing in that report,
+        # never from the exit status alone.
+        if selector_type in {"pytest", "javascript"} and junit_commands != 1:
+            raise EvidenceError(
+                f"Release suite {suite_id} must route exactly one command's JUnit output to {{junit_xml}}"
+            )
+        if selector_type == "command" and junit_commands:
+            raise EvidenceError(f"Command suite {suite_id} cannot claim a JUnit report")
         suite_map[suite_id] = suite
+
+    scenario_map = _validate_scenarios(traceability)
 
     raw_trace_controls = traceability.get("controls")
     if not isinstance(raw_trace_controls, list):
@@ -472,11 +609,398 @@ def _validate_traceability(
                     requirements
                 ) != len(set(requirements)):
                     raise EvidenceError(f"Traceability {control_id}/{kind} has invalid scenarios")
+                undefined = sorted(set(requirements) - set(scenario_map))
+                if undefined:
+                    raise EvidenceError(
+                        f"Traceability {control_id}/{kind} names scenarios with no executable definition: {undefined}"
+                    )
         trace_map[control_id] = traced
     if set(trace_map) != set(control_map):
         missing = sorted(set(control_map) - set(trace_map))
         raise EvidenceError(f"Traceability is missing controls: {missing}")
+    referenced = {
+        item
+        for traced in trace_map.values()
+        for kind, requirements in traced["evidence"].items()
+        if not kind.startswith("offline_")
+        for item in requirements
+    }
+    orphaned = sorted(set(scenario_map) - referenced)
+    if orphaned:
+        raise EvidenceError(f"Traceability defines scenarios no control requires: {orphaned}")
     return suite_map, trace_map
+
+
+def _validate_command_array(command: Any, description: str) -> None:
+    if (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(part, str) or not part or len(part) > 500 or "\x00" in part for part in command)
+    ):
+        raise EvidenceError(f"{description} has an invalid command array")
+    for part in command:
+        for name in _PLACEHOLDER.findall(part):
+            if name not in _TOOL_PLACEHOLDERS | _CONTEXT_PLACEHOLDERS:
+                raise EvidenceError(f"{description} uses an unknown placeholder {{{name}}}")
+    head = command[0]
+    if not (_PLACEHOLDER.fullmatch(head) and head[1:-1] in _TOOL_PLACEHOLDERS):
+        raise EvidenceError(f"{description} must start with a tool placeholder so the executable is recorded by digest")
+
+
+def _validate_scenarios(traceability: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every live/UI/rollback/teardown/clone/commit scenario is an executable definition.
+
+    A scenario id used to be a bare label; whoever typed ``--status pass`` decided the
+    outcome. Now each one names the command the recorder runs, the artifact labels the
+    command must leave behind, and whether it must emit live provenance.
+    """
+    raw = traceability.get("scenarios")
+    if not isinstance(raw, list) or not raw:
+        raise EvidenceError("Traceability contract must define executable scenarios")
+    scenario_map: dict[str, dict[str, Any]] = {}
+    for scenario in raw:
+        if not isinstance(scenario, dict) or set(scenario) != {
+            "id",
+            "command",
+            "timeout_seconds",
+            "required_artifacts",
+            "provenance",
+            "working_directory",
+        }:
+            raise EvidenceError(
+                "Every scenario must define id, command, timeout_seconds, required_artifacts, provenance, working_directory"
+            )
+        scenario_id = scenario["id"]
+        if not isinstance(scenario_id, str) or not _SAFE_NAME.fullmatch(scenario_id):
+            raise EvidenceError(f"Unsafe scenario id: {scenario_id}")
+        if scenario_id in scenario_map:
+            raise EvidenceError(f"Duplicate scenario id: {scenario_id}")
+        _validate_command_array(scenario["command"], f"Scenario {scenario_id}")
+        if any("{junit_xml}" in part for part in scenario["command"]):
+            raise EvidenceError(
+                f"Scenario {scenario_id} cannot claim a JUnit report; scenarios verify by exit status and artifacts"
+            )
+        timeout = scenario["timeout_seconds"]
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 14400:
+            raise EvidenceError(f"Scenario {scenario_id} has an invalid timeout")
+        working_directory = scenario["working_directory"]
+        relative = Path(working_directory) if isinstance(working_directory, str) else None
+        if relative is None or relative.is_absolute() or ".." in relative.parts:
+            raise EvidenceError(f"Scenario {scenario_id} has an unsafe working_directory")
+        labels = scenario["required_artifacts"]
+        if (
+            not isinstance(labels, list)
+            or any(not isinstance(label, str) or not _SAFE_NAME.fullmatch(label) for label in labels)
+            or len(labels) != len(set(labels))
+            or len(labels) > 16
+        ):
+            raise EvidenceError(f"Scenario {scenario_id} has invalid required_artifacts")
+        provenance = scenario["provenance"]
+        if not isinstance(provenance, bool):
+            raise EvidenceError(f"Scenario {scenario_id} provenance must be boolean")
+        if provenance and _PROVENANCE_LABEL not in labels:
+            raise EvidenceError(
+                f"Scenario {scenario_id} requires provenance but does not list the {_PROVENANCE_LABEL} artifact"
+            )
+        scenario_map[scenario_id] = scenario
+    return scenario_map
+
+
+# ---------------------------------------------------------------------------
+# Execution: the recorder runs the contract's commands and writes receipts
+# ---------------------------------------------------------------------------
+
+
+def _resolve_tools(requested: dict[str, str], placeholders: set[str]) -> dict[str, dict[str, Any]]:
+    """Resolve each tool placeholder to one absolute executable, recorded by digest."""
+    resolved: dict[str, dict[str, Any]] = {}
+    for name in sorted(placeholders):
+        raw = requested.get(name)
+        if raw is None:
+            raise EvidenceError(f"Tool {{{name}}} is required by this command set; pass --tool {name}=/absolute/path")
+        path = Path(raw)
+        if not path.is_absolute():
+            raise EvidenceError(f"Tool {{{name}}} must be an absolute path, got {raw!r}")
+        try:
+            resolved_path = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise EvidenceError(f"Tool {{{name}}} does not exist: {raw}") from exc
+        if not resolved_path.is_file() or not os.access(resolved_path, os.X_OK):
+            raise EvidenceError(f"Tool {{{name}}} is not an executable file: {raw}")
+        sha256, size = _secure_artifact_digest(resolved_path)
+        resolved[name] = {"path": str(resolved_path), "sha256": sha256, "bytes": size}
+    unknown = sorted(set(requested) - _TOOL_PLACEHOLDERS)
+    if unknown:
+        raise EvidenceError(f"Unknown tool placeholders: {unknown}")
+    return resolved
+
+
+def _tool_version_line(executable: str, cwd: Path) -> str:
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_child_environment({}),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EvidenceError(f"Could not read the version of {executable}") from exc
+    text = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return first[:200]
+
+
+def _verify_required_tools(required: dict[str, str], tools: dict[str, dict[str, Any]], cwd: Path) -> dict[str, str]:
+    """Pin ``required_tools`` to the executables actually used, by reported version."""
+    versions: dict[str, str] = {}
+    for tool_name, expected in sorted(required.items()):
+        placeholder = tool_name.replace("-", "_")
+        record = tools.get(placeholder)
+        executable = record["path"] if record else shutil.which(tool_name)
+        if executable is None:
+            raise EvidenceError(
+                f"Required tool {tool_name} {expected} is not available; pass --tool {placeholder}=/path"
+            )
+        reported = _tool_version_line(executable, cwd)
+        if not re.search(rf"(?<![0-9.]){re.escape(expected)}(?![0-9.])", reported):
+            raise EvidenceError(f"Required tool {tool_name} must report version {expected}; got {reported!r}")
+        versions[tool_name] = reported
+        if record is None:
+            sha256, size = _secure_artifact_digest(Path(executable).resolve())
+            tools[placeholder] = {"path": str(Path(executable).resolve()), "sha256": sha256, "bytes": size}
+    return versions
+
+
+def _child_environment(required_names: dict[str, str] | list[str]) -> dict[str, str]:
+    """A minimal child environment: PATH-class basics plus the suite's declared names.
+
+    Values are passed through to the child but never written to the receipt; the
+    receipt records only WHICH names were set.
+    """
+    env: dict[str, str] = {}
+    for name in _PASSTHROUGH_ENVIRONMENT:
+        if name in os.environ:
+            env[name] = os.environ[name]
+    for name in required_names:
+        if name not in os.environ:
+            raise EvidenceError(f"Required environment variable {name} is not set")
+        env[name] = os.environ[name]
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.setdefault("LANG", "C.UTF-8")
+    return env
+
+
+def _substitute(command: list[str], tools: dict[str, dict[str, Any]], context: dict[str, str]) -> list[str]:
+    resolved: list[str] = []
+    for part in command:
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name in tools:
+                return tools[name]["path"]
+            if name in context:
+                return context[name]
+            raise EvidenceError(f"Placeholder {{{name}}} is not available for this command")
+
+        resolved.append(_PLACEHOLDER.sub(replace, part))
+    return resolved
+
+
+def _execute(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: dict[str, str],
+    stdout_path: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    """Run one resolved command with no shell, bounded by ``timeout``, capturing to files."""
+    started = time.monotonic()
+    started_at = _utc()
+    timed_out = False
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    out_fd = os.open(stdout_path, flags, 0o600)
+    err_fd = os.open(stderr_path, flags, 0o600)
+    try:
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out_fd,
+                stderr=err_fd,
+                check=False,
+                timeout=timeout,
+                shell=False,
+            )
+            exit_status: int | None = completed.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            exit_status = None
+        except OSError as exc:
+            raise EvidenceError(f"Command could not start: {argv[0]} ({exc.strerror})") from exc
+    finally:
+        os.close(out_fd)
+        os.close(err_fd)
+    return {
+        "argv": argv,
+        "cwd": str(cwd),
+        "started_at": started_at,
+        "finished_at": _utc(),
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "exit_status": exit_status,
+        "timed_out": timed_out,
+    }
+
+
+def _junit_passed_cases(junit_path: Path) -> list[dict[str, str]]:
+    """Every testcase in a JUnit report that passed outright (no failure/error/skip)."""
+    try:
+        size = junit_path.stat().st_size
+    except FileNotFoundError as exc:
+        raise EvidenceError("The suite did not produce its JUnit report") from exc
+    if size == 0 or size > _MAX_JUNIT_BYTES:
+        raise EvidenceError("The suite's JUnit report is empty or oversized")
+    try:
+        root = ElementTree.parse(junit_path).getroot()
+    except ElementTree.ParseError as exc:
+        raise EvidenceError("The suite's JUnit report is not well-formed XML") from exc
+    passed: list[dict[str, str]] = []
+    for case in root.iter("testcase"):
+        if any(child.tag in {"failure", "error", "skipped"} for child in case):
+            continue
+        passed.append(
+            {
+                "classname": case.get("classname", ""),
+                "name": case.get("name", ""),
+                "file": case.get("file", ""),
+            }
+        )
+    return passed
+
+
+def _selector_matches(selector: str, suite_root: str, case: dict[str, str]) -> bool:
+    """Does one passed JUnit testcase satisfy one contract selector?
+
+    pytest (xunit1): ``file`` is the module path relative to its rootdir (the suite's
+    working directory); ``name`` carries any parametrization in brackets. vitest:
+    ``classname`` is the file path relative to the project; ``name`` is the full title
+    joined by " > ". Selectors are project-relative ``path::node``.
+    """
+    path_text, node = selector.split("::", 1)
+    root = suite_root.rstrip("/")
+    relative = path_text[len(root) + 1 :] if root != "." and path_text.startswith(f"{root}/") else path_text
+    name = case["name"]
+    if case["file"]:
+        if case["file"] != relative:
+            return False
+        parts = node.split("::")
+        test_name = parts[-1]
+        if len(parts) > 1 and not case["classname"].endswith("." + ".".join(parts[:-1])):
+            return False
+        return name == test_name or name.startswith(f"{test_name}[")
+    # vitest shape
+    if case["classname"] != relative:
+        return False
+    return name == node or name.endswith(f" > {node}")
+
+
+def _verify_selectors(
+    selectors: list[str],
+    suite: dict[str, Any],
+    passed_cases: list[dict[str, str]],
+    exit_ok: bool,
+) -> tuple[list[str], list[str]]:
+    """Split mapped selectors into verified and unverified."""
+    verified: list[str] = []
+    unverified: list[str] = []
+    for selector in selectors:
+        if selector in suite.get("check_ids", []):
+            (verified if exit_ok else unverified).append(selector)
+            continue
+        if any(_selector_matches(selector, str(suite["working_directory"]), case) for case in passed_cases):
+            verified.append(selector)
+        else:
+            unverified.append(selector)
+    return verified, unverified
+
+
+def _artifact_tree(root: Path, label: str) -> dict[str, Any]:
+    """One bounded digest over every regular file a command left under ``root``."""
+    root = root.resolve()
+    rows: list[dict[str, Any]] = []
+    total = 0
+    for path in sorted(p for p in root.rglob("*")):
+        if path.is_symlink():
+            raise EvidenceError(f"Artifact tree {label} contains a symlink: {path.name}")
+        if not path.is_file():
+            continue
+        if len(rows) >= _MAX_ARTIFACT_FILES:
+            raise EvidenceError(f"Artifact tree {label} exceeds {_MAX_ARTIFACT_FILES} files")
+        sha256, size = _secure_artifact_digest(path)
+        total += size
+        if total > _MAX_ARTIFACT_BYTES:
+            raise EvidenceError(f"Artifact tree {label} exceeds the 1 GiB bound")
+        rows.append({"path": path.relative_to(root).as_posix(), "sha256": sha256, "bytes": size})
+    return {"label": label, "type": "tree", "sha256": _digest(rows), "bytes": total, "files": len(rows)}
+
+
+def _artifact_file(path: Path, label: str) -> dict[str, Any]:
+    sha256, size = _secure_artifact_digest(path)
+    return {"label": label, "type": "file", "sha256": sha256, "bytes": size}
+
+
+def _load_provenance(path: Path, *, run: dict[str, Any], region: str) -> dict[str, Any]:
+    """Validate the provenance a live scenario emitted and bind it to this run.
+
+    The scenario -- not the operator -- names the account, Region, stack, and deployed
+    commit it observed. Those must match the run's bound account, the scenario's
+    Region, and the candidate commit/tree, or the receipt cannot credit anything.
+    """
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError as exc:
+        raise EvidenceError("The live scenario did not emit its provenance artifact") from exc
+    if size == 0 or size > 64 * 1024:
+        raise EvidenceError("The live scenario's provenance artifact is empty or oversized")
+    document = _read_json(path)
+    keys = set(document)
+    if not _PROVENANCE_REQUIRED_KEYS <= keys or not keys <= _PROVENANCE_REQUIRED_KEYS | _PROVENANCE_OPTIONAL_KEYS:
+        raise EvidenceError(
+            "Provenance must carry account_id, region, stack_id, deployed_commit, deployed_project_tree"
+        )
+    for key, value in document.items():
+        if not isinstance(value, str) or not value or len(value) > 500 or _TOKEN_VALUE.search(value):
+            raise EvidenceError(f"Provenance field {key} is not a bounded plain string")
+    bound_account = run.get("account_id")
+    if bound_account is None:
+        raise EvidenceError("This run is not bound to an AWS account; start it with --account-id before live scenarios")
+    if document["account_id"] != bound_account:
+        raise EvidenceError("Provenance names a different AWS account than this run is bound to")
+    if document["region"] != region:
+        raise EvidenceError("Provenance names a different Region than the scenario was run for")
+    if (
+        not _SAFE_GIT_OBJECT.fullmatch(document["deployed_commit"])
+        or document["deployed_commit"] != run["source"]["commit"]
+    ):
+        raise EvidenceError(
+            "The deployed build is not the candidate commit; redeploy the exact candidate before recording"
+        )
+    if document["deployed_project_tree"] != run["source"]["project_tree"]:
+        raise EvidenceError("The deployed build's project tree is not the candidate tree")
+    if not _SAFE_NAME.fullmatch(document["stack_id"].lower()) and not re.fullmatch(
+        r"arn:aws:cloudformation:[a-z0-9-]+:\d{12}:stack/[A-Za-z0-9-]+/[0-9a-f-]+", document["stack_id"]
+    ):
+        raise EvidenceError("Provenance stack_id is neither a safe name nor a CloudFormation stack ARN")
+    for digest_key in ("archive_sha256", "artifact_manifest_sha256"):
+        if digest_key in document and not _SAFE_SHA256.fullmatch(document[digest_key]):
+            raise EvidenceError(f"Provenance {digest_key} is not a SHA-256 digest")
+    return document
 
 
 def _contract_fingerprint(path: Path, value: dict[str, Any]) -> dict[str, Any]:
@@ -489,9 +1013,22 @@ def _contract_fingerprint(path: Path, value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _root_workflow_fingerprint() -> dict[str, Any]:
+    repo = Path(_git(PROJECT_ROOT, "rev-parse", "--show-toplevel")).resolve()
+    path = repo / ROOT_WORKFLOW_RELATIVE
+    try:
+        sha256, size = _secure_artifact_digest(path)
+    except EvidenceError as exc:
+        raise EvidenceError(f"Repository CI workflow is missing or unsafe: {ROOT_WORKFLOW_RELATIVE}") from exc
+    return {"path": ROOT_WORKFLOW_RELATIVE, "sha256": sha256, "bytes": size}
+
+
 def _load_contract_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    legacy_regions_path = REGIONS_PATH.with_name("emea-agentcore-regions.json")
+    if legacy_regions_path.exists() or legacy_regions_path.is_symlink():
+        raise EvidenceError("Legacy EMEA Region matrix must be removed; agentcore-regions.json is authoritative")
     controls = _load_contract(CONTROLS_PATH)
-    regions = _load_contract(REGIONS_PATH)
+    regions = _load_contract(REGIONS_PATH, expected_schema_version=_REGION_MATRIX_SCHEMA_VERSION)
     traceability = _load_contract(TRACEABILITY_PATH)
     _validate_contracts(controls, regions)
     _validate_traceability(controls, traceability)
@@ -499,8 +1036,22 @@ def _load_contract_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, A
         "controls": _contract_fingerprint(CONTROLS_PATH, controls),
         "regions": _contract_fingerprint(REGIONS_PATH, regions),
         "traceability": _contract_fingerprint(TRACEABILITY_PATH, traceability),
+        "root_workflow": _root_workflow_fingerprint(),
     }
     return controls, regions, traceability, fingerprints
+
+
+def _runner_identity() -> dict[str, Any]:
+    """What produced the receipt: this script by digest, plus interpreter and platform."""
+    sha256, size = _secure_artifact_digest(Path(__file__).resolve())
+    return {
+        "tool": "release_evidence.py",
+        "version": RECORDER_VERSION,
+        "sha256": sha256,
+        "bytes": size,
+        "python": platform.python_version(),
+        "platform": f"{platform.system()}-{platform.machine()}".lower(),
+    }
 
 
 def _check_self_digest(document: dict[str, Any], field: str, description: str) -> None:
@@ -564,8 +1115,20 @@ def _run_lock(run_dir: Path, *, exclusive: bool):
 def _load_run(run_dir: Path) -> dict[str, Any]:
     run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
     run = _read_json(run_dir / "run.json")
-    if run.get("schema_version") != 1:
+    if run.get("schema_version") != RUN_SCHEMA_VERSION:
         raise EvidenceError("Unsupported evidence run schema")
+    expected_fields = {
+        "schema_version",
+        "run_id",
+        "created_at",
+        "source",
+        "contracts",
+        "account_id",
+        "runner",
+        "run_digest",
+    }
+    if set(run) != expected_fields:
+        raise EvidenceError("Evidence run document has an invalid schema")
     _require_timestamp(run.get("created_at"), "Evidence run")
     run_id = run.get("run_id")
     if not isinstance(run_id, str) or not _SAFE_NAME.fullmatch(run_id):
@@ -576,12 +1139,26 @@ def _load_run(run_dir: Path) -> dict[str, Any]:
     source = run.get("source")
     if not isinstance(source, dict):
         raise EvidenceError("Evidence run has no source identity")
-    for field in ("project_rel", "commit", "project_tree"):
+    for field in ("project_rel", "commit", "project_tree", "root_workflow", "root_workflow_blob"):
         if not isinstance(source.get(field), str) or not source[field]:
             raise EvidenceError(f"Evidence run source lacks {field}")
+    if source["root_workflow"] != ROOT_WORKFLOW_RELATIVE or not _SAFE_GIT_OBJECT.fullmatch(
+        source["root_workflow_blob"]
+    ):
+        raise EvidenceError("Evidence run is not bound to the repository CI workflow")
     contracts = run.get("contracts")
-    if not isinstance(contracts, dict) or set(contracts) != {"controls", "regions", "traceability"}:
+    if not isinstance(contracts, dict) or set(contracts) != {"controls", "regions", "traceability", "root_workflow"}:
         raise EvidenceError("Evidence run contract fingerprints are incomplete")
+    account_id = run.get("account_id")
+    if account_id is not None and (not isinstance(account_id, str) or not _SAFE_ACCOUNT_ID.fullmatch(account_id)):
+        raise EvidenceError("Evidence run account binding is not a 12-digit AWS account ID")
+    runner = run.get("runner")
+    if (
+        not isinstance(runner, dict)
+        or runner.get("tool") != "release_evidence.py"
+        or not _SAFE_SHA256.fullmatch(str(runner.get("sha256", "")))
+    ):
+        raise EvidenceError("Evidence run does not record a valid runner identity")
     return run
 
 
@@ -596,10 +1173,17 @@ def _require_run_context(
     return run, controls, regions, traceability
 
 
-def start_run(output_root: Path = DEFAULT_OUTPUT_ROOT, run_id: str | None = None) -> Path:
+def start_run(
+    output_root: Path = DEFAULT_OUTPUT_ROOT,
+    run_id: str | None = None,
+    *,
+    account_id: str | None = None,
+) -> Path:
     identity = _source_identity()
     if not identity["clean"]:
-        raise EvidenceError("Project tree is dirty; commit it before starting evidence")
+        raise EvidenceError("Project tree or repository CI workflow is dirty; commit it before starting evidence")
+    if account_id is not None and not _SAFE_ACCOUNT_ID.fullmatch(account_id):
+        raise EvidenceError("--account-id must be a 12-digit AWS account ID")
     _, _, _, fingerprints = _load_contract_bundle()
     if run_id is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -618,13 +1202,18 @@ def start_run(output_root: Path = DEFAULT_OUTPUT_ROOT, run_id: str | None = None
         raise EvidenceError(f"Evidence run already exists: {run_id}") from exc
     _create_lock_file(run_dir / ".lock")
     (run_dir / "events").mkdir(mode=0o700)
+    (run_dir / "artifacts").mkdir(mode=0o700)
 
     run: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run_id,
         "created_at": _utc(),
         "source": _public_source(identity),
         "contracts": fingerprints,
+        # One run, one AWS account. Every live receipt's provenance must name this account,
+        # so evidence from two accounts can never be stitched into one certification.
+        "account_id": account_id,
+        "runner": _runner_identity(),
     }
     run["run_digest"] = _digest(run)
     _write_new(run_dir / "run.json", run)
@@ -728,28 +1317,386 @@ def _secure_artifact_digest(path: Path) -> tuple[str, int]:
         os.close(fd)
 
 
-def _artifact_records(artifacts: dict[str, Path] | None) -> list[dict[str, Any]]:
-    if len(artifacts or {}) > 32:
-        raise EvidenceError("At most 32 evidence artifacts are accepted")
-    records: list[dict[str, Any]] = []
-    for label, path in sorted((artifacts or {}).items()):
-        if not _SAFE_NAME.fullmatch(label):
-            raise EvidenceError(f"Unsafe artifact label: {label}")
-        sha256, size = _secure_artifact_digest(path)
-        records.append({"label": label, "sha256": sha256, "bytes": size})
-    return records
+def _new_event_id() -> str:
+    return f"event-{uuid.uuid4().hex}"
 
 
-def _validate_event_document(
-    event: dict[str, Any],
-    filename: str,
+def _write_event(
+    run_dir: Path,
     run: dict[str, Any],
-    control_map: dict[str, dict[str, Any]],
-    region_map: dict[str, dict[str, Any]],
-    controls: dict[str, Any],
-    traceability: dict[str, Any],
-) -> None:
-    expected_fields = {
+    *,
+    event_id: str,
+    control_id: str,
+    kind: str,
+    region: str | None,
+    account_id: str | None,
+    suite_id: str | None,
+    scenario_id: str | None,
+    details: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+    receipt: dict[str, Any],
+    supersedes: str | None,
+) -> dict[str, Any]:
+    needs_provenance = kind in _REGION_REQUIRED_KINDS
+    event: dict[str, Any] = {
+        "schema_version": EVENT_SCHEMA_VERSION,
+        "event_id": event_id,
+        "recorded_at": _utc(),
+        "control_id": control_id,
+        "kind": kind,
+        "status": _derived_status(receipt, artifacts, needs_provenance=needs_provenance),
+        "region": region,
+        "account_id": account_id,
+        "suite_id": suite_id,
+        "scenario_id": scenario_id,
+        "details": details,
+        "artifacts": artifacts,
+        "receipt": receipt,
+        "supersedes": supersedes,
+        "source_commit": run["source"]["commit"],
+        "project_tree": run["source"]["project_tree"],
+        "root_workflow_blob": run["source"]["root_workflow_blob"],
+        "run_digest": run["run_digest"],
+    }
+    event["event_digest"] = _digest(event)
+    _write_new(run_dir / "events" / f"{event_id}.json", event)
+    return event
+
+
+def _active_match(
+    events: list[dict[str, Any]],
+    superseded: set[str],
+    *,
+    control_id: str,
+    kind: str,
+    region: str | None,
+    account_id: str | None,
+    suite_id: str | None,
+    scenario_id: str | None,
+) -> str | None:
+    """The active event this new one replaces, if the same scope was recorded before."""
+    for event in events:
+        if event["event_id"] in superseded:
+            continue
+        if (
+            event["control_id"],
+            event["kind"],
+            event["region"],
+            event["account_id"],
+            event["suite_id"],
+            event["scenario_id"],
+        ) == (control_id, kind, region, account_id, suite_id, scenario_id):
+            return event["event_id"]
+    return None
+
+
+def _prepare_execution(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
+    if (run_dir / "final.json").exists():
+        raise EvidenceError("Finalized evidence runs are immutable")
+    run, controls, regions, traceability = _require_run_context(run_dir)
+    if _runner_identity() != run["runner"]:
+        raise EvidenceError("The recorder is not the one that started this run")
+    return run, controls, regions, traceability
+
+
+def _run_suite_unlocked(
+    run_dir: Path,
+    *,
+    suite_id: str,
+    tools: dict[str, str],
+    details: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Execute one offline suite and record one receipt-backed event per mapped (control, kind).
+
+    Credit is per mapped selector: every selector the traceability maps to this suite must
+    appear as a passed testcase in the JUnit report the suite wrote (or, for a command suite,
+    be one of its check_ids with every command exiting 0). Anything else records a fail.
+    """
+    run, controls, regions, traceability = _prepare_execution(run_dir)
+    suite_map, trace_map = _validate_traceability(controls, traceability)
+    suite = suite_map.get(suite_id)
+    if suite is None:
+        raise EvidenceError(f"Unknown release suite: {suite_id}")
+    clean_details = _validate_details(details or {})
+    event_id = _new_event_id()
+    artifact_dir = run_dir / "artifacts" / event_id
+    artifact_dir.mkdir(mode=0o700)
+    cwd = (PROJECT_ROOT / str(suite["working_directory"])).resolve()
+    if not cwd.is_dir():
+        raise EvidenceError(f"Release suite {suite_id} working_directory does not exist")
+
+    placeholders = {name for command in suite["commands"] for part in command for name in _PLACEHOLDER.findall(part)}
+    required_tools = dict(suite.get("required_tools", {}))
+    # A pinned tool the operator supplied explicitly is resolved and digested even when no
+    # command placeholder names it, so its version is checked against THAT executable.
+    pinned = {name.replace("-", "_") for name in required_tools} & set(tools) & _TOOL_PLACEHOLDERS
+    tool_records = _resolve_tools(tools, (placeholders & _TOOL_PLACEHOLDERS) | pinned)
+    tool_versions = _verify_required_tools(required_tools, tool_records, cwd)
+    environment_names = list(suite.get("required_environment", []))
+    env = _child_environment(environment_names)
+    junit_path = artifact_dir / "junit.xml"
+    context = {
+        "artifact_dir": str(artifact_dir / "output"),
+        "junit_xml": str(junit_path),
+        "run_dir": str(run_dir.resolve()),
+    }
+    (artifact_dir / "output").mkdir(mode=0o700)
+
+    command_records: list[dict[str, Any]] = []
+    for index, command in enumerate(suite["commands"]):
+        argv = _substitute(command, tool_records, context)
+        record = _execute(
+            argv,
+            cwd=cwd,
+            timeout=int(suite["timeout_seconds"]),
+            env=env,
+            stdout_path=artifact_dir / f"stdout-{index}.log",
+            stderr_path=artifact_dir / f"stderr-{index}.log",
+        )
+        command_records.append(record)
+        if record["timed_out"] or record["exit_status"] != 0:
+            break  # a failed command is recorded; later commands are not pretended to have run
+
+    exit_ok = all(not r["timed_out"] and r["exit_status"] == 0 for r in command_records) and len(
+        command_records
+    ) == len(suite["commands"])
+    passed_cases: list[dict[str, str]] = []
+    if suite["selector_type"] in {"pytest", "javascript"} and junit_path.exists():
+        passed_cases = _junit_passed_cases(junit_path)
+
+    # Every file artifact is addressed as artifacts/<event_id>/<label>; the label IS the filename,
+    # so a later load re-digests exactly the file the receipt names.
+    artifacts: list[dict[str, Any]] = []
+    for index in range(len(command_records)):
+        for stream in ("stdout", "stderr"):
+            artifacts.append(_artifact_file(artifact_dir / f"{stream}-{index}.log", f"{stream}-{index}.log"))
+    if junit_path.exists():
+        artifacts.append(_artifact_file(junit_path, "junit.xml"))
+    output_tree = _artifact_tree(artifact_dir / "output", "output")
+    if output_tree["files"]:
+        artifacts.append(output_tree)
+    else:
+        shutil.rmtree(artifact_dir / "output")
+
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
+    written: list[dict[str, Any]] = []
+    first = True
+    for control_id, traced in sorted(trace_map.items()):
+        for kind, requirements in traced["evidence"].items():
+            if not kind.startswith("offline_"):
+                continue
+            selectors = sorted({req["selector"] for req in requirements if req["suite"] == suite_id})
+            if not selectors:
+                continue
+            verified, unverified = _verify_selectors(selectors, suite, passed_cases, exit_ok)
+            this_event_id = event_id if first else _new_event_id()
+            if not first:
+                # One execution, several (control, kind) events: each carries its own byte-identical
+                # copy of the artifacts so every event re-verifies from disk independently.
+                shutil.copytree(artifact_dir, run_dir / "artifacts" / this_event_id, symlinks=False)
+            receipt = {
+                "receipt_id": this_event_id,
+                "runner": run["runner"],
+                "tools": tool_records,
+                "tool_versions": tool_versions,
+                "environment_names": environment_names,
+                "commands": command_records,
+                "selectors_verified": verified,
+                "selectors_unverified": unverified,
+                "provenance": None,
+            }
+            supersedes = _active_match(
+                events,
+                superseded,
+                control_id=control_id,
+                kind=kind,
+                region=None,
+                account_id=None,
+                suite_id=suite_id,
+                scenario_id=None,
+            )
+            written.append(
+                _write_event(
+                    run_dir,
+                    run,
+                    event_id=this_event_id,
+                    control_id=control_id,
+                    kind=kind,
+                    region=None,
+                    account_id=None,
+                    suite_id=suite_id,
+                    scenario_id=None,
+                    details=clean_details,
+                    artifacts=artifacts,
+                    receipt=receipt,
+                    supersedes=supersedes,
+                )
+            )
+            first = False
+    if first:
+        shutil.rmtree(artifact_dir)
+        raise EvidenceError(f"Release suite {suite_id} is not mapped by any control; nothing to record")
+    return written
+
+
+def _run_scenario_unlocked(
+    run_dir: Path,
+    *,
+    scenario_id: str,
+    region: str | None,
+    tools: dict[str, str],
+    details: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Execute one scenario and record one receipt-backed event per mapped (control, kind).
+
+    Live kinds require the run to be bound to an account and the scenario to emit a
+    provenance artifact naming that account, this Region, and the candidate commit/tree.
+    """
+    run, controls, regions, traceability = _prepare_execution(run_dir)
+    _, trace_map = _validate_traceability(controls, traceability)
+    scenario_map = _validate_scenarios(traceability)
+    control_map, region_map = _validate_contracts(controls, regions)
+    scenario = scenario_map.get(scenario_id)
+    if scenario is None:
+        raise EvidenceError(f"Unknown scenario: {scenario_id}")
+    mapped = [
+        (control_id, kind)
+        for control_id, traced in sorted(trace_map.items())
+        for kind, requirements in traced["evidence"].items()
+        if not kind.startswith("offline_") and scenario_id in requirements
+    ]
+    if not mapped:
+        raise EvidenceError(f"Scenario {scenario_id} is not mapped by any control; nothing to record")
+    kinds = {kind for _, kind in mapped}
+    regional = any(kind in _REGION_REQUIRED_KINDS for kind in kinds)
+    if regional and not all(kind in _REGION_REQUIRED_KINDS for kind in kinds):
+        raise EvidenceError(f"Scenario {scenario_id} is mapped to both regional and non-regional kinds")
+    account_id = run.get("account_id") if regional else None
+    if regional:
+        if region is None or not _SAFE_REGION.fullmatch(region) or region == "local":
+            raise EvidenceError(f"Scenario {scenario_id} requires --region")
+        if account_id is None:
+            raise EvidenceError(
+                "This run is not bound to an AWS account; start it with --account-id before live scenarios"
+            )
+        for control_id, kind in mapped:
+            _validate_event_scope(control_id, kind, region, account_id, control_map, region_map)
+    elif region is not None:
+        raise EvidenceError(f"Scenario {scenario_id} is offline and cannot take --region")
+
+    clean_details = _validate_details(details or {})
+    event_id = _new_event_id()
+    artifact_dir = run_dir / "artifacts" / event_id
+    artifact_dir.mkdir(mode=0o700)
+    (artifact_dir / "output").mkdir(mode=0o700)
+    cwd = (PROJECT_ROOT / str(scenario["working_directory"])).resolve()
+    if not cwd.is_dir():
+        raise EvidenceError(f"Scenario {scenario_id} working_directory does not exist")
+    placeholders = {name for part in scenario["command"] for name in _PLACEHOLDER.findall(part)}
+    tool_records = _resolve_tools(tools, placeholders & _TOOL_PLACEHOLDERS)
+    context = {
+        "artifact_dir": str(artifact_dir / "output"),
+        "run_dir": str(run_dir.resolve()),
+        "scenario_id": scenario_id,
+    }
+    if regional:
+        context["region"] = str(region)
+        context["account_id"] = str(account_id)
+    argv = _substitute(scenario["command"], tool_records, context)
+    record = _execute(
+        argv,
+        cwd=cwd,
+        timeout=int(scenario["timeout_seconds"]),
+        env=_child_environment([]),
+        stdout_path=artifact_dir / "stdout-0.log",
+        stderr_path=artifact_dir / "stderr-0.log",
+    )
+
+    artifacts = [
+        _artifact_file(artifact_dir / "stdout-0.log", "stdout-0.log"),
+        _artifact_file(artifact_dir / "stderr-0.log", "stderr-0.log"),
+    ]
+    output_dir = artifact_dir / "output"
+    provenance: dict[str, Any] | None = None
+    missing_labels: list[str] = []
+    exit_ok = not record["timed_out"] and record["exit_status"] == 0
+    for label in scenario["required_artifacts"]:
+        candidate = output_dir / label
+        if candidate.is_symlink():
+            raise EvidenceError(f"Scenario {scenario_id} emitted {label} as a symlink")
+        if candidate.is_file() or candidate.is_dir():
+            # Promote the promised artifact to its canonical path artifacts/<event_id>/<label>.
+            canonical = artifact_dir / label
+            os.rename(candidate, canonical)
+            artifacts.append(
+                _artifact_file(canonical, label) if canonical.is_file() else _artifact_tree(canonical, label)
+            )
+        else:
+            missing_labels.append(label)
+    remaining = _artifact_tree(output_dir, "output")
+    if remaining["files"]:
+        artifacts.append(remaining)
+    else:
+        shutil.rmtree(output_dir)
+    if exit_ok and scenario["provenance"] and _PROVENANCE_LABEL not in missing_labels:
+        provenance = _load_provenance(artifact_dir / _PROVENANCE_LABEL, run=run, region=str(region))
+    if exit_ok and missing_labels:
+        # The command claimed success without leaving the evidence it promised: not a pass.
+        record = {**record, "exit_status": 1}
+        clean_details = {**clean_details, "missing_required_artifacts": ",".join(missing_labels)[:500]}
+
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
+    written: list[dict[str, Any]] = []
+    first = True
+    for control_id, kind in mapped:
+        this_event_id = event_id if first else _new_event_id()
+        if not first:
+            shutil.copytree(artifact_dir, run_dir / "artifacts" / this_event_id, symlinks=False)
+        receipt = {
+            "receipt_id": this_event_id,
+            "runner": run["runner"],
+            "tools": tool_records,
+            "tool_versions": {},
+            "environment_names": [],
+            "commands": [record],
+            "selectors_verified": [],
+            "selectors_unverified": [],
+            "provenance": provenance,
+        }
+        supersedes = _active_match(
+            events,
+            superseded,
+            control_id=control_id,
+            kind=kind,
+            region=region if regional else None,
+            account_id=account_id,
+            suite_id=None,
+            scenario_id=scenario_id,
+        )
+        written.append(
+            _write_event(
+                run_dir,
+                run,
+                event_id=this_event_id,
+                control_id=control_id,
+                kind=kind,
+                region=region if regional else None,
+                account_id=account_id,
+                suite_id=None,
+                scenario_id=scenario_id,
+                details=clean_details,
+                artifacts=artifacts,
+                receipt=receipt,
+                supersedes=supersedes,
+            )
+        )
+        first = False
+    return written
+
+
+_EVENT_FIELDS = frozenset(
+    {
         "schema_version",
         "event_id",
         "recorded_at",
@@ -762,13 +1709,63 @@ def _validate_event_document(
         "scenario_id",
         "details",
         "artifacts",
+        "receipt",
         "supersedes",
         "source_commit",
         "project_tree",
+        "root_workflow_blob",
         "run_digest",
         "event_digest",
     }
-    if set(event) != expected_fields or event.get("schema_version") != 1:
+)
+_RECEIPT_FIELDS = frozenset(
+    {
+        "receipt_id",
+        "runner",
+        "tools",
+        "tool_versions",
+        "environment_names",
+        "commands",
+        "selectors_verified",
+        "selectors_unverified",
+        "provenance",
+    }
+)
+_COMMAND_RECORD_FIELDS = frozenset(
+    {"argv", "cwd", "started_at", "finished_at", "duration_seconds", "exit_status", "timed_out"}
+)
+
+
+def _derived_status(receipt: dict[str, Any], artifacts: list[dict[str, Any]], *, needs_provenance: bool) -> str:
+    """The ONLY way an event's status is computed, at write time and again at every load."""
+    commands = receipt["commands"]
+    if any(command["timed_out"] for command in commands):
+        return "fail"
+    statuses = [command["exit_status"] for command in commands]
+    if any(status == BLOCKED_EXIT_STATUS for status in statuses):
+        return "blocked"
+    if any(status != 0 for status in statuses):
+        return "fail"
+    if not artifacts:
+        return "fail"
+    if receipt["selectors_unverified"]:
+        return "fail"
+    if needs_provenance and receipt["provenance"] is None:
+        return "fail"
+    return "pass"
+
+
+def _validate_event_document(
+    event: dict[str, Any],
+    filename: str,
+    run: dict[str, Any],
+    run_dir: Path,
+    control_map: dict[str, dict[str, Any]],
+    region_map: dict[str, dict[str, Any]],
+    controls: dict[str, Any],
+    traceability: dict[str, Any],
+) -> None:
+    if set(event) != _EVENT_FIELDS or event.get("schema_version") != EVENT_SCHEMA_VERSION:
         raise EvidenceError(f"Evidence event {filename} has an invalid schema")
     event_id = event.get("event_id")
     if not isinstance(event_id, str) or not _SAFE_NAME.fullmatch(event_id):
@@ -786,45 +1783,110 @@ def _validate_event_document(
     scenario_id = event.get("scenario_id")
     if not isinstance(control_id, str) or not isinstance(kind, str):
         raise EvidenceError(f"Evidence event {event_id} has an invalid scope")
-    if region is not None and not isinstance(region, str):
-        raise EvidenceError(f"Evidence event {event_id} has an invalid Region")
-    if account_id is not None and not isinstance(account_id, str):
-        raise EvidenceError(f"Evidence event {event_id} has an invalid AWS account ID")
-    if suite_id is not None and not isinstance(suite_id, str):
-        raise EvidenceError(f"Evidence event {event_id} has an invalid suite_id")
-    if scenario_id is not None and not isinstance(scenario_id, str):
-        raise EvidenceError(f"Evidence event {event_id} has an invalid scenario_id")
+    for label, value in (
+        ("Region", region),
+        ("AWS account ID", account_id),
+        ("suite_id", suite_id),
+        ("scenario_id", scenario_id),
+    ):
+        if value is not None and not isinstance(value, str):
+            raise EvidenceError(f"Evidence event {event_id} has an invalid {label}")
     _validate_event_scope(control_id, kind, region, account_id, control_map, region_map)
     _validate_event_reference(control_id, kind, suite_id, scenario_id, controls, traceability)
     if event.get("status") not in _STATUS_VALUES:
         raise EvidenceError(f"Evidence event {event_id} has an invalid status")
+    if account_id is not None and account_id != run.get("account_id"):
+        raise EvidenceError(f"Evidence event {event_id} names an AWS account this run is not bound to")
 
     details = event.get("details")
     if not isinstance(details, dict) or _validate_details(details) != details:
         raise EvidenceError(f"Evidence event {event_id} has unsafe details")
+
+    # Artifacts live INSIDE the run and are re-digested from disk on every load.
     artifacts = event.get("artifacts")
     if not isinstance(artifacts, list) or len(artifacts) > 32:
         raise EvidenceError(f"Evidence event {event_id} has invalid artifacts")
+    artifact_dir = run_dir / "artifacts" / event_id
+    if artifacts and (artifact_dir.is_symlink() or not artifact_dir.is_dir()):
+        raise EvidenceError(f"Evidence event {event_id} artifacts directory is missing")
     labels: set[str] = set()
     for artifact in artifacts:
-        if not isinstance(artifact, dict) or set(artifact) != {"label", "sha256", "bytes"}:
+        if not isinstance(artifact, dict) or not {"label", "type", "sha256", "bytes"} <= set(artifact):
             raise EvidenceError(f"Evidence event {event_id} has an invalid artifact")
         label = artifact.get("label")
-        sha256 = artifact.get("sha256")
-        size = artifact.get("bytes")
-        if (
-            not isinstance(label, str)
-            or not _SAFE_NAME.fullmatch(label)
-            or label in labels
-            or not isinstance(sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-            or not isinstance(size, int)
-            or isinstance(size, bool)
-            or size < 0
-            or size > 1024 * 1024 * 1024
-        ):
-            raise EvidenceError(f"Evidence event {event_id} has an invalid artifact record")
+        if not isinstance(label, str) or not _SAFE_NAME.fullmatch(label) or label in labels:
+            raise EvidenceError(f"Evidence event {event_id} has an invalid artifact label")
         labels.add(label)
+        if artifact["type"] == "file":
+            if set(artifact) != {"label", "type", "sha256", "bytes"}:
+                raise EvidenceError(f"Evidence event {event_id} artifact {label} has extra fields")
+            actual = _artifact_file(artifact_dir / label, label)
+        elif artifact["type"] == "tree":
+            if set(artifact) != {"label", "type", "sha256", "bytes", "files"}:
+                raise EvidenceError(f"Evidence event {event_id} artifact {label} has extra fields")
+            actual = _artifact_tree(artifact_dir / label, label)
+        else:
+            raise EvidenceError(f"Evidence event {event_id} artifact {label} has an unknown type")
+        if actual != artifact:
+            raise EvidenceError(f"Evidence event {event_id} artifact {label} no longer matches its recorded digest")
+
+    receipt = event.get("receipt")
+    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
+        raise EvidenceError(f"Evidence event {event_id} has no complete execution receipt")
+    if not isinstance(receipt["receipt_id"], str) or receipt["receipt_id"] != event_id:
+        raise EvidenceError(f"Evidence event {event_id} receipt is not its own")
+    runner = receipt["runner"]
+    if runner != run["runner"]:
+        raise EvidenceError(f"Evidence event {event_id} was not produced by this run's recorder")
+    tools = receipt["tools"]
+    if not isinstance(tools, dict) or any(
+        name not in _TOOL_PLACEHOLDERS
+        or not isinstance(record, dict)
+        or set(record) != {"path", "sha256", "bytes"}
+        or not _SAFE_SHA256.fullmatch(str(record["sha256"]))
+        for name, record in tools.items()
+    ):
+        raise EvidenceError(f"Evidence event {event_id} records invalid tool identities")
+    if not isinstance(receipt["tool_versions"], dict) or not isinstance(receipt["environment_names"], list):
+        raise EvidenceError(f"Evidence event {event_id} has an invalid receipt")
+    commands = receipt["commands"]
+    if not isinstance(commands, list) or not commands or len(commands) > 32:
+        raise EvidenceError(f"Evidence event {event_id} receipt has no commands")
+    for command in commands:
+        if not isinstance(command, dict) or set(command) != _COMMAND_RECORD_FIELDS:
+            raise EvidenceError(f"Evidence event {event_id} receipt has an invalid command record")
+        if (
+            not isinstance(command["argv"], list)
+            or not command["argv"]
+            or not all(isinstance(p, str) for p in command["argv"])
+        ):
+            raise EvidenceError(f"Evidence event {event_id} receipt has an invalid argv")
+        if not isinstance(command["timed_out"], bool) or (
+            command["exit_status"] is not None
+            and (not isinstance(command["exit_status"], int) or isinstance(command["exit_status"], bool))
+        ):
+            raise EvidenceError(f"Evidence event {event_id} receipt has an invalid exit record")
+        _require_timestamp(command["started_at"], f"Evidence event {event_id} command")
+        _require_timestamp(command["finished_at"], f"Evidence event {event_id} command")
+    for key in ("selectors_verified", "selectors_unverified"):
+        if not isinstance(receipt[key], list) or any(not isinstance(item, str) for item in receipt[key]):
+            raise EvidenceError(f"Evidence event {event_id} receipt has invalid {key}")
+    provenance = receipt["provenance"]
+    needs_provenance = kind in _REGION_REQUIRED_KINDS
+    if provenance is not None:
+        if not isinstance(provenance, dict) or not needs_provenance:
+            raise EvidenceError(f"Evidence event {event_id} carries provenance it cannot have")
+        if provenance.get("account_id") != account_id or provenance.get("region") != region:
+            raise EvidenceError(f"Evidence event {event_id} provenance does not match its scope")
+        if (
+            provenance.get("deployed_commit") != run["source"]["commit"]
+            or provenance.get("deployed_project_tree") != run["source"]["project_tree"]
+        ):
+            raise EvidenceError(f"Evidence event {event_id} provenance names a build that is not the candidate")
+
+    # Re-derive the status from the facts; a stored label never wins.
+    if event["status"] != _derived_status(receipt, artifacts, needs_provenance=needs_provenance):
+        raise EvidenceError(f"Evidence event {event_id} status does not follow from its receipt")
 
     supersedes = event.get("supersedes")
     if supersedes is not None and (not isinstance(supersedes, str) or not _SAFE_NAME.fullmatch(supersedes)):
@@ -832,6 +1894,7 @@ def _validate_event_document(
     if (
         event.get("source_commit") != run["source"]["commit"]
         or event.get("project_tree") != run["source"]["project_tree"]
+        or event.get("root_workflow_blob") != run["source"]["root_workflow_blob"]
         or event.get("run_digest") != run["run_digest"]
     ):
         raise EvidenceError(f"Evidence event {event_id} is not bound to this run")
@@ -856,6 +1919,7 @@ def _load_events(
             event,
             path.name,
             run,
+            run_dir,
             control_map,
             region_map,
             controls,
@@ -896,82 +1960,8 @@ def _load_events(
     return events, superseded
 
 
-def _record_event_unlocked(
-    run_dir: Path,
-    *,
-    control_id: str,
-    kind: str,
-    status: str,
-    region: str | None = None,
-    account_id: str | None = None,
-    suite_id: str | None = None,
-    scenario_id: str | None = None,
-    details: dict[str, Any] | None = None,
-    artifacts: dict[str, Path] | None = None,
-    supersedes: str | None = None,
-) -> dict[str, Any]:
-    run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
-    if (run_dir / "final.json").exists():
-        raise EvidenceError("Finalized evidence runs are immutable")
-    run, controls, regions, traceability = _require_run_context(run_dir)
-    control_map, region_map = _validate_contracts(controls, regions)
-    if status not in _STATUS_VALUES:
-        raise EvidenceError(f"Evidence status must be one of: {', '.join(sorted(_STATUS_VALUES))}")
-    _validate_event_scope(control_id, kind, region, account_id, control_map, region_map)
-    _validate_event_reference(control_id, kind, suite_id, scenario_id, controls, traceability)
-    clean_details = _validate_details(details or {})
-    artifact_records = _artifact_records(artifacts)
-
-    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
-    by_id = {event["event_id"]: event for event in events}
-    if supersedes is not None:
-        target = by_id.get(supersedes)
-        if target is None:
-            raise EvidenceError(f"Cannot supersede unknown event: {supersedes}")
-        if supersedes in superseded:
-            raise EvidenceError(f"Cannot supersede inactive event: {supersedes}")
-        if (
-            target["control_id"],
-            target["kind"],
-            target["region"],
-            target["account_id"],
-            target["suite_id"],
-            target["scenario_id"],
-        ) != (
-            control_id,
-            kind,
-            region,
-            account_id,
-            suite_id,
-            scenario_id,
-        ):
-            raise EvidenceError("A superseding event must keep control, kind, Region, AWS account, suite, and scenario")
-
-    event: dict[str, Any] = {
-        "schema_version": 1,
-        "event_id": f"event-{uuid.uuid4().hex}",
-        "recorded_at": _utc(),
-        "control_id": control_id,
-        "kind": kind,
-        "status": status,
-        "region": region,
-        "account_id": account_id,
-        "suite_id": suite_id,
-        "scenario_id": scenario_id,
-        "details": clean_details,
-        "artifacts": artifact_records,
-        "supersedes": supersedes,
-        "source_commit": run["source"]["commit"],
-        "project_tree": run["source"]["project_tree"],
-        "run_digest": run["run_digest"],
-    }
-    event["event_digest"] = _digest(event)
-    _write_new(run_dir / "events" / f"{event['event_id']}.json", event)
-    return event
-
-
 def _validate_run_entries(run_dir: Path, *, finalized: bool) -> None:
-    allowed = {".lock", "run.json", "events"}
+    allowed = {".lock", "run.json", "events", "artifacts"}
     if finalized:
         allowed.add("final.json")
     actual = {path.name for path in run_dir.iterdir()}
@@ -993,8 +1983,23 @@ def _coverage_report(
     control_map, region_map = _validate_contracts(controls, regions)
     _, trace_map = _validate_traceability(controls, traceability)
     active = [event for event in events if event["event_id"] not in superseded]
+    # ``status == "pass"`` is trustworthy here only because _validate_event_document re-derived
+    # it from the receipt (exit statuses, artifacts on disk, verified selectors, provenance)
+    # before the event was admitted into ``events``. A label alone never reaches this list.
     passing = [event for event in active if event["status"] == "pass"]
     missing: list[dict[str, Any]] = []
+
+    # One run, one account, one deployed build: every live receipt must agree.
+    live_accounts = {event["account_id"] for event in active if event["kind"] in _REGION_REQUIRED_KINDS}
+    if len(live_accounts) > 1:
+        raise EvidenceError(f"Live evidence names more than one AWS account: {sorted(live_accounts)}")
+    deployed = {
+        (event["receipt"]["provenance"]["deployed_commit"], event["receipt"]["provenance"]["deployed_project_tree"])
+        for event in passing
+        if event["receipt"].get("provenance")
+    }
+    if len(deployed) > 1:
+        raise EvidenceError("Live evidence names more than one deployed build")
 
     def has_pass(
         control_id: str,
@@ -1128,9 +2133,10 @@ def _status_run_unlocked(run_dir: Path) -> dict[str, Any]:
     run, controls, regions, traceability = _require_run_context(run_dir)
     events, superseded = _load_events(run_dir, run, controls, regions, traceability)
     return {
-        "schema_version": 1,
+        "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run["run_id"],
         "source": run["source"],
+        "account_id": run["account_id"],
         "finalized": finalized,
         "event_set_digest": _event_set_digest(events),
         "coverage": _coverage_report(controls, regions, traceability, events, superseded),
@@ -1151,12 +2157,14 @@ def _finalize_run_unlocked(run_dir: Path) -> dict[str, Any]:
             f"({len(coverage['missing'])} missing, {len(coverage['open_events'])} open failures)"
         )
     final: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": RUN_SCHEMA_VERSION,
         "run_id": run["run_id"],
         "finalized_at": _utc(),
         "status": "pass",
         "source": run["source"],
         "contracts": run["contracts"],
+        "account_id": run["account_id"],
+        "runner": run["runner"],
         "run_digest": run["run_digest"],
         "event_set_digest": _event_set_digest(events),
         "coverage": coverage,
@@ -1181,12 +2189,14 @@ def _verify_run_unlocked(run_dir: Path) -> dict[str, Any]:
         "status",
         "source",
         "contracts",
+        "account_id",
+        "runner",
         "run_digest",
         "event_set_digest",
         "coverage",
         "final_digest",
     }
-    if set(final) != expected_fields or final.get("schema_version") != 1:
+    if set(final) != expected_fields or final.get("schema_version") != RUN_SCHEMA_VERSION:
         raise EvidenceError("Final evidence document has an invalid schema")
     _require_timestamp(final.get("finalized_at"), "Final evidence document")
     _check_self_digest(final, "final_digest", "Final evidence document")
@@ -1196,6 +2206,8 @@ def _verify_run_unlocked(run_dir: Path) -> dict[str, Any]:
         "status": "pass",
         "source": run["source"],
         "contracts": run["contracts"],
+        "account_id": run["account_id"],
+        "runner": run["runner"],
         "run_digest": run["run_digest"],
         "event_set_digest": _event_set_digest(events),
         "coverage": coverage,
@@ -1208,10 +2220,16 @@ def _verify_run_unlocked(run_dir: Path) -> dict[str, Any]:
     return final
 
 
-def record_event(run_dir: Path, **kwargs: Any) -> dict[str, Any]:
+def run_suite(run_dir: Path, **kwargs: Any) -> list[dict[str, Any]]:
     run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
     with _run_lock(run_dir, exclusive=True):
-        return _record_event_unlocked(run_dir, **kwargs)
+        return _run_suite_unlocked(run_dir, **kwargs)
+
+
+def run_scenario(run_dir: Path, **kwargs: Any) -> list[dict[str, Any]]:
+    run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
+    with _run_lock(run_dir, exclusive=True):
+        return _run_scenario_unlocked(run_dir, **kwargs)
 
 
 def status_run(run_dir: Path) -> dict[str, Any]:
@@ -1245,17 +2263,19 @@ def _parse_detail(raw: str) -> tuple[str, Any]:
     return key, value
 
 
-def _parse_assignments(values: list[str], *, artifacts: bool = False) -> dict[str, Any]:
+def _parse_assignments(values: list[str], *, tools: bool = False) -> dict[str, Any]:
     parsed: dict[str, Any] = {}
     for raw in values:
         if "=" not in raw:
-            noun = "artifacts" if artifacts else "details"
+            noun = "tools" if tools else "details"
             raise EvidenceError(f"Evidence {noun} must use key=value")
         key, raw_value = raw.split("=", 1)
         if key in parsed:
             raise EvidenceError(f"Duplicate evidence field: {key}")
-        if artifacts:
-            parsed[key] = Path(raw_value)
+        if tools:
+            if key not in _TOOL_PLACEHOLDERS:
+                raise EvidenceError(f"Unknown tool placeholder: {key}")
+            parsed[key] = raw_value
         else:
             parsed_key, parsed_value = _parse_detail(raw)
             parsed[parsed_key] = parsed_value
@@ -1263,25 +2283,31 @@ def _parse_assignments(values: list[str], *, artifacts: bool = False) -> dict[st
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Record and verify exact-commit production-readiness evidence")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Execute the release contract's suites and scenarios and record receipt-backed, "
+            "exact-commit production-readiness evidence. There is no way to assert a pass."
+        )
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start = subparsers.add_parser("start", help="Start a clean exact-commit evidence run")
     start.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     start.add_argument("--run-id")
+    start.add_argument("--account-id", help="The one AWS account every live receipt must name")
 
-    record = subparsers.add_parser("record", help="Append one bounded evidence event")
-    record.add_argument("--run-dir", type=Path, required=True)
-    record.add_argument("--control", required=True)
-    record.add_argument("--kind", required=True)
-    record.add_argument("--status", choices=sorted(_STATUS_VALUES), required=True)
-    record.add_argument("--region")
-    record.add_argument("--account-id")
-    record.add_argument("--suite-id")
-    record.add_argument("--scenario-id")
-    record.add_argument("--detail", action="append", default=[])
-    record.add_argument("--artifact", action="append", default=[])
-    record.add_argument("--supersedes")
+    suite = subparsers.add_parser("run-suite", help="Execute one offline suite and record its receipts")
+    suite.add_argument("--run-dir", type=Path, required=True)
+    suite.add_argument("--suite-id", required=True)
+    suite.add_argument("--tool", action="append", default=[], help="placeholder=/absolute/executable")
+    suite.add_argument("--detail", action="append", default=[])
+
+    scenario = subparsers.add_parser("run-scenario", help="Execute one scenario and record its receipts")
+    scenario.add_argument("--run-dir", type=Path, required=True)
+    scenario.add_argument("--scenario-id", required=True)
+    scenario.add_argument("--region")
+    scenario.add_argument("--tool", action="append", default=[], help="placeholder=/absolute/executable")
+    scenario.add_argument("--detail", action="append", default=[])
 
     for command in ("status", "finalize", "verify"):
         child = subparsers.add_parser(command)
@@ -1294,22 +2320,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "start":
-            run_dir = start_run(args.output_root, args.run_id)
+            run_dir = start_run(args.output_root, args.run_id, account_id=args.account_id)
             result: dict[str, Any] = {"run_dir": str(run_dir.resolve())}
-        elif args.command == "record":
-            result = record_event(
+        elif args.command == "run-suite":
+            events = run_suite(
                 args.run_dir,
-                control_id=args.control,
-                kind=args.kind,
-                status=args.status,
-                region=args.region,
-                account_id=args.account_id,
                 suite_id=args.suite_id,
-                scenario_id=args.scenario_id,
+                tools=_parse_assignments(args.tool, tools=True),
                 details=_parse_assignments(args.detail),
-                artifacts=_parse_assignments(args.artifact, artifacts=True),
-                supersedes=args.supersedes,
             )
+            result = {"events": [{k: e[k] for k in ("event_id", "control_id", "kind", "status")} for e in events]}
+        elif args.command == "run-scenario":
+            events = run_scenario(
+                args.run_dir,
+                scenario_id=args.scenario_id,
+                region=args.region,
+                tools=_parse_assignments(args.tool, tools=True),
+                details=_parse_assignments(args.detail),
+            )
+            result = {
+                "events": [{k: e[k] for k in ("event_id", "control_id", "kind", "region", "status")} for e in events]
+            }
         elif args.command == "status":
             result = status_run(args.run_dir)
         elif args.command == "finalize":

@@ -273,7 +273,12 @@ def test_the_presigned_url_is_only_ever_returned(sources, route):
 
 
 _URL_ANCHOR = 'url = _stage_export_bundle(\n                owner_hash, "python-export", deployment_name, zip_bytes, f"{deployment_name}-python.zip"\n            )\n'
-_URL_RETURN = 'return {"download_url": url, "filename": f"{deployment_name}-python.zip"}\n'
+_URL_RETURN = """return {
+                "download_url": url,
+                "filename": f"{deployment_name}-python.zip",
+                **integrity,
+            }
+"""
 
 
 def _mutate_export_route(text: str, *, rename: str | None = None, extra: str = "", ret: str | None = None) -> str:
@@ -375,8 +380,12 @@ S3_CALL_INVENTORY = {
         (1, "the stager: presigns a read of the key it just wrote for this caller; the response disposition names the "
             "download after the reported filename (a browser saves a cross-origin download under the object's name)"),
     ('deployment_handler.py', '_stage_export_bundle', 'put_object',
-     'Bucket=bucket, Key=key, Body=body, Tagging=urllib.parse.urlencode(tags)'):
-        (1, "the stager: writes under the CALLER's own hash prefix with a fresh 128-bit suffix"),
+     "Bucket=bucket, Key=key, Body=body, Tagging=urllib.parse.urlencode(tags), "
+     "Metadata={'archive-sha256': str(integrity['archive_sha256']), 'archive-bytes': "
+     "str(integrity['archive_bytes']), 'artifact-manifest-sha256': "
+     "str(integrity['artifact_manifest_sha256'])}, ChecksumSHA256=_export_s3_checksum(body)"):
+        (1, "the stager: writes under the CALLER's own hash prefix with a fresh 128-bit suffix and binds the exact "
+            "bytes to S3's SHA-256 checksum plus non-secret digest/size metadata"),
     ('services/cfn_provider/handler.py', '_delete_every_version', 'delete_object',
      'Bucket=bucket, Key=key, VersionId=version_id, **owner'):
         (1, _CUSTOMER),

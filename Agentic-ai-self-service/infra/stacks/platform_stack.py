@@ -296,6 +296,7 @@ class PlatformStack(cdk.Stack):
             self,
             cfg,
             bucket=self.bucket,
+            artifacts_bucket=self.artifacts_bucket,
             api=self.api,
             web_acl=self.web_acl,
             logging_bucket=self.logging_bucket,

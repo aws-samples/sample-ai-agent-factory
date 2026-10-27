@@ -119,6 +119,7 @@ def add_region(
     The optional fields only preserve readability of legacy rows. Admin registration
     always supplies all three; live deployment resolution rejects an incomplete row.
     """
+    _require_release_region(region, surface="a deployment target")
     if bool(account_id) != bool(artifact_bucket):
         raise TargetError("A region target must store both account_id and artifact_bucket")
     if evaluation_kms_key_arn and not account_id:
@@ -344,6 +345,16 @@ def list_accounts() -> list[dict]:
 
 class TargetError(ValueError):
     """Raised when a requested deploy target is invalid / disabled / unreachable."""
+
+
+def _require_release_region(region: str, *, surface: str) -> str:
+    """The shared release-Region predicate, surfaced as this module's TargetError."""
+    from app.services.region_capabilities import UnsupportedReleaseRegionError, require_release_region
+
+    try:
+        return require_release_region(region, surface=surface)
+    except UnsupportedReleaseRegionError as exc:
+        raise TargetError(str(exc)) from exc
 
 
 def _role_name_from_arn(role_arn: str) -> str:
@@ -640,16 +651,20 @@ def resolve_region(requested: str | None) -> str:
     """Return the region to deploy to, enforcing the allowlist when targeting.
 
     No requested region → home region (unchanged). A requested region is only
-    honored when targets are enabled AND it's on the admin allowlist.
+    honored when targets are enabled AND it's on the admin allowlist. Either way
+    the result must be a selected release Region: the admin allowlist is a
+    narrowing of the envelope, never a widening of it, so a row registered before
+    the envelope was enforced (or a platform stack stood up outside it) is refused
+    here rather than deployed to.
     """
     home = _region()
     if not requested or requested == home:
-        return home
+        return _require_release_region(home, surface="the platform home Region")
     if not targets_enabled():
         raise TargetError("Deployment targets are disabled; cannot target another region")
     if requested not in list_regions():
         raise TargetError(f"Region '{requested}' is not on the deployment allowlist")
-    return requested
+    return _require_release_region(requested, surface="this deployment target")
 
 
 def session_for_target(

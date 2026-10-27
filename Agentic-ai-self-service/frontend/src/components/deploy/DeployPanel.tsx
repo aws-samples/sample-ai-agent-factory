@@ -59,6 +59,7 @@ import { ChatInterface } from './ChatInterface';
 import { McpToolsPanel } from './McpToolsPanel';
 import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 import { runtimeConfigForRequest } from '../../utils/runtimeRequestConfig';
+import { downloadArtifact } from '../../utils/downloadArtifact';
 
 const PYTHON_EXPORT_GOVERNANCE_MESSAGE =
   'Standalone Python export contains no AWS resources, so tags and tag profiles cannot be applied. Clear the governance settings, or use the CloudFormation export or platform deploy instead.';
@@ -467,25 +468,7 @@ export function DeployPanel({
         throw new Error(await responseDetail(response, `Python export failed (${response.status})`));
       }
       const result = await response.json();
-      if (result.download_url) {
-        const a = document.createElement('a');
-        a.href = result.download_url;
-        a.download = result.filename || 'agent-python.zip';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      } else if (result.zip_base64) {
-        const bytes = Uint8Array.from(atob(result.zip_base64), c => c.charCodeAt(0));
-        const blob = new Blob([bytes], { type: 'application/zip' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = result.filename || 'agent-python.zip';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
+      await downloadArtifact(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Python export failed';
       setExportError({ kind: 'python', message });
@@ -544,25 +527,7 @@ export function DeployPanel({
         throw new Error(await responseDetail(response, `Template generation failed (${response.status})`));
       }
       const result = await response.json();
-      if (result.download_url) {
-        const a = document.createElement('a');
-        a.href = result.download_url;
-        a.download = result.filename || 'agentcore-cfn.zip';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      } else if (result.zip_base64) {
-        const bytes = Uint8Array.from(atob(result.zip_base64), c => c.charCodeAt(0));
-        const blob = new Blob([bytes], { type: 'application/zip' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = result.filename || 'agentcore-cfn.zip';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
+      await downloadArtifact(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Template generation failed';
       setExportError({ kind: 'cfn', message });

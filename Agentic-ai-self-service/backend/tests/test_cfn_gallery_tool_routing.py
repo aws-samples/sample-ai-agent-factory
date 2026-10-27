@@ -26,6 +26,7 @@ from app.services.cfn_template_generator import (
     CfnTemplateGenerator,
 )
 from app.services.deployment import generate_mcp_server_code
+from app.services.region_capabilities import MANAGED_WEB_SEARCH_SUPPORTED_REGIONS
 
 from tests.integration import test_template_deployments as matrix
 
@@ -174,11 +175,11 @@ def _assert_managed_search_contract(template: dict[str, Any]) -> None:
     assert "AmazonWebSearch___WebSearch" in actions
     assert "AmazonWebSearch" not in unknowable
     region_rule = template["Rules"]["ManagedWebSearchRegion"]["Assertions"][0]
-    assert set(region_rule["Assert"]["Fn::Contains"][0]) == {
-        "us-east-1",
-        "eu-west-1",
-        "ap-northeast-1",
-    }
+    expected_regions = set(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS)
+    assert set(region_rule["Assert"]["Fn::Contains"][0]) == expected_regions
+    assert region_rule["AssertDescription"] == (
+        "AgentCore Web Search is available only in " + ", ".join(sorted(expected_regions)) + "."
+    )
 
 
 def test_exported_search_template_uses_the_managed_connector_with_exact_iam_and_cedar() -> None:

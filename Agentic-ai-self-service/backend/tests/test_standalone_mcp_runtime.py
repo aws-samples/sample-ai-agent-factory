@@ -11,7 +11,10 @@ from unittest import mock
 import pytest
 import yaml
 from app.models.deployment_models import DeploymentState, DeployRequest, RuntimeConfig
-from app.services.cfn_template_generator import CfnTemplateGenerator
+from app.services.cfn_template_generator import (
+    CfnTemplateGenerator,
+    _content_addressed_bundle_key,
+)
 from app.services.code_generator import CodeGenerationUnsupportedError, generate_agent_code
 from app.services.runtime_artifact import (
     BASE_BUNDLE_KEY,
@@ -251,7 +254,9 @@ def test_standalone_cfn_runtime_is_model_free_and_uses_the_mcp_bundle():
     bundle = _cfn_bundle()
     template = yaml.safe_load(bundle.template_yaml)
 
-    assert template["Parameters"]["DependencyBundleKey"]["Default"] == MCP_LEAN_BUNDLE_KEY
+    assert template["Parameters"]["DependencyBundleKey"]["Default"] == _content_addressed_bundle_key(
+        MCP_LEAN_BUNDLE_KEY
+    )
     assert "ModelId" not in template["Parameters"]
 
     runtimes = [
@@ -298,8 +303,8 @@ def test_gateway_target_export_keeps_client_and_mcp_server_bundle_authority_sepa
     parameters = template["Parameters"]
     resources = template["Resources"]
 
-    assert parameters["DependencyBundleKey"]["Default"] == STRANDS_BUNDLE_KEY
-    assert parameters["McpServerDependencyBundleKey"]["Default"] == MCP_LEAN_BUNDLE_KEY
+    assert parameters["DependencyBundleKey"]["Default"] == _content_addressed_bundle_key(STRANDS_BUNDLE_KEY)
+    assert parameters["McpServerDependencyBundleKey"]["Default"] == _content_addressed_bundle_key(MCP_LEAN_BUNDLE_KEY)
     assert resources["AgentCodePackage"]["Properties"]["DependencyBundleKey"] == {"Ref": "DependencyBundleKey"}
     assert resources["McpServerCodePackage"]["Properties"]["DependencyBundleKey"] == {
         "Ref": "McpServerDependencyBundleKey"
@@ -315,7 +320,8 @@ def test_gateway_target_export_keeps_client_and_mcp_server_bundle_authority_sepa
     assert "strands-agents" in _installed_packages(bundle.build_bundle_sh)
     assert "strands-agents" not in _installed_packages(bundle.build_mcp_bundle_sh)
     assert _installed_packages(bundle.build_mcp_bundle_sh) == ["bedrock-agentcore", "boto3", "mcp<2"]
-    assert 'bundle_digest_in_bucket "$MCP_BUNDLE_KEY"' in bundle.deploy_sh
+    assert bundle.deploy_sh.count("stage_reviewed_bundle") >= 3
+    assert '"$MCP_BUNDLE_DIGEST" "MCP-server"' in bundle.deploy_sh
     assert 'PARAM_OVERRIDES+=("McpServerDependencyBundleKey=$MCP_BUNDLE_KEY")' in (bundle.deploy_sh)
     assert 'PARAM_OVERRIDES+=("McpServerDependencyBundleDigest=$MCP_BUNDLE_DIGEST")' in bundle.deploy_sh
 
@@ -323,19 +329,22 @@ def test_gateway_target_export_keeps_client_and_mcp_server_bundle_authority_sepa
 def test_gateway_target_export_documents_both_retained_dependency_bundles():
     bundle = _gateway_mcp_cfn_bundle()
 
+    parameters = yaml.safe_load(bundle.template_yaml)["Parameters"]
+    main_key = parameters["DependencyBundleKey"]["Default"]
+    mcp_key = parameters["McpServerDependencyBundleKey"]["Default"]
     for token in (
         "build-dependency-bundle.sh",
         "build-mcp-server-bundle.sh",
         "DependencyBundleKey",
         "McpServerDependencyBundleKey",
         "McpServerDependencyBundleDigest",
-        STRANDS_BUNDLE_KEY,
-        MCP_LEAN_BUNDLE_KEY,
+        main_key,
+        mcp_key,
     ):
         assert token in bundle.readme
 
-    assert STRANDS_BUNDLE_KEY in bundle.teardown_sh
-    assert MCP_LEAN_BUNDLE_KEY in bundle.teardown_sh
+    assert main_key in bundle.teardown_sh
+    assert mcp_key in bundle.teardown_sh
 
 
 @pytest.mark.parametrize(

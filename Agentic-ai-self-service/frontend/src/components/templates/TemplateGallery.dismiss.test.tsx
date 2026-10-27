@@ -215,8 +215,9 @@ describe('replacing an existing workflow', () => {
 
 
 describe('regional feature availability', () => {
-  it('keeps unsupported templates visible but disabled in Frankfurt', () => {
-    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+  it('keeps unsupported templates visible but disabled in Paris', () => {
+    // Paris lacks both managed Web Search and AWS Agent Registry; Frankfurt now has the registry.
+    vi.stubEnv('VITE_AWS_REGION', 'eu-west-3');
     const onSelectTemplate = vi.fn();
     render(
       <TemplateGallery
@@ -227,7 +228,7 @@ describe('regional feature availability', () => {
       />,
     );
 
-    expect(screen.getByRole('status')).toHaveTextContent('Europe (Frankfurt)');
+    expect(screen.getByRole('status')).toHaveTextContent('Europe (Paris)');
     expect(screen.getByRole('status')).toHaveTextContent('Web Search');
     expect(screen.getByRole('status')).toHaveTextContent('AWS Agent Registry');
     const unavailable = screen.getAllByRole('button', { name: 'Unavailable in this Region' });

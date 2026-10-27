@@ -5,6 +5,7 @@ deployment state persistence in DynamoDB, and the Deployment Lambda API surface.
 """
 
 import ipaddress
+import re
 import urllib.parse
 from datetime import datetime
 from enum import Enum
@@ -1052,6 +1053,22 @@ class DeployRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_release_region(self) -> "DeployRequest":
+        """Refuse an explicit target Region outside the selected release envelope.
+
+        Runs for every route and every deployment mode: a Harness or export request aimed
+        at an unselected Region is just as outside the envelope as a Runtime one. An
+        omitted ``targetRegion`` means the platform's home Region on the live route and
+        "account-neutral" on the export routes, so the omitted case is resolved by the
+        live handler, not here.
+        """
+        if self.target_region is not None:
+            from ..services.region_capabilities import require_release_region
+
+            require_release_region(self.target_region, surface="this deployment request")
+        return self
+
+    @model_validator(mode="after")
     def _check_managed_web_search_region(self) -> "DeployRequest":
         """Reject an explicit unsupported target Region before any AWS side effect."""
 
@@ -1152,6 +1169,167 @@ class DeployRequest(BaseModel):
             raise ValueError(template_refusal)
 
         return self
+
+
+class ExportReferenceValidationError(ValueError):
+    """A credential reference or endpoint cannot be serialized into an export."""
+
+
+def validate_export_references(request: "DeployRequest") -> None:
+    """Validate every credential-adjacent value an exporter can serialize.
+
+    Live deployment accepts a few write-only raw values because it stages them in
+    Secrets Manager before building the state-machine payload.  A downloadable
+    artifact has no such staging boundary, so exports use the stricter contract:
+    complete Secrets Manager ARNs in the producer-owned namespace, HTTPS endpoints
+    without userinfo, and no raw keys, bearer values, or arbitrary auth headers.
+    Messages deliberately name only the field and expected shape, never its value.
+    """
+
+    from app.services.gateway_deployer import secrets_manager_arn_location, validate_token_endpoint_shape
+
+    def _plain(value: object) -> object:
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="python", by_alias=True, exclude_none=True)
+        return value
+
+    def _present(value: object) -> bool:
+        return value not in (None, "", {}, [], ())
+
+    def _reject(path: str, message: str) -> None:
+        raise ExportReferenceValidationError(f"{path} {message}")
+
+    def _secret(path: str, value: object, namespace: str | None) -> None:
+        if not _present(value):
+            return
+        if not isinstance(value, str) or any(character.isspace() or ord(character) < 32 for character in value):
+            _reject(path, "must be a single-line complete Secrets Manager ARN")
+        if not value.startswith("arn:aws:secretsmanager:"):
+            _reject(path, "must be a commercial-partition Secrets Manager ARN")
+        try:
+            _account, _region, name = secrets_manager_arn_location(value)
+        except ValueError as exc:
+            raise ExportReferenceValidationError(
+                f"{path} must be a complete Secrets Manager ARN with a 12-digit account ID"
+            ) from exc
+        if namespace and not name.startswith(f"{namespace}/"):
+            _reject(path, f"must reference the {namespace}/ Secrets Manager namespace")
+
+    def _https(path: str, value: object, *, token_endpoint: bool = False) -> None:
+        if not _present(value):
+            return
+        if not isinstance(value, str) or any(character.isspace() or ord(character) < 32 for character in value):
+            _reject(path, "must be a single-line HTTPS URL")
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.username is not None or parsed.password is not None:
+            _reject(path, "must not contain URL userinfo")
+        try:
+            if token_endpoint:
+                validate_token_endpoint_shape(value, label=path)
+            else:
+                _validate_provider_base_url(value)
+        except ValueError as exc:
+            raise ExportReferenceValidationError(f"{path} must be a valid HTTPS URL") from exc
+
+    raw_names = {
+        "accesstoken",
+        "apikey",
+        "authorization",
+        "bearer",
+        "bearertoken",
+        "clientsecret",
+        "gatewayapikey",
+        "litellmapikey",
+        "providerapikey",
+        "secretvalue",
+        "token",
+    }
+
+    def _scan_raw(value: object, path: str) -> None:
+        value = _plain(value)
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}"
+                canonical = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if _present(child) and (canonical in raw_names or canonical == "extraheaders"):
+                    _reject(child_path, "contains raw credential material, which cannot be exported")
+                _scan_raw(child, child_path)
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                _scan_raw(child, f"{path}[{index}]")
+
+    def _walk_refs_and_urls(value: object, path: str) -> None:
+        value = _plain(value)
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}"
+                canonical = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if canonical in {
+                    "apikeyref",
+                    "clientsecretarn",
+                    "clientsecretref",
+                    "gatewayapikeysecretarn",
+                    "litellmapikeyref",
+                    "secretarn",
+                }:
+                    _secret(child_path, child, "agentcore-connector")
+                elif canonical in {"tokenendpoint", "cognitotokenendpoint", "oauthtokenendpoint"}:
+                    _https(child_path, child, token_endpoint=True)
+                elif canonical in {
+                    "discoveryurl",
+                    "gatewayurl",
+                    "litellmbaseurl",
+                    "mcpurl",
+                    "otlpendpoint",
+                    "specurl",
+                    "url",
+                }:
+                    _https(child_path, child)
+                _walk_refs_and_urls(child, child_path)
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                _walk_refs_and_urls(child, f"{path}[{index}]")
+
+    _secret("config.providerApiKeyRef", request.config.provider_api_key_ref, "agentcore-provider")
+    if request.config.observability is not None:
+        _secret(
+            "config.observability.authHeaderSecretArn",
+            request.config.observability.auth_header_secret_arn,
+            "agentcore-otel",
+        )
+        _https("config.observability.otlpEndpoint", request.config.observability.otlp_endpoint)
+    if request.observability_config:
+        _secret(
+            "observabilityConfig.authHeaderSecretArn",
+            request.observability_config.get("authHeaderSecretArn")
+            or request.observability_config.get("auth_header_secret_arn"),
+            "agentcore-otel",
+        )
+
+    blocks = (
+        ("gatewayConfig", request.gateway_config),
+        ("identityConfig", request.identity_config),
+        ("observabilityConfig", request.observability_config),
+        ("mcpServerConfig", request.mcp_server_config),
+        ("connectors", request.connectors),
+        ("externalMcpServers", request.external_mcp_servers),
+    )
+    for path, block in blocks:
+        if _present(block):
+            _scan_raw(block, path)
+            _walk_refs_and_urls(block, path)
+
+    # ``ConnectorConfig.secret_value`` is declared ``exclude=True`` so it never reaches a
+    # model_dump() -- which is exactly why the generic scan above cannot see it. The live
+    # deploy path mints it into Secrets Manager and drops it; an export has no such
+    # staging step, so a raw connector credential in the request is refused by name here
+    # before either generator runs. Checked as the typed attribute, not via serialization.
+    for index, connector in enumerate(request.connectors or []):
+        if _present(getattr(connector, "secret_value", None)):
+            _reject(
+                f"connectors[{index}].secretValue",
+                "contains raw credential material, which cannot be exported; supply secretArn instead",
+            )
 
 
 class DeployResponse(BaseModel):

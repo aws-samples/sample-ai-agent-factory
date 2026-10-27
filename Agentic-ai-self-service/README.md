@@ -27,7 +27,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share Gateway, Memory, connector, test, and teardown surfaces in development. Production admission requires the Runtime path because current Harness hooks cannot redact model output or retract a completed unsafe tool result.
 - **Real SaaS connectors** — Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec as Gateway targets with API-key or OAuth2 outbound auth; credentials live only in Secrets Manager.
 - **External browser delivery** — A versioned, dependency-free `AgentCoreClient` and `<agentcore-chat>` Web Component ship from CloudFront with TypeScript declarations. Hosts provide a request-local Cognito access-token callback; the client invokes only the owner-checked production alias, never retries POSTs, stores no token, and renders model output as inert text. See [Embeddable Chat](docs/EMBEDDABLE_CHAT.md).
-- **Template Gallery + CloudFormation Export** — Six one-click templates, plus a downloadable self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`, code artifacts, README) that an external recipient deploys with no access to the platform — `deploy.sh` builds and stages the dependency bundle itself. Five custom resource types, all served by the bundled provider code, cover what no pin-capable native `AWS::BedrockAgentCore::*` type does yet; managed Web Search uses a dedicated provider function so update rollback cannot restore older shared-provider code before deleting its target. Data-holding resources carry configurable `DeletionPolicy`/`UpdateReplacePolicy` (retained by default); a LiteLLM-provider gateway exports as a direct proxy connection whose virtual key is passed as a Secrets Manager ARN, never as a parameter value; and the stack wraps cleanly in Terraform's `aws_cloudformation_stack` via `template_url`. See [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
+- **Template Gallery + verified downloads** — Six one-click templates, an authenticated self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, dependency builders, code artifacts, and README), and an authenticated standalone Python/Docker project. Every response includes `archive_sha256` and `archive_bytes`; every archive contains canonical `artifact-manifest.json`, `SHA256SUMS`, and a standard-library `verify-artifact.py`. The CloudFormation bundle deploys without repository access and wraps in Terraform's `aws_cloudformation_stack` through `template_url`. The Python export carries exact direct requirements, the complete exact version lock, installed-closure checks, an immutable explicit Python image, and host-loopback-only Docker publication. See [Downloadable artifact integrity](#downloadable-artifact-integrity) and [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
 - **Shared-account-safe gallery defaults** — An untouched gallery Gateway name is paired server-side with the ownership-fenced Runtime name, while explicit custom Gateway names are preserved. Live tool-wiring checks use an isolated customer session per tool, accept only direct or syntactically valid Gateway-qualified receipt names with exact successful argument digests, and keep the Memory proof as a separate same-session customer-support journey.
 - **Read-after-write release control** — Runtime slot reads are strongly consistent, so a deployment reported as succeeded cannot transiently return `404` while its newly written staging pointer is still converging.
 - **AI generation** — Describe a tool or a whole agent in natural language; Claude on Bedrock generates a deployable Lambda tool or a validated canvas spec.
@@ -45,7 +45,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **AWS CLI** v2 — configured with credentials for the target account (`aws configure`)
 - **Node.js** 20+ (the version CI runs on)
 - **Python** 3.12+ (CI runs on 3.13)
-- **Any AWS region** — `us-east-1` is the default; see [Deploying to another region](#deploying-to-another-region) for the two things that differ elsewhere.
+- **Production Region** — one of `us-east-1`, `us-east-2`, `us-west-2`, `eu-central-1`, `eu-west-1`, `eu-west-2`, or `eu-west-3`; `us-east-1` is the default. See [Deploying to another region](#deploying-to-another-region) for profile differences and exclusions.
 
 No Docker installation required. CDK is invoked via `npx` (no global install needed).
 
@@ -98,14 +98,47 @@ clean-clone, strict synth, and live AgentCore invocation gates. In particular,
 `websockets==16.1.1` and `tenacity==9.1.2` are the shared versions accepted by the
 Strands baseline and `google-genai`; an incompatible update fails before CDK.
 
+## Downloadable artifact integrity
+
+Use **Download CloudFormation** or **Download Python** in the authenticated deploy panel, or call the corresponding authenticated API through the deployed CloudFront URL. A direct call to a local generator is a developer test, not release evidence for the customer download path. The API response binds the returned ZIP with `archive_sha256` and `archive_bytes`. Verify those response values before extraction.
+
+Every ZIP has one artifact root and three integrity files:
+
+| File | Contract |
+|---|---|
+| `artifact-manifest.json` | Canonical JSON inventory of every payload path, type, mode, byte count, and SHA-256 digest. |
+| `SHA256SUMS` | Sorted checksum list for payload files and the manifest. It does not recursively hash itself. |
+| `verify-artifact.py` | Standard-library verifier for archive or extracted-directory paths, ordering, modes, timestamps, links, extra/missing files, and digests. |
+
+Verify the archive before extraction, then verify the directory again from its root. Run the verifier with Python isolated mode (`-I`): the script sits inside the directory it is checking, and without `-I` Python would import an undeclared `hashlib.py` or `json.py` from that directory ahead of the standard library. The verifier refuses to run without it.
+
+```bash
+python3 -I verify-artifact.py --archive downloaded.zip --artifact-type cfn --extract verified-cfn
+cd verified-cfn/<artifact-root>
+python3 -I verify-artifact.py --directory . --artifact-type cfn
+```
+
+Use `--artifact-type python` for the standalone Python ZIP. Its `requirements.txt` contains exact direct versions constrained by the complete exact `requirements.lock`. `install-locked.sh` installs into a new environment, `python -m pip check` rejects missing or incompatible dependencies, and `verify-lock.py` rejects absent roots, version drift, and unexpected installed distributions. The lock does **not** hash distribution wheel bytes. Mirror the package index or add reviewed wheel hashes when byte-level distribution provenance is required.
+
+The Python Dockerfile uses the explicit immutable base `docker.io/library/python:3.13.13-slim@sha256:aa938a849bcb82dce8f49480f056ab82bf5c1c3ebc294f0430f37b6820e7f286`. `run-docker.sh` publishes only `127.0.0.1:8080:8080`; do not replace it with an all-interface publish unless that exposure is reviewed and protected. The generated `.github/workflows/`, `buildspec.yml`, and `ci/` examples verify integrity first. Python examples install, compile, smoke-start, and optionally build without pushing an image. CloudFormation examples run pinned cfn-lint and Checkov checks and remain inert until `ALLOW_DEPLOY=true` is set explicitly.
+
+The release contract covers the exact commit, archive bytes, dependency versions, seven selected candidate Region profiles, and named offline/live scenarios. It does not promise wheel-byte reproducibility, future package-index behavior, future AWS behavior, or defect-free operation. See [Deployment Internals](docs/DEPLOYMENT_INTERNALS.md#download-integrity-and-recipient-workflows) and [release evidence](release/README.md#downloadable-assets-control).
+
 To also export OTLP traces from every platform Lambda and deployed agent to a backend like Langfuse, see the platform-level OTEL deploy mode in [Observability](docs/OBSERVABILITY.md).
 
 ### Deploying to another region
 
-Set `AWS_REGION`. Everything is derived from it — Bedrock cross-region inference
-profiles, Lambda regions, the frontend's `VITE_AWS_REGION`, and the generated
-agent code. Two things genuinely differ outside `us-east-1`, both handled
-automatically:
+Set `AWS_REGION` to one of the seven selected release Regions; every other value is refused by `deploy.sh`, by the CDK app at synth, and by the deploy API. Production supports exactly one independently deployed AgentCore **Runtime** home Region from this set; Managed Harness and A2A are excluded from production even where AWS exposes them.
+
+| Profile | Regions | Managed Web Search | AWS Agent Registry | Built-in DynamoDB registry |
+|---|---|---:|---:|---:|
+| Full | `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1` | Yes | Yes | Yes |
+| Reduced | `eu-central-1`, `eu-west-2` | No | Yes | Yes |
+| Reduced | `eu-west-3` | No | No | Yes |
+
+US West (N. California), `us-west-1`, is explicitly excluded. Milan, Spain, Stockholm, and every unlisted Region are also outside this certification set. In a reduced Region, the UI and API disable unavailable features, exports fail closed if a saved workflow requests one, and the platform omits the corresponding IAM permissions. Region selection still drives Bedrock inference profiles, Lambda resources, `VITE_AWS_REGION`, generated code, account-global naming, and WAF placement automatically.
+
+The WAF placement differs as follows:
 
 | | `us-east-1` | Any other region |
 |---|---|---|
@@ -115,12 +148,7 @@ automatically:
 Because `us-east-1` keeps its unqualified names, adding a second region **does not
 rename or replace anything in an existing `us-east-1` deployment**.
 
-One region-specific caveat worth knowing before you pick a region: Bedrock's
-cross-region inference prefixes are `us.`, `eu.` and `apac.`, and the `apac.`
-family covers only the older Claude models. In APAC, current-generation models
-are published under *country* prefixes (`jp.` in `ap-northeast-1`, `au.` in
-`ap-southeast-2`) or as `global.`, so an APAC deployment may need its model ID set
-explicitly. `us-*` and `eu-*` regions need no such adjustment.
+Future Region-expansion work must account for Bedrock cross-Region inference prefixes: `us.`, `eu.`, and `apac.`. The `apac.` family covers only older Claude models; current APAC models may use country prefixes (`jp.` or `au.`) or `global.`. This is design guidance only: `deploy.sh` rejects every unselected Region until the matrix, feature gates, tests, and live certification are updated together.
 
 ## Workforce OBO invocation contract
 
@@ -467,23 +495,33 @@ evidence where applicable. The executable
 [`release/production-readiness-traceability.json`](release/production-readiness-traceability.json)
 plan pins each required kind to exact suite commands, committed test selectors, and
 named live scenarios; finalization requires every mapped suite/scenario. This includes
-tracked-file secret scanning, high-severity npm dependency audit, and the isolated
-cfn-lint/Checkov/Terraform/ShellCheck gate over customer-exported artifacts. The
-infrastructure nag gate reads each stack's CLI-consumed `additionalMetadataFile`
-directly rather than depending on import-order-sensitive jsii conversion through
-overlapping generated CDK schema distributions. The dated
-[`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
-retains AWS capability facts for seven EMEA AgentCore Regions and supports one
-home-Region deployment in Frankfurt (`eu-central-1`), Ireland (`eu-west-1`), London
-(`eu-west-2`), or Paris (`eu-west-3`). Ireland has the full feature profile. The
-other three explicitly exclude managed Web Search and AWS Agent Registry federation
-until AWS makes those services available there; the built-in DynamoDB registry remains
-supported. The generic Strands Gateway template remains core-only and deployable in all
-four release Regions; only the dedicated Web Search template or an explicit Web Search
-tool request needs the optional connector. When `targetRegion` is omitted, admission
-validates that request against the platform's effective home Region before persisting a
-deployment or creating a Guardrail; an omitted field never means “skip regional
-validation.” Every selected core profile requires independent live evidence.
+tracked-file secret scanning, high-severity npm dependency audit, and the exact
+customer-download suite over both authenticated export endpoints, the standalone Python
+exporter, CloudFormation export/deployability, staging/isolation, and workflow validation.
+That suite pins cfn-lint 1.57.0, Checkov 3.3.1, Terraform 1.14.6, ShellCheck 0.11.0,
+and actionlint 1.7.12. The infrastructure nag gate reads each stack's CLI-consumed
+`additionalMetadataFile` directly rather than depending on import-order-sensitive jsii
+conversion through overlapping generated CDK schema distributions.
+
+The schema-2 [`release/agentcore-regions.json`](release/agentcore-regions.json) matrix
+selects exactly seven production Runtime Regions: `us-east-1`, `us-east-2`, `us-west-2`,
+`eu-central-1`, `eu-west-1`, `eu-west-2`, and `eu-west-3`. The first three US Regions
+and Ireland use the full profile. Frankfurt and London omit managed Web Search but retain
+AWS Agent Registry federation; Paris omits both optional services. Every profile retains
+the built-in DynamoDB registry. N. California is explicitly excluded. Managed Harness
+and A2A remain outside production. The generic Strands Gateway template remains
+core-only and deployable throughout the selected set; only the dedicated Web Search
+template or an explicit Web Search tool request needs that optional connector. When
+`targetRegion` is omitted, admission validates the request against the effective home
+Region before persistence or Guardrail creation. An omitted field never skips regional
+validation.
+
+`regional.certified_core` requires a strict production synth and independent live core
+evidence in each selected Region. `delivery.downloadable_assets` additionally requires
+no-repository recipient tests, authenticated deployed API and CloudFront UI downloads,
+archive/manifest verification, CloudFormation deploy/invoke/update/rollback/teardown,
+standalone Python exact-lock install/compile/start/invoke, adversarial tamper and
+configuration denials, rollback, and direct-service zero-residual evidence.
 
 [`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
 Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps

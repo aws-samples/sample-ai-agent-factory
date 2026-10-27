@@ -19,7 +19,7 @@ from stacks.platform.config import AWS_AGENT_REGISTRY_SUPPORTED_REGIONS
 from stacks.platform_stack import PlatformStack
 
 HOME_REGION = "us-east-1"
-OTHER_REGION = "eu-central-1"
+OTHER_REGION = "eu-west-3"
 
 
 def _synth(region: str) -> dict:
@@ -280,7 +280,7 @@ class TestRegionThreading:
                 assert env["APP_AWS_REGION"] == OTHER_REGION
 
     def test_tool_generator_model_uses_the_regional_inference_prefix(self, other_template):
-        """A ``us.`` inference profile does not exist in eu-central-1 — the tool
+        """A ``us.`` inference profile does not exist in an EU Region — the tool
         generator would fail on every invoke."""
         models = {
             r["Properties"]["Environment"]["Variables"]["TOOL_GENERATOR_MODEL_ID"]
@@ -295,8 +295,10 @@ class TestRegionThreading:
         csp = rhp["Properties"]["ResponseHeadersPolicyConfig"]["SecurityHeadersConfig"]["ContentSecurityPolicy"][
             "ContentSecurityPolicy"
         ]
-        assert f"https://cognito-idp.{OTHER_REGION}.amazonaws.com" in csp
-        assert f"cognito-idp.{HOME_REGION}.amazonaws.com" not in csp
+        parts = csp["Fn::Join"][1] if isinstance(csp, dict) else [csp]
+        static_csp = "".join(part for part in parts if isinstance(part, str))
+        assert f"https://cognito-idp.{OTHER_REGION}.amazonaws.com" in static_csp
+        assert f"cognito-idp.{HOME_REGION}.amazonaws.com" not in static_csp
 
 
 # ---------------------------------------------------------------
@@ -324,8 +326,12 @@ class TestOptionalRegionalServicePermissions:
         assert AWS_AGENT_REGISTRY_SUPPORTED_REGIONS == {
             "ap-northeast-1",
             "ap-southeast-2",
+            "ca-central-1",
+            "eu-central-1",
             "eu-west-1",
+            "eu-west-2",
             "us-east-1",
+            "us-east-2",
             "us-west-2",
         }
 

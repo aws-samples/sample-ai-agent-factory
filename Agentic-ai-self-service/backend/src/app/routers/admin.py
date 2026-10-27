@@ -11,7 +11,7 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.services.auth import get_caller_sub
 from app.services.production_safety import is_production_like_environment
@@ -76,6 +76,15 @@ class RegionTargetRequest(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
     )
 
+    @field_validator("region")
+    @classmethod
+    def _release_region(cls, value: str) -> str:
+        # The admin allowlist narrows the release envelope; it cannot widen it. Refused
+        # here, before the route spends an STS/S3/KMS round trip validating the target.
+        from app.services.region_capabilities import require_release_region
+
+        return require_release_region(value, surface="a deployment target")
+
 
 class AccountTargetRequest(BaseModel):
     account_id: str = Field(pattern=r"^\d{12}$")
@@ -107,6 +116,13 @@ class AccountTargetRequest(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
     )
     region: str = Field(min_length=2, max_length=32, pattern=r"^[a-z]{2}-[a-z]+-\d$")
+
+    @field_validator("region")
+    @classmethod
+    def _release_region(cls, value: str) -> str:
+        from app.services.region_capabilities import require_release_region
+
+        return require_release_region(value, surface="a deployment target")
 
 
 @router.get("/deploy-targets", dependencies=[Depends(require_scopes("admin"))])

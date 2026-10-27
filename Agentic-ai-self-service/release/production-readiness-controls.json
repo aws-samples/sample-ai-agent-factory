@@ -85,7 +85,25 @@
       "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "teardown_zero"]
     },
     {
-      "id": "regional.emea_core",
+      "id": "delivery.downloadable_assets",
+      "description": "Authenticated deployed API and CloudFront UI downloads return deterministic, self-verifying CloudFormation and standalone Python archives that work in a clean recipient workspace and prove update, rollback, and zero-residual teardown behavior.",
+      "required_kinds": [
+        "offline_positive",
+        "offline_adversarial",
+        "offline_mutation",
+        "clean_clone",
+        "exact_commit",
+        "live_positive",
+        "live_adversarial",
+        "ui_cloudfront",
+        "rollback",
+        "teardown_zero"
+      ],
+      "required_region_kind": "live_region",
+      "region_selector": "production_release"
+    },
+    {
+      "id": "regional.certified_core",
       "description": "Core Runtime/Gateway/Identity/Policy/Evaluation behavior is independently verified in every Region selected for the bounded production release.",
       "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation"],
       "required_region_kind": "live_region",

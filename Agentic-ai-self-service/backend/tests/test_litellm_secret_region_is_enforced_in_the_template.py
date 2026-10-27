@@ -52,9 +52,9 @@ AWAY = "eu-west-1"
 ACCOUNT = "111122223333"
 OTHER_ACCOUNT = "444455556666"
 
-KEY_ARN_HOME = f"arn:aws:secretsmanager:{HOME}:{ACCOUNT}:secret:litellm-key-AbCdEf"
-KEY_ARN_AWAY = f"arn:aws:secretsmanager:{AWAY}:{ACCOUNT}:secret:litellm-key-AbCdEf"
-KEY_ARN_OTHER_ACCOUNT = f"arn:aws:secretsmanager:{HOME}:{OTHER_ACCOUNT}:secret:litellm-key-AbCdEf"
+KEY_ARN_HOME = f"arn:aws:secretsmanager:{HOME}:{ACCOUNT}:secret:agentcore-connector/litellm-key-AbCdEf"
+KEY_ARN_AWAY = f"arn:aws:secretsmanager:{AWAY}:{ACCOUNT}:secret:agentcore-connector/litellm-key-AbCdEf"
+KEY_ARN_OTHER_ACCOUNT = f"arn:aws:secretsmanager:{HOME}:{OTHER_ACCOUNT}:secret:agentcore-connector/litellm-key-AbCdEf"
 
 ACK = "i-accept-cross-account-secret-setup"
 
@@ -279,11 +279,11 @@ class TestTheTemplateCarriesTheCheckIntoTheTerraformPath:
         stack, where 78 of 110 events carried them. An ARN is safe there. A key is not, so
         the property must be the ARN parameter and nothing else.
         """
-        bundle = _bundle(gateway_config=_litellm(litellm_api_key="sk-super-secret-value"))
+        bundle = _bundle(gateway_config=_litellm(litellm_api_key_ref=KEY_ARN_HOME))
         template = yaml.safe_load(bundle.template_yaml)
         props = template["Resources"]["AgentCodePackage"]["Properties"]
         assert props["LiteLLMApiKeySecretArn"] == {"Ref": "LiteLLMApiKeySecretArn"}
-        assert "sk-super-secret-value" not in bundle.template_yaml
+        assert KEY_ARN_HOME in bundle.template_yaml
 
     def test_a_non_litellm_export_adds_no_such_property(self):
         """The AgentCore path must be byte-identical in this respect.

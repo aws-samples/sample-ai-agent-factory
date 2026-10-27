@@ -31,7 +31,10 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from mangum import Mangum
 
 import app.services._otel_platform  # noqa: F401
@@ -42,6 +45,7 @@ from app.models.deployment_models import (
     DeploymentStatusEnum,
     DeployRequest,
     DeployResponse,
+    ExportReferenceValidationError,
     ImportRuntimeRequest,
     TestRequest,
     TestResponse,
@@ -1066,6 +1070,23 @@ deployment_app = FastAPI(
     version="0.1.0",
 )
 
+
+@deployment_app.exception_handler(RequestValidationError)
+async def _redact_export_request_validation(request: Request, exc: RequestValidationError):
+    """Do not echo rejected export inputs that may contain credentials or userinfo."""
+    if request.url.path not in {"/api/generate-cfn-template", "/api/export-python"}:
+        return await request_validation_exception_handler(request, exc)
+    safe = [
+        {
+            "type": str(error.get("type") or "value_error"),
+            "loc": list(error.get("loc") or ("body",)),
+            "msg": "Invalid export request value",
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe})
+
+
 # SECURITY: Restrict allowed methods and headers instead of wildcard "*"
 deployment_app.add_middleware(
     CORSMiddleware,
@@ -1327,6 +1348,24 @@ def _reject_cfn_only_naming_profile(request: DeployRequest, operation: str) -> N
                 "bundle to control retention of the Knowledge Base, Cognito pools and Memory."
             ),
         )
+
+
+def _reject_unsupported_release_region(request: DeployRequest) -> None:
+    """Refuse a live deployment whose effective Region is outside the release envelope.
+
+    ``DeployRequest`` already refuses an EXPLICIT unselected ``targetRegion`` on every
+    route. The live route is the only one where an omitted value resolves to the
+    platform's home Region, and a platform stack that was stood up outside the envelope
+    (bypassing scripts/deploy.sh) must not quietly become a deployment Region. Resolved
+    and checked here, before any deployment/version row or AWS resource.
+    """
+    from app.services.region_capabilities import UnsupportedReleaseRegionError, require_release_region
+
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_release_region(effective_region, surface="this live deployment")
+    except UnsupportedReleaseRegionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _reject_unsupported_managed_web_search_region(request: DeployRequest) -> None:
@@ -1769,6 +1808,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_unowned_flow(request.flow_id, user_id)
 
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
+    _reject_unsupported_release_region(request)
     _reject_unsupported_managed_web_search_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)
@@ -7511,6 +7551,32 @@ def _export_owner_hash(raw_request: Request) -> str | None:
     return owner_sub_hash(caller_sub)
 
 
+def _export_integrity_fields(body: bytes) -> dict[str, str | int]:
+    """Public, secret-free integrity anchors for one exact response body."""
+    import hashlib
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        manifests = [name for name in archive.namelist() if name.endswith("/artifact-manifest.json")]
+        if len(manifests) != 1:
+            raise ValueError("The generated export has no unique artifact manifest")
+        manifest_sha256 = hashlib.sha256(archive.read(manifests[0])).hexdigest()
+    return {
+        "archive_sha256": hashlib.sha256(body).hexdigest(),
+        "archive_bytes": len(body),
+        "artifact_manifest_sha256": manifest_sha256,
+    }
+
+
+def _export_s3_checksum(body: bytes) -> str:
+    """S3 ChecksumSHA256 wire value for the same exact bytes."""
+    import base64
+    import hashlib
+
+    return base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+
+
 def _stage_export_bundle(owner_hash: str, artifact_type: str, name: str, body: bytes, download_name: str) -> str:
     """Put a download bundle under the caller's own prefix and return a 1-hour URL.
 
@@ -7530,7 +7596,19 @@ def _stage_export_bundle(owner_hash: str, artifact_type: str, name: str, body: b
     # suffix would replace another export's bundle under a live presigned URL.
     key = f"{EXPORT_BUNDLE_PREFIXES[artifact_type]}/{owner_hash}/{name}-{uuid.uuid4().hex}.zip"
     s3_client = _artifacts_s3_client(config.aws_region)
-    s3_client.put_object(Bucket=bucket, Key=key, Body=body, Tagging=urllib.parse.urlencode(tags))
+    integrity = _export_integrity_fields(body)
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        Tagging=urllib.parse.urlencode(tags),
+        Metadata={
+            "archive-sha256": str(integrity["archive_sha256"]),
+            "archive-bytes": str(integrity["archive_bytes"]),
+            "artifact-manifest-sha256": str(integrity["artifact_manifest_sha256"]),
+        },
+        ChecksumSHA256=_export_s3_checksum(body),
+    )
     # The browser saves a cross-origin download under the OBJECT's name and ignores the anchor's `download` attribute,
     # so the pre-signed URL itself must name the file: the same `<name>-<kind>.zip` the API reports as `filename`.
     return s3_client.generate_presigned_url(
@@ -7641,13 +7719,18 @@ async def handle_generate_cfn_template(request: DeployRequest, raw_request: Requ
         generator = CfnTemplateGenerator()
         bundle = generator.generate(request)
         zip_bytes = bundle.to_zip()
+        integrity = _export_integrity_fields(zip_bytes)
 
         # Try to upload to S3 and return presigned URL
         if owner_hash:
             url = _stage_export_bundle(
                 owner_hash, "cfn-template", bundle.deployment_name, zip_bytes, f"{bundle.deployment_name}-cfn.zip"
             )
-            return {"download_url": url, "filename": f"{bundle.deployment_name}-cfn.zip"}
+            return {
+                "download_url": url,
+                "filename": f"{bundle.deployment_name}-cfn.zip",
+                **integrity,
+            }
 
         # Fallback: return base64-encoded zip
         import base64
@@ -7655,7 +7738,11 @@ async def handle_generate_cfn_template(request: DeployRequest, raw_request: Requ
         return {
             "zip_base64": base64.b64encode(zip_bytes).decode(),
             "filename": f"{bundle.deployment_name}-cfn.zip",
+            **integrity,
         }
+
+    except ExportReferenceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except CfnExportUnsupportedError as exc:
         # Not a server fault and not a secret: the generator refused a canvas it
@@ -7713,19 +7800,28 @@ async def handle_export_python(request: DeployRequest, raw_request: Request):
         from app.services.python_exporter import build_and_zip
 
         zip_bytes, deployment_name = build_and_zip(request)
+        integrity = _export_integrity_fields(zip_bytes)
 
         if owner_hash:
             url = _stage_export_bundle(
                 owner_hash, "python-export", deployment_name, zip_bytes, f"{deployment_name}-python.zip"
             )
-            return {"download_url": url, "filename": f"{deployment_name}-python.zip"}
+            return {
+                "download_url": url,
+                "filename": f"{deployment_name}-python.zip",
+                **integrity,
+            }
 
         import base64
 
         return {
             "zip_base64": base64.b64encode(zip_bytes).decode(),
             "filename": f"{deployment_name}-python.zip",
+            **integrity,
         }
+
+    except ExportReferenceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except HTTPException:
         raise

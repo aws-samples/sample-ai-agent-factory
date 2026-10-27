@@ -26,6 +26,18 @@ def _import_provider():
 
 provider = _import_provider()
 
+
+def test_managed_web_search_region_set_matches_current_commercial_availability():
+    assert provider._MANAGED_WEB_SEARCH_SUPPORTED_REGIONS == {
+        "ap-northeast-1",
+        "ap-southeast-2",
+        "eu-west-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+    }
+
+
 ACCOUNT = "111122223333"
 STACK_ID = f"arn:aws:cloudformation:eu-west-1:{ACCOUNT}:stack/search-demo/stack-id"
 GATEWAY_ID = "gateway_demo-1234567890"
@@ -232,10 +244,20 @@ class TestManagedWebSearchCreate:
             provider._handle_managed_web_search_create(event, _ExpiredContext())
         assert not any(call == "sync" for call, _kwargs in ctrl.calls)
 
-    def test_unsupported_region_fails_before_any_aws_client(self, monkeypatch):
+    @pytest.mark.parametrize("region", ["us-east-2", "us-west-2"])
+    def test_new_supported_regions_pass_before_client_construction(self, region):
         event = _event(
-            StackId=f"arn:aws:cloudformation:eu-central-1:{ACCOUNT}:stack/search-demo/stack-id",
-            ResourceProperties={**_event()["ResourceProperties"], "Region": "eu-central-1"},
+            StackId=f"arn:aws:cloudformation:{region}:{ACCOUNT}:stack/search-demo/stack-id",
+            ResourceProperties={**_event()["ResourceProperties"], "Region": region},
+        )
+
+        assert provider._managed_web_search_stack_region(event) == region
+
+    @pytest.mark.parametrize("region", ["eu-central-1", "us-west-1", "us-west-9"])
+    def test_unsupported_region_fails_before_any_aws_client(self, monkeypatch, region):
+        event = _event(
+            StackId=f"arn:aws:cloudformation:{region}:{ACCOUNT}:stack/search-demo/stack-id",
+            ResourceProperties={**_event()["ResourceProperties"], "Region": region},
         )
         monkeypatch.setattr(
             provider.boto3,
@@ -243,7 +265,7 @@ class TestManagedWebSearchCreate:
             lambda *_a, **_k: pytest.fail("an AWS client was constructed before region admission"),
         )
 
-        with pytest.raises(provider.ProviderError, match="not available in eu-central-1"):
+        with pytest.raises(provider.ProviderError, match=rf"not available in {region}"):
             provider._handle_managed_web_search_create(event, _Context())
 
     @pytest.mark.parametrize("field", ["TargetName", "ConnectorId", "ConnectorVersion", "ToolName"])

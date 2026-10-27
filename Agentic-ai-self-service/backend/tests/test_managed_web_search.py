@@ -96,20 +96,34 @@ def test_generic_gateway_remains_admitted_in_a_reduced_home_region(monkeypatch) 
     deployment_handler._reject_unsupported_managed_web_search_region(_deploy_request("strands-gateway-agent"))
 
 
-def test_explicit_supported_target_region_overrides_the_home_region(monkeypatch) -> None:
+@pytest.mark.parametrize("target_region", ["eu-west-1", "us-east-2", "us-west-2"])
+def test_explicit_supported_target_region_overrides_the_home_region(monkeypatch, target_region: str) -> None:
     monkeypatch.setattr(
         deployment_handler,
         "config",
         replace(deployment_handler.config, aws_region="eu-central-1"),
     )
-    request = _deploy_request("web-search-agent", targetRegion="eu-west-1")
+    request = _deploy_request("web-search-agent", targetRegion=target_region)
 
     deployment_handler._reject_unsupported_managed_web_search_region(request)
 
 
-def test_explicit_unsupported_target_region_still_fails_model_admission() -> None:
-    with pytest.raises(ValidationError, match="Web Search is not available.*eu-central-1"):
+def test_explicit_selected_region_without_web_search_fails_on_the_feature() -> None:
+    # Frankfurt IS a selected release Region; only the managed Web Search feature is missing there,
+    # so the feature message -- not a Region message -- must name the cause.
+    with pytest.raises(ValidationError, match=r"Web Search is not available.*eu-central-1"):
         _deploy_request("web-search-agent", targetRegion="eu-central-1")
+
+
+@pytest.mark.parametrize("target_region", ["us-west-1", "us-west-9"])
+def test_explicit_unselected_target_region_fails_on_the_release_envelope_first(target_region: str) -> None:
+    # Outside the seven selected Regions the root cause is the Region itself. The release-Region
+    # validator runs before the Web Search one so the caller is told to move Region, not to drop a tool.
+    with pytest.raises(ValidationError) as excinfo:
+        _deploy_request("web-search-agent", targetRegion=target_region)
+    message = str(excinfo.value)
+    assert "not a selected production release Region" in message
+    assert "Web Search is not available" not in message
 
 
 def test_live_region_gate_precedes_deployment_state_persistence() -> None:

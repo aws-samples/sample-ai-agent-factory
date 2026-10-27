@@ -12,6 +12,7 @@ import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration 
 import type { CustomToolData, DeployConnector } from './DeployPanel';
 import type { ResourceTagState } from './resourceTagState';
 import { runtimeConfigForRequest } from '../../utils/runtimeRequestConfig';
+import { isReleaseRegion, releaseRegionUnavailableReason } from '../../utils/awsRegion';
 
 interface DeploymentStatus {
   state: 'idle' | 'deploying' | 'deployed' | 'error';
@@ -112,6 +113,16 @@ export function useDeployment(params: UseDeploymentParams) {
 
   const handleDeploy = useCallback(async () => {
     if (!config || !nodeId) return;
+    // Client-side twin of the backend's release-Region gate. The target selector only
+    // offers admissible Regions, but the hook is the last point before the request leaves
+    // the browser, so a stale selection or a programmatic caller is refused here too.
+    if (targetRegion !== undefined && targetRegion !== '' && !isReleaseRegion(targetRegion)) {
+      setDeploymentStatus({
+        state: 'error',
+        message: releaseRegionUnavailableReason(targetRegion, 'this live deployment'),
+      });
+      return;
+    }
     setDeploymentStatus({ state: 'deploying', message: 'Starting deployment...' });
     resetAllExecutionStates();
     let deploymentId: string | undefined;

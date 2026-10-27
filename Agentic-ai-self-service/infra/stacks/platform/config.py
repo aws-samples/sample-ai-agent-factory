@@ -17,13 +17,17 @@ HOME_REGION = "us-east-1"
 
 # AWS Agent Registry is an optional federation plane, not the built-in DynamoDB
 # registry. Grant its IAM actions only where AWS currently offers the service;
-# reduced EMEA profiles must not carry unusable federation permissions.
+# reduced profiles without federation must not carry unusable permissions.
 AWS_AGENT_REGISTRY_SUPPORTED_REGIONS = frozenset(
     {
         "ap-northeast-1",
         "ap-southeast-2",
+        "ca-central-1",
+        "eu-central-1",
         "eu-west-1",
+        "eu-west-2",
         "us-east-1",
+        "us-east-2",
         "us-west-2",
     }
 )

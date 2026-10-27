@@ -6,6 +6,113 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — release evidence is executed and receipt-backed; a pass can no longer be asserted
+
+- `scripts/release_evidence.py` no longer has a `record` command. The only writers are
+  `run-suite` and `run-scenario`, which execute the command arrays the traceability
+  contract declares (no shell, bounded by the declared timeout, child environment limited
+  to PATH-class names plus the suite's declared variables) and write a receipt: resolved
+  argv, every tool executable by absolute path and SHA-256 with its reported version, exit
+  statuses, timing, the JUnit report parsed, the live provenance emitted, and digests of
+  every artifact the command produced. Artifacts live under the run directory and are
+  re-digested on every load. An event's status is derived from the receipt when written and
+  re-derived on every read; a hand-edited `pass`, a pass with no artifacts, or a pass whose
+  receipt shows a non-zero exit is rejected on load.
+- Offline credit is per mapped selector: `pytest`/`javascript` suites must route JUnit to
+  `{junit_xml}` (the contract now does) and a `(control, kind)` is credited only when every
+  selector the traceability maps to that suite appears as a passed test case; command suites
+  credit their check ids only when every command exits 0. `required_tools` versions are
+  verified against the executables actually used.
+- Live credit is bound: `start --account-id` binds a run to one AWS account; a live
+  scenario must emit `provenance` naming that account, the requested Region, a stack, and
+  the deployed commit and project tree, which must equal the candidate's. Another account,
+  another Region, or a stale deployed build is refused before anything is recorded, and
+  finalization refuses a run whose live receipts name more than one account or build.
+- The run identity now includes the repository-root CI workflow: its committed blob hash
+  and content digest are recorded, its dirty state blocks `start` and every later operation,
+  and a changed blob fails `verify`.
+- Every non-offline scenario the traceability names now has an executable definition
+  (command, timeout, required artifacts, provenance flag); undefined or orphaned scenarios
+  fail contract validation. `release/scenarios/run_scenario.py` dispatches them: an
+  unimplemented scenario exits 3 and records `blocked`, never `pass`. The exact-commit
+  scenario is implemented and independently re-derives commit, tree, workflow blob, and
+  contract digests. The remaining 58 scenarios are blocked until reviewed implementations
+  are registered — which is the honest state of this candidate.
+
+### Fixed — the seven-Region envelope is enforced at every live admission point
+
+- One predicate, `region_capabilities.require_release_region`, now gates the shared
+  `DeployRequest` model (explicit `targetRegion`, every route and mode), the live deploy
+  handler's omitted-Region home fallback (before any deployment row or AWS call), admin
+  deploy-target registration (422 at the API boundary before any STS/S3/KMS call, and again
+  in `deploy_target.add_region`), target resolution (a legacy allowlist row or an
+  out-of-envelope platform home Region can no longer resolve), the deploy-panel options
+  endpoint (never offers an inadmissible target; reports `home_region_admissible` and
+  `release_regions`), and the prepared state-machine payload (`unsupported_release_region`).
+  Previously the allowlist was informational on these surfaces: an admin could register
+  `ap-southeast-2`, the panel would offer it, and the handler would deploy to it.
+- `infra/app.py` refuses an unselected `aws_region` at synth, reading the same
+  `release/agentcore-regions.json` that `scripts/deploy.sh` enforces, so a direct
+  `cdk synth`/`cdk deploy` no longer bypasses the script. Nothing is synthesized for a
+  refused Region.
+- The frontend mirrors the predicate (`isReleaseRegion`) to filter offered targets, to
+  refuse a submit before the request leaves the browser, and to show the refusal when the
+  platform's own home Region is outside the envelope. The backend remains the enforcement
+  point.
+- The evidence recorder's matrix contract now requires the exact `production_envelope`
+  key set with `gateway_provider: agentcore`, and admits only the reviewed capability
+  tuples per profile (full: all true; reduced: exactly "no Web Search, with Agent
+  Registry" or "neither"). The previous "not all true" rule accepted shapes nobody
+  reviewed, such as Web Search without Agent Registry.
+- A single test pins that every copy of the seven — backend, frontend, `deploy.sh`, the
+  CDK matrix, and the CI `strict-synth` matrix — is literally the same set. Every gate has
+  a removal mutation that fails the suite.
+- Documentation now says "selected certification candidate" Regions; "certified" is
+  reserved for a Region named by a finalized evidence run. The manual CDK steps name the
+  pinned `npm ci` / `infra/node_modules/.bin/cdk` path the deploy script actually uses.
+
+### Fixed — downloadable artifact verifiers resist import shadowing
+
+- Both shipped verifiers (`verify-artifact.py` and each bundle's `verify-integrity.py`)
+  now refuse to run unless the interpreter is in isolated mode, and check that before
+  importing anything but `sys`. Measured before the fix: a plain `python3` run placed
+  the unverified artifact directory first on `sys.path`, so an undeclared `hashlib.py`
+  dropped beside the verifier let a same-size tampered `agent.py` report "verified".
+  Every generated entrypoint (`deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`,
+  `run.sh`, `run-docker.sh`, `install-locked.sh`), every CI example, and the customer
+  documentation now invoke `python3 -I`. The exploit is a permanent mutation test for
+  both artifact types.
+- Export routes now refuse the write-only `ConnectorConfig.secretValue` by its typed
+  attribute. It is `exclude=True`, so a serialization-based scan could never see it;
+  the rejection names the field and never echoes the value.
+
+### Added — seven-Region downloadable artifact release contract
+
+- Replace the former regional control with `regional.certified_core` and bind schema-2
+  `release/agentcore-regions.json` to exactly seven production Runtime Regions:
+  `us-east-1`, `us-east-2`, `us-west-2`, `eu-central-1`, `eu-west-1`, `eu-west-2`,
+  and `eu-west-3`. N. Virginia, Ohio, Oregon, and Ireland use the full profile;
+  Frankfurt and London omit managed Web Search but retain AWS Agent Registry;
+  Paris omits both optional services; N. California remains excluded. Managed Harness
+  and A2A remain outside production.
+- Add `delivery.downloadable_assets` as a formal release control. It requires offline
+  positive/adversarial/removal-mutation, independent clean-clone, exact-commit,
+  authenticated live positive/adversarial, both artifact workflows in every selected
+  Region, real CloudFront UI, rollback, and direct-service zero-residual teardown
+  evidence. Live evidence must download from the deployed API/UI, verify response and
+  archive manifests, and operate from a clean recipient workspace rather than call a
+  generator directly.
+- Expand strict synthesis to all seven Regions and expand the export gate across the
+  downloadable contract, Python exporter, CloudFormation export/deployability,
+  staging/isolation, documentation, and workflow validation. Pin cfn-lint 1.57.0,
+  Checkov 3.3.1, Terraform 1.14.6, ShellCheck 0.11.0, and actionlint 1.7.12.
+- Document `artifact-manifest.json`, `SHA256SUMS`, `verify-artifact.py`, authenticated
+  response integrity metadata, inert CI examples, localhost-only Docker publication,
+  the immutable Python image, and exact lock plus `pip check`/installed-closure checks.
+  Distribution wheel bytes are not hash-locked, and the claim is bounded to the exact
+  commit, tools, Region profiles, and named scenarios rather than a guarantee about
+  future package indexes, AWS changes, or defect-free operation.
+
 ### Security — frontend build tool
 
 - Pin Vite to 7.3.7, the first release outside the affected ranges for
@@ -24,15 +131,6 @@ All notable changes to this project are documented here. The format follows
   partition empty and atomically release version/slot/name metadata instead of querying a
   nonexistent literal `Triggers` table and leaving a resource-free deployment
   `delete_retained`.
-
-### Changed — four explicit EMEA single-Region profiles
-
-- One installation can use Frankfurt, Ireland, London, or Paris as its home Region. Ireland
-  has the full profile; the other three visibly disable managed Web Search and AWS Agent
-  Registry federation while retaining the built-in DynamoDB registry and core AgentCore path.
-- Release finalization requires independent core evidence in all four selected Regions.
-  Expanding a reduced profile requires AWS availability, a reviewed matrix change, and fresh
-  exact-commit evidence; no neighboring-Region capability is inferred.
 
 ### Fixed — tool-heavy browser turns escape the 30-second API limit
 
@@ -58,9 +156,10 @@ All notable changes to this project are documented here. The format follows
   response oracles require structured `title`, `text`, and HTTP(S) `url` fields,
   and gallery prompts require source titles and links to remain as citations.
 - Live deployment and CloudFormation export both fail before side effects outside
-  `us-east-1`, `eu-west-1`, and `ap-northeast-1`. The dated EMEA matrix therefore
-  enables this scenario only in Europe (Ireland), independently of core Runtime,
-  Memory, and Agent Registry support.
+  `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1`, `ap-southeast-2`, and
+  `ap-northeast-1`. The dated schema-2 Region matrix therefore runs this scenario
+  in the four full-profile selected Regions (N. Virginia, Ohio, Oregon, and
+  Ireland), independently of core Runtime, Memory, and Agent Registry support.
 - CloudFormation uses `Custom::ManagedWebSearchTarget` because the current native
   GatewayTarget connector schema exposes `ConnectorId` but not connector
   `Version`. Its complete create/update/delete lifecycle adopts conflicts only
@@ -261,7 +360,7 @@ All notable changes to this project are documented here. The format follows
   denials, transport failures, prefixes, suffixes, and extra diagnostics still abort.
   Positive, adversarial, and fail-open mutation tests execute the real shell function.
 
-### Added — exact-commit release evidence and EMEA certification matrix
+### Added — exact-commit release evidence and certified Region matrix
 
 - `release_evidence.py` starts only on a clean Git subtree, records one immutable bounded JSON event
   per result, stores artifact digests rather than raw logs, and rechecks commit/tree/contract identity
@@ -277,7 +376,7 @@ All notable changes to this project are documented here. The format follows
   exported-artifact gate in addition to tests, builds, and strict synthesis.
 - Failed and blocked attempts remain active until an explicit same-scope supersession. Finalization
   requires every control/kind/suite/scenario tuple, every global lifecycle/UI gate, and an
-  independent pass for each selected EMEA Region; any active failure or missing tuple prevents a
+  independent pass for each selected certified Region; any active failure or missing tuple prevents a
   seal.
 - Run, event, event-set, and final digests are independently verified from a detached clean clone.
   Mutation tests remove a Region event and a required suite, alter event content, drift contract

@@ -23,32 +23,73 @@ export function getDeploymentRegion(): string {
   return import.meta.env.VITE_AWS_REGION || DEFAULT_AWS_REGION;
 }
 
-export const SUPPORTED_EMEA_SINGLE_REGION_RELEASES = [
+export const SUPPORTED_SINGLE_REGION_RELEASES = [
   "eu-central-1",
   "eu-west-1",
   "eu-west-2",
   "eu-west-3",
+  "us-east-1",
+  "us-east-2",
+  "us-west-2",
 ] as const;
+
+/**
+ * Whether `region` is one of the selected production release Regions.
+ *
+ * Mirrors `region_capabilities.require_release_region` on the backend. The UI uses
+ * it to avoid OFFERING an inadmissible target and to refuse a submit before the
+ * request leaves the browser; the backend remains the enforcement point.
+ */
+export function isReleaseRegion(region: unknown): region is (typeof SUPPORTED_SINGLE_REGION_RELEASES)[number] {
+  return (
+    typeof region === "string"
+    && (SUPPORTED_SINGLE_REGION_RELEASES as readonly string[]).includes(region)
+  );
+}
+
+/** The same actionable refusal text the backend returns, for a client-side refusal. */
+export function releaseRegionUnavailableReason(region: unknown, surface: string): string {
+  const shown = typeof region === "string" && region ? region : "<unset>";
+  const selected = SUPPORTED_SINGLE_REGION_RELEASES
+    .map((candidate) => `${getRegionDisplayName(candidate)} (${candidate})`)
+    .join(", ");
+  return `Region ${shown} is not a selected production release Region, so ${surface} is refused. `
+    + `Deploy in exactly one of: ${selected}.`;
+}
 
 export const MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = [
   "ap-northeast-1",
+  "ap-southeast-2",
   "eu-west-1",
   "us-east-1",
+  "us-east-2",
+  "us-west-2",
 ] as const;
 
 export const AWS_AGENT_REGISTRY_SUPPORTED_REGIONS = [
   "ap-northeast-1",
   "ap-southeast-2",
+  "ca-central-1",
+  "eu-central-1",
   "eu-west-1",
+  "eu-west-2",
   "us-east-1",
+  "us-east-2",
   "us-west-2",
 ] as const;
 
 const REGION_DISPLAY_NAMES: Record<string, string> = {
   "eu-central-1": "Europe (Frankfurt)",
+  "eu-north-1": "Europe (Stockholm)",
+  "eu-south-1": "Europe (Milan)",
+  "eu-south-2": "Europe (Spain)",
   "eu-west-1": "Europe (Ireland)",
   "eu-west-2": "Europe (London)",
   "eu-west-3": "Europe (Paris)",
+  "us-east-1": "US East (N. Virginia)",
+  "us-east-2": "US East (Ohio)",
+  "us-west-1": "US West (N. California)",
+  "us-west-2": "US West (Oregon)",
 };
 
 const MANAGED_WEB_SEARCH_TEMPLATE_IDS = new Set(["web-search-agent"]);
@@ -74,6 +115,14 @@ export function getRegionDisplayName(region: string): string {
   return REGION_DISPLAY_NAMES[region] ?? region;
 }
 
+function formatReleaseAlternatives(regions: readonly string[]): string {
+  return SUPPORTED_SINGLE_REGION_RELEASES.filter((region) =>
+    includesRegion(regions, region),
+  )
+    .map((region) => `${getRegionDisplayName(region)} (${region})`)
+    .join(", ");
+}
+
 export function getRegionFeatureProfile(
   region = getDeploymentRegion(),
 ): RegionFeatureProfile {
@@ -89,7 +138,7 @@ export function getRegionFeatureProfile(
     region,
     displayName: getRegionDisplayName(region),
     releaseSupported: includesRegion(
-      SUPPORTED_EMEA_SINGLE_REGION_RELEASES,
+      SUPPORTED_SINGLE_REGION_RELEASES,
       region,
     ),
     managedWebSearch,
@@ -105,14 +154,20 @@ export function managedWebSearchUnavailableReason(
   region = getDeploymentRegion(),
 ): string | null {
   if (includesRegion(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS, region)) return null;
-  return `Amazon Bedrock AgentCore Web Search is not available in ${getRegionDisplayName(region)} (${region}). Remove managed Web Search from this workflow or deploy it in eu-west-1.`;
+  const alternatives = formatReleaseAlternatives(
+    MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
+  );
+  return `Amazon Bedrock AgentCore Web Search is not available in ${getRegionDisplayName(region)} (${region}). Remove managed Web Search from this workflow or deploy it in one of these supported release Regions: ${alternatives}.`;
 }
 
 export function awsAgentRegistryUnavailableReason(
   region = getDeploymentRegion(),
 ): string | null {
   if (includesRegion(AWS_AGENT_REGISTRY_SUPPORTED_REGIONS, region)) return null;
-  return `AWS Agent Registry federation is not available in ${getRegionDisplayName(region)} (${region}). The built-in DynamoDB agent registry remains available.`;
+  const alternatives = formatReleaseAlternatives(
+    AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
+  );
+  return `AWS Agent Registry federation is not available in ${getRegionDisplayName(region)} (${region}). The built-in DynamoDB agent registry remains available; federation is available in these supported release Regions: ${alternatives}.`;
 }
 
 export function templateUnavailableReason(

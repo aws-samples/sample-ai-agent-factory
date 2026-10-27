@@ -109,10 +109,9 @@ _TOOL_IMPL_BLOCK = (
 _TOOL_RECEIPTS_MARKER = "__TOOL_RECEIPTS__"
 _TOOL_RECEIPTS_BLOCK = codegen_templates.load_impl("tool_receipts")
 
-# Provider to package mapping (Strands-only). Feeds the standalone Python/Docker
-# export's requirements.txt (``python_exporter.build_requirements``) — NOT the AgentCore
-# deploy path, which pip-installs nothing and takes its SDKs from the pre-built bundles
-# selected via PROVIDER_STRANDS_EXTRA below.
+# Legacy provider-package compatibility map. Runtime and downloadable exporters use
+# PROVIDER_STRANDS_EXTRA plus Strands' own extras metadata as their authority; this map
+# remains for older callers and a cross-check against emitted import lines.
 #
 # Each value must satisfy what the module in ``_get_model_init_code``'s import line
 # imports, which is not the same thing as the provider's own SDK. Corrected against the
@@ -141,7 +140,7 @@ PROVIDER_PACKAGES: dict[str, str] = {
     "litellm": "strands-agents strands-agents-tools litellm",
     "mistral": "strands-agents strands-agents-tools mistralai",
     "ollama": "strands-agents strands-agents-tools ollama",
-    "sagemaker": "strands-agents strands-agents-tools mypy-boto3-sagemaker-runtime",
+    "sagemaker": "strands-agents strands-agents-tools mypy-boto3-sagemaker-runtime openai",
     "writer": "strands-agents strands-agents-tools openai",
     "groq": "strands-agents strands-agents-tools openai",
     "deepseek": "strands-agents strands-agents-tools openai",
@@ -166,12 +165,11 @@ PROVIDER_PACKAGES: dict[str, str] = {
 # Keyed by the extra rather than the package list on purpose. ``strands-agents``
 # publishes one extra per provider with its own version constraints
 # (``strands-agents[openai]`` → ``openai`` + ``aws-bedrock-token-generator``,
-# ``[gemini]`` → ``google-genai``, ``[sagemaker]`` → ``boto3-stubs[sagemaker-runtime]``,
-# which its module imports at RUNTIME, not under TYPE_CHECKING), and upstream owns
-# those bounds. PROVIDER_PACKAGES above is the older, hand-maintained list; it is used
-# only to write a ``requirements.txt`` for a human reading the export, and it had
-# drifted — it named ``google-generativeai`` where strands needs ``google-genai``, and
-# gave groq/writer their own SDK where the generated code uses OpenAIModel.
+# ``[gemini]`` → ``google-genai``, and ``[sagemaker]`` →
+# ``boto3-stubs[sagemaker-runtime]`` + ``openai`` because its module imports
+# ``OpenAIModel`` at runtime, not under TYPE_CHECKING), and upstream owns
+# those bounds. PROVIDER_PACKAGES above is only a compatibility cross-check; exporters
+# resolve the exact extras here so parent and multi-agent providers cannot drift apart.
 #
 # The value is decided by the IMPORT LINE ``_get_model_init_code`` returns, not by the
 # provider's name — groq, deepseek and writer all emit ``OpenAIModel``, and together
@@ -240,6 +238,36 @@ def provider_bundle_keys_for(providers) -> list[str]:
         if key not in keys:
             keys.append(key)
     return keys
+
+
+def provider_strands_extras_for(providers) -> list[str]:
+    """Return the complete sorted Strands-extra closure for a canvas.
+
+    ``providers`` must come from ``runtime_deployer.canvas_model_providers`` so it
+    includes the parent model and every multi-agent model.  The returned extras are
+    checked against :func:`provider_bundle_keys_for`, the runtime deployer's bundle
+    authority, before an exporter can use them in a requirements line or build recipe.
+    Unknown providers fail closed here: API models already reject them, and silently
+    treating a mutated or legacy value as Bedrock would emit an incomplete artifact.
+
+    The SageMaker extra is intentionally sufficient even though
+    ``strands.models.sagemaker`` imports ``OpenAIModel`` at module scope: pinned
+    ``strands-agents==1.56.0`` declares both ``boto3-stubs[sagemaker-runtime]`` and
+    ``openai`` in its ``sagemaker`` extra.
+    """
+    normalized = [str(provider or "bedrock").strip().lower() or "bedrock" for provider in (providers or [])]
+    unknown = sorted({provider for provider in normalized if provider not in PROVIDER_STRANDS_EXTRA})
+    if unknown:
+        raise CodeGenerationUnsupportedError(
+            "Unsupported model provider closure; re-export with a reviewed provider selection"
+        )
+
+    extras = sorted({PROVIDER_STRANDS_EXTRA[provider] for provider in normalized if PROVIDER_STRANDS_EXTRA[provider]})
+    selected_keys = set(provider_bundle_keys_for(normalized))
+    expected_keys = {provider_bundle_key(extra) for extra in extras}
+    if selected_keys != expected_keys:
+        raise RuntimeError("Provider extra and runtime bundle authorities disagree")
+    return extras
 
 
 # Backward compat alias

@@ -153,23 +153,32 @@ check_prerequisites() {
 
 # ── Step 2: Validate AWS credentials ─────────────────────────────────
 
-report_emea_feature_profile() {
+report_region_feature_profile() {
   case "${AWS_REGION}" in
-    eu-west-1)
-      log_success "EMEA feature profile: full (Europe/Ireland, eu-west-1)."
+    us-east-1|us-east-2|us-west-2|eu-west-1)
+      log_success "Regional feature profile: full (${AWS_REGION})."
       log_info "  * Managed Web Search and AWS Agent Registry federation are available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Built-in Tools, and Observability are in the supported profile."
       ;;
-    eu-central-1|eu-west-2|eu-west-3)
-      log_warning "EMEA feature profile: reduced core platform (${AWS_REGION})."
+    eu-central-1|eu-west-2)
+      log_warning "Regional feature profile: reduced core platform (${AWS_REGION})."
+      log_warning "  * NOT SUPPORTED: Amazon Bedrock AgentCore managed Web Search."
+      log_info "  * AWS Agent Registry federation is available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Built-in Tools, and Observability remain in the supported profile."
+      ;;
+    eu-west-3)
+      log_warning "Regional feature profile: reduced core platform (${AWS_REGION})."
       log_warning "  * NOT SUPPORTED: Amazon Bedrock AgentCore managed Web Search."
       log_warning "  * NOT SUPPORTED: AWS Agent Registry federation."
       log_info "  * The built-in DynamoDB agent registry remains available."
       log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
-      log_info "    Harness, and Observability remain in the supported profile."
+      log_info "    Built-in Tools, and Observability remain in the supported profile."
       ;;
-    eu-*)
-      log_error "AWS_REGION='${AWS_REGION}' is outside this release's EMEA support envelope."
-      log_error "Supported EMEA single-Region deployments: eu-central-1, eu-west-1, eu-west-2, eu-west-3."
+    *)
+      log_error "AWS_REGION='${AWS_REGION}' is outside this release's support envelope."
+      log_error "Supported single-Region deployments: eu-central-1, eu-west-1, eu-west-2, eu-west-3, us-east-1, us-east-2, us-west-2."
       return 1
       ;;
   esac
@@ -194,7 +203,7 @@ check_aws_credentials() {
     log_error "AWS_REGION='${AWS_REGION}' is not a valid AWS region name."
     exit 1
   fi
-  report_emea_feature_profile
+  report_region_feature_profile
   if [[ "${AWS_REGION}" != "us-east-1" ]]; then
     log_info "Deploying to '${AWS_REGION}' (not us-east-1)."
     log_info "  * CloudFront will have NO WebACL; the WAF rule set is applied to"

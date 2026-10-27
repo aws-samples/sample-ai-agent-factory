@@ -97,7 +97,10 @@ def test_config_reports_not_configured(monkeypatch):
 
 
 def test_config_reports_region_unavailable_without_constructing_an_adapter(monkeypatch):
-    monkeypatch.setenv("APP_AWS_REGION", "eu-central-1")
+    # Paris is the selected release Region WITHOUT AWS Agent Registry federation. (Frankfurt,
+    # which this test once used, has had it since the schema-2 matrix was reviewed against
+    # the AWS Regions page; using it here asserted a stale fact.)
+    monkeypatch.setenv("APP_AWS_REGION", "eu-west-3")
     monkeypatch.setattr(ar, "get_configured_registry_id", lambda: None)
     monkeypatch.setattr(ar, "agent_registry_supported", lambda: True)
     monkeypatch.setattr(
@@ -108,10 +111,10 @@ def test_config_reports_region_unavailable_without_constructing_an_adapter(monke
 
     body = _client().get("/api/registry/aws-config").json()
 
-    assert body["region"] == "eu-central-1"
+    assert body["region"] == "eu-west-3"
     assert body["region_supported"] is False
     assert body["available"] is False
-    assert "Frankfurt" in body["unavailable_reason"]
+    assert "Paris" in body["unavailable_reason"]
     assert "DynamoDB agent registry remains available" in body["unavailable_reason"]
 
 
@@ -156,7 +159,9 @@ def test_enable_rejects_non_admin(monkeypatch):
 
 
 def test_enable_rejects_an_unsupported_region_before_any_registry_call(monkeypatch):
-    monkeypatch.setenv("APP_AWS_REGION", "eu-west-2")
+    # London gained AWS Agent Registry in the reviewed schema-2 matrix; Paris is the selected
+    # Region that still lacks it, so Paris is the one that must be refused before any SDK call.
+    monkeypatch.setenv("APP_AWS_REGION", "eu-west-3")
     monkeypatch.setattr(
         ar,
         "agent_registry_supported",
@@ -171,8 +176,10 @@ def test_enable_rejects_an_unsupported_region_before_any_registry_call(monkeypat
     resp = _client().post("/api/registry/aws-config", json={"registry_id": "reg1"})
 
     assert resp.status_code == 400
-    assert "London" in resp.json()["detail"]
-    assert "DynamoDB agent registry remains available" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Paris" in detail and "(eu-west-3)" in detail, "the refusal names the refused Region"
+    assert "Europe (London) (eu-west-2)" in detail, "...and London is now offered as an alternative"
+    assert "DynamoDB agent registry remains available" in detail
 
 
 def test_enable_blames_the_sdk_not_the_registry_id(monkeypatch):

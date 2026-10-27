@@ -2306,7 +2306,16 @@ _MANAGED_WEB_SEARCH_CONNECTOR_ID = "web-search"
 _MANAGED_WEB_SEARCH_CONNECTOR_VERSION = "1.2.0"
 _MANAGED_WEB_SEARCH_TARGET_NAME = "AmazonWebSearch"
 _MANAGED_WEB_SEARCH_TOOL_NAME = "WebSearch"
-_MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = frozenset({"us-east-1", "eu-west-1", "ap-northeast-1"})
+_MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-southeast-2",
+        "eu-west-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+    }
+)
 _MANAGED_WEB_SEARCH_DESCRIPTION = "AWS-managed Web Search Tool with source citations"
 _MANAGED_WEB_SEARCH_PHYSICAL_ID_PREFIX = "managed-web-search-target"
 _MAX_GATEWAY_TARGET_PAGES = 100
