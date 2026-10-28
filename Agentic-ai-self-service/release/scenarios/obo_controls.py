@@ -230,13 +230,26 @@ def _create_fixture(session: Any, names: dict[str, str], region: str, account_id
             time.sleep(5)
     waiter = lam.get_waiter("function_active_v2")
     waiter.wait(FunctionName=names["function"], WaiterConfig={"Delay": 3, "MaxAttempts": 40})
-    url = lam.create_function_url_config(FunctionName=names["function"], AuthType="NONE")["FunctionUrl"]
+    url = lam.create_function_url_config(FunctionName=names["function"], AuthType="NONE", InvokeMode="BUFFERED")[
+        "FunctionUrl"
+    ]
+    # A public (AuthType=NONE) Function URL needs BOTH the URL-level invoke grant AND the
+    # function-level invoke grant conditioned on InvokedViaFunctionUrl; the second is what the
+    # audited fixture adds and its absence makes every public call 403 at the function-invoke gate
+    # (this was the root cause of the gateway-governance fixture's "never invoked" failure).
     lam.add_permission(
         FunctionName=names["function"],
         StatementId="public-function-url",
         Action="lambda:InvokeFunctionUrl",
         Principal="*",
         FunctionUrlAuthType="NONE",
+    )
+    lam.add_permission(
+        FunctionName=names["function"],
+        StatementId="public-function-invoke",
+        Action="lambda:InvokeFunction",
+        Principal="*",
+        InvokedViaFunctionUrl=True,
     )
     return url.rstrip("/")
 
