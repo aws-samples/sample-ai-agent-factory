@@ -50,7 +50,7 @@ from _live import (
 )
 
 FAMILY = "gateway-governance"
-GOV_GROUPS = REQUIRED_USER_GROUPS | {"g-admins-super"}
+GOV_GROUPS = REQUIRED_USER_GROUPS | {"g-admins-super", "g-admins-cost"}
 FIXTURE_SOURCE = Path(__file__).resolve().parent / "gateway_governance_fixture.py"
 FIXTURE_TAGS = {"ManagedBy": "agentcore-flows-tests", "Purpose": "gateway-governance-live-gate"}
 
@@ -952,7 +952,11 @@ def _gateway_facts(status: dict[str, Any], aws: Any, names: dict[str, str], runt
 def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
-    from tests.integration.conftest import DeploymentCleanupTracker, wait_for_deployment_terminal
+    from tests.integration.conftest import (
+        DeploymentCleanupTracker,
+        RuntimeBudgetTracker,
+        wait_for_deployment_terminal,
+    )
 
     base = observed.cloudfront_url
     aws = boto3_session(binding.region)
@@ -970,6 +974,8 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
             session = BearerSession(user, base)
             session.headers["Content-Type"] = "application/json"
             tracker = DeploymentCleanupTracker(session, logs_client=logs_client)
+            budgets = RuntimeBudgetTracker(session)
+            budgets.authorize(names["runtime_name"])
             try:
                 response = session.post(f"{base}/api/deploy", json=deploy_body(names, fixture_url, secret), timeout=120)
                 if response.status_code != 202:
@@ -1072,6 +1078,10 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
 
                 outcome["observations"] = observations
             finally:
+                try:
+                    budgets.cleanup()
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_errors.append("budget cleanup: " + redact(f"{type(exc).__name__}: {exc}", *user.secrets()))
                 for record in reversed(tracker.records):
                     try:
                         tracker.cleanup(record)
