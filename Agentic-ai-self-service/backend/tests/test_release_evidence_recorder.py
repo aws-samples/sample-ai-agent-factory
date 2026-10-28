@@ -111,10 +111,10 @@ run = json.loads((args.run_dir / "run.json").read_text())
 args.artifact_dir.mkdir(parents=True, exist_ok=True)
 omit = set(mine.get("omit", []))
 if "report" not in omit:
-    import os
+    import os, sys
     seen = sorted(name for name in os.environ if name.startswith("AWS_"))
     (args.artifact_dir / "report").write_text(
-        json.dumps({"scenario": args.scenario_id, "region": args.region, "aws_environment_names": seen}) + "\n"
+        json.dumps({"scenario": args.scenario_id, "region": args.region, "aws_environment_names": seen, "sys_prefix": sys.prefix}) + "\n"
     )
 if args.region is not None and "provenance" not in omit:
     provenance = {
@@ -476,7 +476,8 @@ def test_suite_run_credits_only_selectors_the_junit_report_shows_passing(evidenc
     assert events and all(event["status"] == "pass" for event in events)
     receipt = events[0]["receipt"]
     assert receipt["commands"][0]["exit_status"] == 0 and receipt["selectors_unverified"] == []
-    assert receipt["tools"]["backend_python"]["path"] == str(Path(sys.executable).resolve())
+    assert receipt["tools"]["backend_python"]["path"] == sys.executable, "executed at the path as invoked"
+    assert receipt["tools"]["backend_python"]["real_path"] == str(Path(sys.executable).resolve())
     assert {artifact["label"] for artifact in events[0]["artifacts"]} >= {"stdout-0.log", "stderr-0.log", "junit.xml"}
     assert (run_dir / "artifacts" / events[0]["event_id"] / "junit.xml").exists()
 
@@ -642,6 +643,39 @@ def test_live_scenarios_inherit_only_file_and_profile_aws_names(evidence_project
     offline_report = json.loads((run_dir / "artifacts" / offline[0]["event_id"] / "report").read_text())
     assert offline_report["aws_environment_names"] == []
     assert offline[0]["receipt"]["environment_names"] == []
+
+
+def test_a_venv_python_tool_keeps_its_environment_and_is_recorded_by_identity(evidence_project: dict, tmp_path):
+    """A venv's python is a symlink to the base interpreter. Resolving it before execution
+    silently ran the bare interpreter with none of the project's packages (a live scenario
+    lost boto3). The tool must run at the path as invoked, with the real binary digested
+    and the venv pinned by its pyvenv.cfg and installed-distribution digests."""
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+    venv_python = venv / "bin" / "python"
+    run_dir = _start(evidence_project, "venv-tool")
+    events = release_evidence.run_scenario(
+        run_dir,
+        scenario_id="source-commit-tree-and-contract-digests-match",
+        region=None,
+        tools={"backend_python": str(venv_python)},
+    )
+    tool = events[0]["receipt"]["tools"]["backend_python"]
+    assert tool["path"] == str(venv_python), "executed at the path as invoked"
+    assert (
+        Path(tool["real_path"]).resolve() == venv_python.resolve()
+        and tool["real_path"] != tool["path"]
+        or (tool["real_path"] == tool["path"])
+    )
+    assert tool["environment"]["distribution_count"] >= 0
+    assert len(tool["environment"]["pyvenv_cfg_sha256"]) == 64
+    assert events[0]["receipt"]["commands"][0]["argv"][0] == str(venv_python)
+    stderr = (run_dir / "artifacts" / events[0]["event_id"] / "stderr-0.log").read_text()
+    assert events[0]["status"] == "pass", stderr
+    report = json.loads((run_dir / "artifacts" / events[0]["event_id"] / "report").read_text())
+    assert Path(report["sys_prefix"]).resolve() == venv.resolve(), (
+        "the child ran INSIDE the venv, not the base interpreter"
+    )
 
 
 def test_a_stale_deployed_build_cannot_be_recorded(evidence_project: dict):

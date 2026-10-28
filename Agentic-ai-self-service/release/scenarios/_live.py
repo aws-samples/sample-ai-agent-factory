@@ -31,11 +31,13 @@ import json
 import os
 import re
 import secrets
+import shutil
 import string
 import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -565,3 +567,97 @@ def with_synthetic_user(observed: ObservedStack, *, label: str, groups: frozense
             return False
 
     return _Context()
+
+
+# --------------------------------------------------------------------------- family journeys
+
+JOURNEY_CACHE_ROOT = PROJECT_ROOT / "build" / "release-scenario-journeys"
+JOURNEY_MAX_AGE_SECONDS = 24 * 3600
+
+
+def family_journey(
+    binding: RunBinding,
+    observed: ObservedStack,
+    *,
+    family: str,
+    run: Callable[[Path], dict[str, Any]],
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    """Run one live journey that proves several scenario ids, once per deployment.
+
+    Several scenario ids are facets of a single long live journey (two deployments, two
+    promotions and a rollback prove both ``production-serves-exact-previous-version`` and
+    ``arbitrary-version-rollback-denied``). The journey executes once per
+    ``(commit, region, stack, template digest)`` and its complete artifacts are stored under
+    ``build/release-scenario-journeys/``; a later scenario of the same family re-attaches
+    those artifacts and reports the original execution time rather than running the
+    journey again. The stored result is only reused for the SAME deployment binding and
+    within 24 hours, and never when it failed -- a failed journey is re-run.
+    """
+    key = f"{binding.commit}/{binding.region}/{family}"
+    cache_dir = JOURNEY_CACHE_ROOT / key
+    result_path = cache_dir / "journey.json"
+    reuse = None
+    if result_path.is_file():
+        try:
+            cached = json.loads(result_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cached = None
+        fresh = (
+            cached is not None and time.time() - float(cached.get("completed_at_epoch", 0)) < JOURNEY_MAX_AGE_SECONDS
+        )
+        same = (
+            cached is not None
+            and cached.get("stack_id") == observed.stack_id
+            and cached.get("template_sha256") == observed.template_sha256
+            and cached.get("account_id") == binding.account_id
+        )
+        if cached is not None and fresh and same and cached.get("passed") is True:
+            reuse = cached
+    if reuse is None:
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        (cache_dir / "artifacts").mkdir(parents=True)
+        started = time.time()
+        passed = False
+        error = None
+        outcome: dict[str, Any] = {}
+        try:
+            outcome = run(cache_dir / "artifacts")
+            passed = True
+        except ScenarioBlocked:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            raise
+        except Exception as exc:  # noqa: BLE001 -- recorded, then re-raised below
+            error = redact(f"{type(exc).__name__}: {exc}")
+        record = {
+            "family": family,
+            "account_id": binding.account_id,
+            "region": binding.region,
+            "stack_id": observed.stack_id,
+            "template_sha256": observed.template_sha256,
+            "commit": binding.commit,
+            "started_at_epoch": started,
+            "completed_at_epoch": time.time(),
+            "passed": passed,
+            "error": error,
+            "outcome": outcome,
+        }
+        write_json(result_path, record)
+        reuse = record
+        executed = True
+    else:
+        executed = False
+    journey_artifacts = artifact_dir / f"journey-{family}"
+    shutil.copytree(cache_dir / "artifacts", journey_artifacts, symlinks=False, dirs_exist_ok=True)
+    shutil.copy2(result_path, artifact_dir / f"journey-{family}.json")
+    summary = {
+        "family": family,
+        "executed_in_this_scenario": executed,
+        "journey_completed_at_epoch": reuse["completed_at_epoch"],
+        "journey_passed": reuse["passed"],
+        "journey_error": reuse.get("error"),
+    }
+    if not reuse["passed"]:
+        raise ScenarioFailed(f"{family} journey failed: {reuse.get('error')}")
+    return {**summary, "outcome": reuse["outcome"]}

@@ -745,11 +745,88 @@ def _resolve_tools(requested: dict[str, str], placeholders: set[str]) -> dict[st
         if not resolved_path.is_file() or not os.access(resolved_path, os.X_OK):
             raise EvidenceError(f"Tool {{{name}}} is not an executable file: {raw}")
         sha256, size = _secure_artifact_digest(resolved_path)
-        resolved[name] = {"path": str(resolved_path), "sha256": sha256, "bytes": size}
+        # Execute the tool at the path AS INVOKED. A virtual environment's python is a symlink
+        # to the base interpreter; following it would run the bare interpreter with none of
+        # the project's packages (observed: a live scenario lost boto3). The real binary is
+        # still what is digested, and a venv's identity is recorded beside it.
+        record: dict[str, Any] = {
+            "path": str(path),
+            "real_path": str(resolved_path),
+            "sha256": sha256,
+            "bytes": size,
+        }
+        environment = _python_environment_identity(path)
+        if environment is not None:
+            record["environment"] = environment
+        resolved[name] = record
     unknown = sorted(set(requested) - _TOOL_PLACEHOLDERS)
     if unknown:
         raise EvidenceError(f"Unknown tool placeholders: {unknown}")
     return resolved
+
+
+def _python_environment_identity(executable: Path) -> dict[str, Any] | None:
+    """For a Python executable inside a virtual environment, pin WHICH environment it is.
+
+    ``pyvenv.cfg`` (one directory above ``bin/``) names the base interpreter and version;
+    the installed distribution set is listed by the interpreter itself in isolated mode and
+    digested, so a receipt distinguishes two venvs built from the same interpreter with
+    different packages. Returns ``None`` for anything that is not a venv Python.
+    """
+    cfg = executable.parent.parent / "pyvenv.cfg"
+    if not cfg.is_file() or "python" not in executable.name:
+        return None
+    try:
+        listing = subprocess.run(
+            [
+                str(executable),
+                "-I",
+                "-c",
+                "import importlib.metadata as m, json; "
+                "print(json.dumps(sorted({f\"{d.metadata['Name']}=={d.version}\" for d in m.distributions()})))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        ).stdout
+        distributions = json.loads(listing)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise EvidenceError(f"Could not list the distributions installed for {executable}") from exc
+    cfg_sha256, _ = _secure_artifact_digest(cfg)
+    return {
+        "pyvenv_cfg_sha256": cfg_sha256,
+        "distribution_count": len(distributions),
+        "distributions_sha256": hashlib.sha256("\n".join(distributions).encode("utf-8")).hexdigest(),
+    }
+
+
+def _valid_tool_record(record: dict[str, Any]) -> bool:
+    """A tool identity: the path as invoked, the real binary and its digest, and -- for a
+    virtual-environment Python -- the environment's own identity."""
+    keys = set(record)
+    if not {"path", "real_path", "sha256", "bytes"} <= keys or not keys <= {
+        "path",
+        "real_path",
+        "sha256",
+        "bytes",
+        "environment",
+    }:
+        return False
+    if not _SAFE_SHA256.fullmatch(str(record["sha256"])) or not isinstance(record["bytes"], int):
+        return False
+    if not isinstance(record["path"], str) or not isinstance(record["real_path"], str):
+        return False
+    environment = record.get("environment")
+    if environment is None:
+        return True
+    return (
+        isinstance(environment, dict)
+        and set(environment) == {"pyvenv_cfg_sha256", "distribution_count", "distributions_sha256"}
+        and _SAFE_SHA256.fullmatch(str(environment["pyvenv_cfg_sha256"])) is not None
+        and _SAFE_SHA256.fullmatch(str(environment["distributions_sha256"])) is not None
+        and isinstance(environment["distribution_count"], int)
+    )
 
 
 def _tool_version_line(executable: str, cwd: Path) -> str:
@@ -1868,10 +1945,7 @@ def _validate_event_document(
         raise EvidenceError(f"Evidence event {event_id} was not produced by this run's recorder")
     tools = receipt["tools"]
     if not isinstance(tools, dict) or any(
-        name not in _TOOL_PLACEHOLDERS
-        or not isinstance(record, dict)
-        or set(record) != {"path", "sha256", "bytes"}
-        or not _SAFE_SHA256.fullmatch(str(record["sha256"]))
+        name not in _TOOL_PLACEHOLDERS or not isinstance(record, dict) or not _valid_tool_record(record)
         for name, record in tools.items()
     ):
         raise EvidenceError(f"Evidence event {event_id} records invalid tool identities")

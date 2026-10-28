@@ -126,6 +126,7 @@ def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
     import downloadable_python
     import regional_core
+    import rollback
 
     SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
         regional_core.core_runtime_gateway_identity_policy_evaluation
@@ -133,6 +134,8 @@ def _register_live_families() -> None:
     SCENARIOS["ui-authenticated-python-download-clean-recipient-lock-install-compile-start-invoke"] = (
         downloadable_python.ui_authenticated_python_download_clean_recipient
     )
+    SCENARIOS["arbitrary-version-rollback-denied"] = rollback.arbitrary_version_rollback_denied
+    SCENARIOS["production-serves-exact-previous-version"] = rollback.production_serves_exact_previous_version
 
 
 _register_live_families()
