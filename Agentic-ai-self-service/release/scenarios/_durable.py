@@ -28,6 +28,75 @@ from _live import STACK_NAME, ScenarioFailed
 DEPLOYMENT_LAMBDA_LOGICAL = "DeploymentLambda5F4766EE"
 _CLONE_TAGS_BASE = {"ManagedBy": "agentcore-flows-tests", "Purpose": "durable-control-live-gate"}
 
+BUDGET_UNIT_MICRO_USD = 1_000_000
+
+# A thin wrapper module added to the candidate ZIP for the cost family. It calls the deployed
+# backend's own reserve/settle invocation-budget functions directly, holding the reservation for a
+# bounded window so concurrent callers genuinely contend, and reports whether it crossed the
+# dispatch boundary. It adds no behaviour of its own — the authorization is the product's.
+WRAPPER_MEMBER = "durable_fixture.py"
+WRAPPER_HANDLER = "durable_fixture.handler"
+WRAPPER_SOURCE = """\
+from __future__ import annotations
+
+import time
+from fastapi import HTTPException
+from app.services.invocation_budget import reserve_invocation_budget, settle_invocation_budget
+
+
+def handler(event, _context):
+    owner_sub = str(event.get("ownerSub") or "")
+    runtime_name = str(event.get("runtimeName") or "")
+    hold_seconds = max(0.0, min(float(event.get("holdSeconds") or 0), 10.0))
+    dispatch_boundary_crossed = False
+    reservation = None
+    try:
+        reservation = reserve_invocation_budget(owner_sub=owner_sub, runtime_name=runtime_name)
+        if reservation is None:
+            raise RuntimeError("production authorization unexpectedly returned no reservation")
+        if hold_seconds:
+            time.sleep(hold_seconds)
+        dispatch_boundary_crossed = True
+        settle_invocation_budget(reservation, dispatched=True)
+        return {
+            "statusCode": 200,
+            "dispatchBoundaryCrossed": True,
+            "reservationId": reservation.reservation_id,
+            "amountMicrousd": reservation.amount_microusd,
+            "counterSks": list(reservation.counter_sks),
+        }
+    except HTTPException as exc:
+        return {
+            "statusCode": int(exc.status_code),
+            "detail": str(exc.detail),
+            "dispatchBoundaryCrossed": dispatch_boundary_crossed,
+        }
+    except Exception as exc:
+        if reservation is not None and not dispatch_boundary_crossed:
+            settle_invocation_budget(reservation, dispatched=False)
+        return {
+            "statusCode": 500,
+            "detail": "fixture failure: " + type(exc).__name__,
+            "dispatchBoundaryCrossed": dispatch_boundary_crossed,
+        }
+"""
+
+
+def add_wrapper(payload: bytes, member_name: str, source: str) -> bytes:
+    """Return the candidate ZIP with exactly one extra module added; never shadow an existing one."""
+    import io
+    import zipfile
+
+    target = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as original, zipfile.ZipFile(target, "w") as wrapped:
+        if member_name in set(original.namelist()):
+            raise ScenarioFailed(f"deployed ZIP already contains {member_name}")
+        for info in original.infolist():
+            wrapped.writestr(info, original.read(info.filename))
+        wrapped.writestr(member_name, source)
+    return target.getvalue()
+
+
 # The exact product oracles the deployed backend must return. Any drift is a release blocker.
 EXACT_ORACLES = {
     "auditOutageStatus": 503,
@@ -273,13 +342,17 @@ def clone_deployment_lambda(
     commit: str,
     env_overrides: dict[str, str],
     suffix: str,
+    wrapper: tuple[str, str] | None = None,
+    handler: str | None = None,
 ) -> str:
     """Create a private clone of the deployed DeploymentLambda with ``env_overrides`` applied.
 
-    The clone is byte-identical to the published candidate asset (the binding already proved the
-    live function's ``CodeSha256`` is that asset); this re-verifies the digest on the downloaded ZIP
-    and again after creation, and tags the clone with the run id and candidate so teardown can prove
-    ownership. Returns the clone's function name.
+    The base ZIP is byte-identical to the published candidate asset (the binding already proved the
+    live function's ``CodeSha256`` is that asset); this re-verifies that digest on the download.
+    When ``wrapper=(member_name, source)`` is given, that one extra module is added to the ZIP and
+    ``handler`` points at it — used by the cost family to drive the real reservation code directly.
+    The clone's ``CodeSha256`` is re-checked after creation against the exact bytes deployed, and the
+    clone is tagged with the run id and candidate so teardown can prove ownership. Returns the name.
     """
     from botocore.exceptions import ClientError
 
@@ -300,6 +373,8 @@ def clone_deployment_lambda(
     if base64.b64encode(hashlib.sha256(original).digest()).decode() != expected_sha:
         raise ScenarioFailed("Downloaded Deployment Lambda ZIP digest differs from the binding")
 
+    code = add_wrapper(original, wrapper[0], wrapper[1]) if wrapper else original
+    code_sha = base64.b64encode(hashlib.sha256(code).digest()).decode()
     name = f"acfpr-durable-{run_id}-{suffix}"[:64]
     tags = {**_CLONE_TAGS_BASE, "FixtureId": run_id, "CandidateCommit": commit}
     environment = {str(k): str(v) for k, v in config.get("Environment", {}).get("Variables", {}).items()}
@@ -308,8 +383,8 @@ def clone_deployment_lambda(
         "FunctionName": name,
         "Runtime": config["Runtime"],
         "Role": config["Role"],
-        "Handler": config["Handler"],
-        "Code": {"ZipFile": original},
+        "Handler": handler or config["Handler"],
+        "Code": {"ZipFile": code},
         "Description": f"Temporary durable-control fixture {run_id}",
         "Timeout": min(int(config.get("Timeout", 600)), 600),
         "MemorySize": int(config.get("MemorySize", 512)),
@@ -333,7 +408,7 @@ def clone_deployment_lambda(
         observed_fn = lam.get_function(FunctionName=name)
         current = observed_fn["Configuration"]
         if current.get("State") == "Active" and current.get("LastUpdateStatus") in {None, "Successful"}:
-            if current.get("CodeSha256") != expected_sha or _function_tags(session, observed_fn) != tags:
+            if current.get("CodeSha256") != code_sha or _function_tags(session, observed_fn) != tags:
                 raise ScenarioFailed(f"Lambda clone {name} differs from its sealed bytes/tags")
             return name
         if current.get("State") == "Failed" or current.get("LastUpdateStatus") == "Failed":

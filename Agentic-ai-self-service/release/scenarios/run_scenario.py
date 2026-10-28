@@ -126,6 +126,7 @@ def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
     import audit_controls
     import browser_widget
+    import cost_controls
     import downloadable_cfn
     import downloadable_python
     import regional_core
@@ -170,6 +171,11 @@ def _register_live_families() -> None:
     SCENARIOS["mutation-intent-and-outcome-visible"] = audit_controls.mutation_intent_and_outcome_visible
     SCENARIOS["audit-store-outage-blocks-mutation"] = audit_controls.audit_store_outage_blocks_mutation
     SCENARIOS["tampered-row-read-denied"] = audit_controls.tampered_row_read_denied
+    SCENARIOS["concurrent-transaction-reservations-stay-within-limit"] = (
+        cost_controls.concurrent_transaction_reservations_stay_within_limit
+    )
+    SCENARIOS["exhausted-budget-denies-before-dispatch"] = cost_controls.exhausted_budget_denies_before_dispatch
+    SCENARIOS["budget-store-outage-denies-before-dispatch"] = cost_controls.budget_store_outage_denies_before_dispatch
 
 
 _register_live_families()
