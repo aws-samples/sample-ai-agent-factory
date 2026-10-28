@@ -124,6 +124,7 @@ SCENARIOS: dict[str, Callable[[argparse.Namespace, Path], dict]] = {
 
 def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
+    import downloadable_cfn
     import downloadable_python
     import regional_core
     import rollback
@@ -133,6 +134,15 @@ def _register_live_families() -> None:
     )
     SCENARIOS["ui-authenticated-python-download-clean-recipient-lock-install-compile-start-invoke"] = (
         downloadable_python.ui_authenticated_python_download_clean_recipient
+    )
+    SCENARIOS["api-authenticated-cfn-download-clean-recipient-deploy-invoke-update-rollback-teardown"] = (
+        downloadable_cfn.api_authenticated_cfn_download_full_journey
+    )
+    SCENARIOS["downloaded-cfn-update-rollback-restores-prior-behavior"] = (
+        downloadable_cfn.downloaded_cfn_update_rollback_restores_prior_behavior
+    )
+    SCENARIOS["downloaded-cfn-teardown-direct-service-inventories-zero"] = (
+        downloadable_cfn.downloaded_cfn_teardown_direct_service_inventories_zero
     )
     SCENARIOS["arbitrary-version-rollback-denied"] = rollback.arbitrary_version_rollback_denied
     SCENARIOS["production-serves-exact-previous-version"] = rollback.production_serves_exact_previous_version
