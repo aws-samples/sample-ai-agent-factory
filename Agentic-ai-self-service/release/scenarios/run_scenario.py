@@ -198,7 +198,9 @@ def _register_live_families() -> None:
     SCENARIOS["tampered-archive-or-manifest-rejected-before-use"] = download_integrity.tampered_archive_rejected
     SCENARIOS["generated-ci-defaults-remain-inert"] = download_integrity.generated_ci_defaults_inert
     SCENARIOS["cfn-wrong-account-or-region-refused"] = download_integrity.cfn_wrong_account_or_region_refused
-    SCENARIOS["downloadable-assets-source-contract-and-archive-digests-match"] = download_integrity.source_contract_and_archive_digests_match
+    SCENARIOS["downloadable-assets-source-contract-and-archive-digests-match"] = (
+        download_integrity.source_contract_and_archive_digests_match
+    )
     SCENARIOS["python-missing-or-incompatible-dependency-rejected"] = (
         download_integrity.python_missing_dependency_rejected
     )
