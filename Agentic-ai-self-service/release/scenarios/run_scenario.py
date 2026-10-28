@@ -129,6 +129,7 @@ def _register_live_families() -> None:
     import downloadable_python
     import regional_core
     import rollback
+    import triggers
     import zero_residue
 
     SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
@@ -161,6 +162,10 @@ def _register_live_families() -> None:
     )
     SCENARIOS["forged-or-stale-evidence-denied"] = rollback.forged_or_stale_evidence_denied
     SCENARIOS["degraded-result-denied"] = rollback.degraded_result_denied
+    SCENARIOS["signed-delivery-executes-once"] = triggers.signed_delivery_executes_once
+    SCENARIOS["identical-replay-is-idempotent"] = triggers.identical_replay_is_idempotent
+    SCENARIOS["changed-body-same-id-conflicts"] = triggers.changed_body_same_id_conflicts
+    SCENARIOS["concurrent-claim-conflicts-and-recovers"] = triggers.concurrent_claim_conflicts_and_recovers
 
 
 _register_live_families()

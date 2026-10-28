@@ -28,6 +28,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -622,6 +623,40 @@ def _fire_signed_webhook(
         f"Signed delivery-id/body conflict returned {conflict.status_code}: {conflict.text}"
     )
     assert conflict.json().get("detail") == ("Webhook delivery ID was already used for a different payload")
+    # Concurrent identical deliveries of a FRESH id: eight at once. Exactly one may be accepted as
+    # new; every other must be the idempotent duplicate; none may conflict or fail. This is the
+    # enqueue-once guarantee under contention, not merely a sequential replay.
+    concurrent_id = f"integration-webhook-{uuid.uuid4().hex}"
+    concurrent_body = json.dumps(
+        {"nonce": nonce + "-concurrent", "source": "integration-test"}, separators=(",", ":")
+    ).encode("utf-8")
+    concurrent_message = timestamp.encode("ascii") + b"." + concurrent_id.encode("utf-8") + b"." + concurrent_body
+    concurrent_headers = {
+        **headers,
+        "X-AgentCore-Delivery-Id": concurrent_id,
+        "X-AgentCore-Signature": "v1="
+        + hmac.new(secret.encode("ascii"), concurrent_message, hashlib.sha256).hexdigest(),
+    }
+
+    def _post_once(_: int) -> tuple[int, dict[str, Any] | None]:
+        reply = requests.post(
+            f"{_base_url(api_session)}{path}", data=concurrent_body, headers=concurrent_headers, timeout=60
+        )
+        try:
+            return reply.status_code, reply.json()
+        except ValueError:
+            return reply.status_code, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(_post_once, range(8)))
+    statuses = sorted(status for status, _ in outcomes)
+    assert statuses == [202] * 8, f"Concurrent identical deliveries returned {statuses}"
+    fresh = [body for _, body in outcomes if body and body.get("duplicate") is False]
+    duplicates = [body for _, body in outcomes if body and body.get("duplicate") is True]
+    assert len(fresh) == 1 and len(duplicates) == 7, f"Concurrent deliveries were not enqueued exactly once: {outcomes}"
+    assert all(
+        body.get("delivery_id") == concurrent_id and body.get("accepted") is True for _, body in outcomes if body
+    )
     return delivery_id
 
 
