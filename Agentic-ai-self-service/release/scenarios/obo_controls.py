@@ -532,6 +532,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             raise ScenarioFailed("owner and attacker resolved to the same subject")
         http = BearerSession(owner, observed.cloudfront_url)
         tracker = DeploymentCleanupTracker(http, logs_client=session.client("logs"))
+        record = None
         try:
             fixture_url = _create_fixture(session, names, region, account_id, client_secret)
             fixture_made = True
@@ -596,7 +597,9 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             cleanup: dict[str, Any] = {}
             failed = "workforce-token-exchange-whoami" not in outcome or "direct-runtime-bypass-denied" not in outcome
             try:
-                cleanup["deployments"] = tracker.cleanup()
+                if record is not None:
+                    tracker.cleanup(record)
+                    cleanup["deployments"] = "verified"
             except Exception as error:  # noqa: BLE001
                 cleanup["deployments_error"] = redact(str(error), *secrets_to_hide)
             cleanup["runtime_gateway"] = _delete_runtime_and_gateway(
@@ -605,6 +608,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             if fixture_made:
                 # On failure keep the fixture log group and capture its tail for diagnosis.
                 if failed:
+                    time.sleep(25)  # let CloudWatch ingest the fixture's request logs before capture
                     outcome["fixture_logs"] = _fixture_log_tail(session, names["log_group"])
                 cleanup["fixture"] = _delete_fixture(session, names, keep_log_group=False)
             outcome["cleanup"] = cleanup
