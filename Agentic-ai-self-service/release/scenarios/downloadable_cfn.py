@@ -230,6 +230,16 @@ def _inventory(region: str, stack_name: str, bucket: str, runtime_id: str | None
     inventory["runtime_log_groups"] = [
         g["logGroupName"] for g in groups if runtime_id and runtime_id in g["logGroupName"]
     ]
+    cognito = session.client("cognito-idp")
+    compact = stack_name.replace("-", "")
+    pools: list[str] = []
+    for page in cognito.get_paginator("list_user_pools").paginate(MaxResults=60):
+        pools += [
+            p["Name"]
+            for p in page.get("UserPools", [])
+            if compact in p["Name"].replace("-", "") or stack_name in p["Name"]
+        ]
+    inventory["user_pools"] = pools
     return inventory
 
 
@@ -250,6 +260,10 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
         with with_synthetic_user(observed, label="cfndl") as user:
             for version, marker in (("v1", MARKER_ONE), ("v2", MARKER_TWO)):
                 body = template_request_body(GALLERY_TEMPLATE, suffix=suffix, system_prompt=_system_prompt(marker))
+                # A disposable recipient deployment: the export's default Retain policy keeps the
+                # user pool and log groups on delete BY DESIGN (and teardown.sh documents how to
+                # remove them by hand); zero residue is certified under the documented Delete policy.
+                body["dataRetentionPolicy"] = "Delete"
                 record, data = export_archive(
                     observed.cloudfront_url, "/api/generate-cfn-template", user.token, body, binding.region
                 )
@@ -345,6 +359,7 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
                 first["stack_prefixed_objects"] or second["stack_prefixed_objects"],
                 first["runtimes"] or second["runtimes"],
                 first["runtime_log_groups"] or second["runtime_log_groups"],
+                first["user_pools"] or second["user_pools"],
             ]
         )
         outcome["teardown_zero"] = not residue
