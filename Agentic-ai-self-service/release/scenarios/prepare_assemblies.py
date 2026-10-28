@@ -54,6 +54,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def directory_content_sha256(root: Path) -> str:
+    """Order-independent digest of a directory's regular files: path + bytes, symlinks refused."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise SystemExit(f"refusing to seal a symlink inside an asset: {path}")
+        if path.is_file():
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(4, "big") + relative)
+            digest.update(bytes.fromhex(_sha256(path)))
+    return digest.hexdigest()
+
+
 def _canonical(document: object) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -129,14 +142,27 @@ def synth(region: str, commit: str, tree: str, *, python: Path, cdk_bin: Path) -
         if resource.get("Type") != "AWS::Lambda::Function":
             continue
         key = resource["Properties"]["Code"]["S3Key"]
-        asset = target / f"asset.{key}"
-        if not asset.is_file():
-            raise SystemExit(f"{region}: asset {asset.name} for {logical_id} is missing from the assembly")
-        lambdas[logical_id] = {
-            "s3_key": key,
-            "asset_sha256": _sha256(asset),
-            "code_sha256": base64.b64encode(hashlib.sha256(asset.read_bytes()).digest()).decode("ascii"),
-        }
+        zip_asset = target / f"asset.{key}"
+        dir_asset = target / f"asset.{key.removesuffix('.zip')}"
+        if zip_asset.is_file():
+            # Pre-zipped asset: published byte for byte, so Lambda's CodeSha256 is predictable here.
+            lambdas[logical_id] = {
+                "s3_key": key,
+                "asset_kind": "zip",
+                "asset_sha256": _sha256(zip_asset),
+                "code_sha256": base64.b64encode(hashlib.sha256(zip_asset.read_bytes()).digest()).decode("ascii"),
+            }
+        elif dir_asset.is_dir():
+            # Directory asset: cdk-assets zips it at publish time, so CodeSha256 is bound live by
+            # downloading the published object and comparing its CONTENT to this tree, file by file.
+            lambdas[logical_id] = {
+                "s3_key": key,
+                "asset_kind": "directory",
+                "content_sha256": directory_content_sha256(dir_asset),
+                "file_count": sum(1 for path in dir_asset.rglob("*") if path.is_file()),
+            }
+        else:
+            raise SystemExit(f"{region}: asset for {logical_id} ({key}) is missing from the assembly")
     manifest = {
         "schema_version": 1,
         "stack_name": STACK_NAME,

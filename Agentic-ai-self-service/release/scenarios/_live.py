@@ -199,24 +199,89 @@ def assembly_dir(binding: RunBinding) -> Path:
     return ASSEMBLIES_ROOT / binding.commit / binding.region
 
 
-def _assembly_lambda_hashes(assembly: Path, template: dict[str, Any]) -> dict[str, str]:
-    """Expected ``CodeSha256`` per Lambda logical id: base64(sha256(asset zip bytes)).
+def _directory_content_sha256(root: Path) -> str:
+    """Same digest prepare_assemblies.py seals: sorted relative path + file bytes, symlinks refused."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ScenarioFailed(f"symlink inside a sealed asset: {path.name}")
+        if path.is_file():
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(4, "big") + relative)
+            digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
 
-    The file-publishing step uploads the synthesized ``asset.<hash>.zip`` byte for byte,
-    and Lambda's ``CodeSha256`` is the SHA-256 of exactly those bytes.
-    """
-    expected: dict[str, str] = {}
-    for logical_id, resource in template.get("Resources", {}).items():
-        if resource.get("Type") != "AWS::Lambda::Function":
+
+def _zip_content_sha256(data: bytes) -> str:
+    """The directory digest of a zip's members, so a published archive can be compared to a sealed tree."""
+    import io
+    import zipfile
+
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        members = [info for info in archive.infolist() if not info.is_dir()]
+        for info in sorted(members, key=lambda item: item.filename):
+            relative = info.filename.encode("utf-8")
+            digest.update(len(relative).to_bytes(4, "big") + relative)
+            digest.update(hashlib.sha256(archive.read(info)).digest())
+    return digest.hexdigest()
+
+
+def _published_asset(binding: RunBinding, key: str, cache_dir: Path) -> bytes:
+    """Bytes of s3://cdk-hnb659fds-assets-<account>-<region>/<key>, cached by ETag + size."""
+    bucket = f"cdk-hnb659fds-assets-{binding.account_id}-{binding.region}"
+    s3 = boto3_session(binding.region).client("s3")
+    head = s3.head_object(Bucket=bucket, Key=key)
+    etag, size = head["ETag"], int(head["ContentLength"])
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / key
+    stamp = cache_dir / f"{key}.etag"
+    if cached.is_file() and stamp.is_file() and stamp.read_text() == f"{etag} {size}" and cached.stat().st_size == size:
+        return cached.read_bytes()
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    if len(body) != size:
+        raise ScenarioFailed(f"published asset {key} is {len(body)} bytes, HEAD said {size}")
+    cached.write_bytes(body)
+    stamp.write_text(f"{etag} {size}")
+    return body
+
+
+def bind_lambda_code(
+    binding: RunBinding, observed: ObservedStack, template: dict[str, Any], assembly: Path
+) -> list[str]:
+    """Every live Lambda's code must be the object CDK published for the candidate's asset, and that
+    object's content must be the sealed asset -- byte for byte for zips, file by file for directories."""
+    problems: list[str] = []
+    expected_ids = {
+        logical_id
+        for logical_id, resource in template.get("Resources", {}).items()
+        if resource.get("Type") == "AWS::Lambda::Function"
+    }
+    if expected_ids != set(observed.lambda_code_sha256):
+        return ["the live stack and the sealed assembly do not have the same Lambda functions"]
+    cache_dir = assembly / "published"
+    verified_keys: dict[str, str] = {}
+    for logical_id in sorted(expected_ids):
+        key = template["Resources"][logical_id]["Properties"]["Code"].get("S3Key")
+        if not isinstance(key, str) or not key.endswith(".zip"):
+            problems.append(f"{logical_id} has no S3 asset key in the sealed template")
             continue
-        s3_key = resource.get("Properties", {}).get("Code", {}).get("S3Key")
-        if not isinstance(s3_key, str) or not s3_key.endswith(".zip"):
-            raise ScenarioFailed(f"{logical_id} in the sealed assembly has no S3 asset key")
-        asset = assembly / f"asset.{s3_key}"
-        if not asset.is_file():
-            raise ScenarioBlocked(f"sealed assembly lacks {asset.name}")
-        expected[logical_id] = base64.b64encode(hashlib.sha256(asset.read_bytes()).digest()).decode("ascii")
-    return expected
+        if key not in verified_keys:
+            data = _published_asset(binding, key, cache_dir)
+            zip_asset = assembly / f"asset.{key}"
+            dir_asset = assembly / f"asset.{key.removesuffix('.zip')}"
+            if zip_asset.is_file():
+                if hashlib.sha256(data).hexdigest() != sha256_file(zip_asset):
+                    problems.append(f"published {key} differs from the sealed zip asset")
+            elif dir_asset.is_dir():
+                if _zip_content_sha256(data) != _directory_content_sha256(dir_asset):
+                    problems.append(f"published {key} content differs from the sealed asset directory")
+            else:
+                raise ScenarioBlocked(f"sealed assembly lacks the asset for {key}")
+            verified_keys[key] = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+        if observed.lambda_code_sha256[logical_id] != verified_keys[key]:
+            problems.append(f"{logical_id} CodeSha256 is not the published candidate asset")
+    return problems
 
 
 def bind_deployment(binding: RunBinding, observed: ObservedStack) -> dict[str, Any]:
@@ -244,20 +309,15 @@ def bind_deployment(binding: RunBinding, observed: ObservedStack) -> dict[str, A
     expected_template_sha256 = canonical_json_sha256(template)
     if expected_template_sha256 != observed.template_sha256:
         problems.append("live template digest differs from the sealed assembly")
-    expected_hashes = _assembly_lambda_hashes(assembly, template)
+    lambda_count = sum(1 for r in template.get("Resources", {}).values() if r.get("Type") == "AWS::Lambda::Function")
     if observed.lambda_code_sha256:
-        if set(expected_hashes) != set(observed.lambda_code_sha256):
-            problems.append("the live stack and the sealed assembly do not have the same Lambda functions")
-        else:
-            for logical_id, expected in sorted(expected_hashes.items()):
-                if observed.lambda_code_sha256[logical_id] != expected:
-                    problems.append(f"{logical_id} code differs from the sealed assembly")
+        problems.extend(bind_lambda_code(binding, observed, template, assembly))
     comparison = {
         "candidate_commit": binding.commit,
         "candidate_project_tree": binding.project_tree,
         "source_outputs": {"commit": claimed_commit, "project_tree": claimed_tree, "dirty": claimed_dirty},
         "template_sha256": {"live": observed.template_sha256, "assembly": expected_template_sha256},
-        "lambda_functions_compared": len(expected_hashes),
+        "lambda_functions_compared": lambda_count,
         "problems": problems,
     }
     if problems:

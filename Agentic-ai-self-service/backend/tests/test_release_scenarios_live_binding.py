@@ -51,8 +51,21 @@ def _code_sha256(data: bytes) -> str:
     return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
 
 
+def _zip_of(files: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in sorted(files.items()):
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
 @pytest.fixture
 def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A sealed assembly with one pre-zipped asset and one directory asset, plus the objects
+    CDK would have published for them, served from memory instead of S3."""
     assemblies = tmp_path / "assemblies"
     monkeypatch.setattr(live, "ASSEMBLIES_ROOT", assemblies)
     target = assemblies / COMMIT / REGION
@@ -60,7 +73,8 @@ def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     template = {
         "Resources": {
             "WorkflowLambda": {"Type": "AWS::Lambda::Function", "Properties": {"Code": {"S3Key": "1111.zip"}}},
-            "StreamLambda": {"Type": "AWS::Lambda::Function", "Properties": {"Code": {"S3Key": "2222.zip"}}},
+            "DeploymentLambda": {"Type": "AWS::Lambda::Function", "Properties": {"Code": {"S3Key": "1111.zip"}}},
+            "ProviderLambda": {"Type": "AWS::Lambda::Function", "Properties": {"Code": {"S3Key": "2222.zip"}}},
             "Table": {"Type": "AWS::DynamoDB::Table", "Properties": {}},
         },
         "Outputs": {
@@ -71,8 +85,17 @@ def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         },
     }
     (target / "acf-production.template.json").write_text(json.dumps(template))
-    (target / "asset.1111.zip").write_bytes(_asset_bytes("workflow"))
-    (target / "asset.2222.zip").write_bytes(_asset_bytes("stream"))
+    # 1111: a directory asset (cdk-assets zips it at publish time)
+    tree_files = {"app/handler.py": b"def handler(): pass\n", "app/data.json": b"{}\n"}
+    for name, data in tree_files.items():
+        (target / "asset.1111" / name).parent.mkdir(parents=True, exist_ok=True)
+        (target / "asset.1111" / name).write_bytes(data)
+    # 2222: a pre-zipped asset (published byte for byte)
+    provider_zip = _zip_of({"index.js": b"exports.handler = () => {};\n"})
+    (target / "asset.2222.zip").write_bytes(provider_zip)
+    published = {"1111.zip": _zip_of(tree_files), "2222.zip": provider_zip}
+    monkeypatch.setattr(live, "_published_asset", lambda binding, key, cache_dir: published[key])
+
     binding = live.RunBinding(tmp_path / "run", COMMIT, TREE, ACCOUNT, REGION)
     observed = live.ObservedStack(
         region=REGION,
@@ -88,18 +111,19 @@ def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         },
         template_sha256=live.canonical_json_sha256(template),
         lambda_code_sha256={
-            "WorkflowLambda": _code_sha256(_asset_bytes("workflow")),
-            "StreamLambda": _code_sha256(_asset_bytes("stream")),
+            "WorkflowLambda": _code_sha256(published["1111.zip"]),
+            "DeploymentLambda": _code_sha256(published["1111.zip"]),
+            "ProviderLambda": _code_sha256(published["2222.zip"]),
         },
     )
-    return binding, observed, target
+    return binding, observed, target, published
 
 
 def test_the_candidate_binds_and_the_comparison_is_reported(sealed):
-    binding, observed, _ = sealed
+    binding, observed, _, _ = sealed
     comparison = live.bind_deployment(binding, observed)
     assert comparison["problems"] == []
-    assert comparison["lambda_functions_compared"] == 2
+    assert comparison["lambda_functions_compared"] == 3
     assert comparison["template_sha256"]["live"] == comparison["template_sha256"]["assembly"]
 
 
@@ -112,36 +136,53 @@ def test_the_candidate_binds_and_the_comparison_is_reported(sealed):
         (lambda o: o.outputs.__setitem__("SourceDirty", "true"), "only a clean synth"),
         (lambda o: setattr(o, "template_sha256", "0" * 64), "live template digest differs"),
         (
-            lambda o: o.lambda_code_sha256.__setitem__("StreamLambda", _code_sha256(b"tampered")),
-            "StreamLambda code differs",
+            lambda o: o.lambda_code_sha256.__setitem__("ProviderLambda", _code_sha256(b"tampered")),
+            "ProviderLambda CodeSha256 is not the published candidate asset",
         ),
-        (lambda o: o.lambda_code_sha256.pop("StreamLambda"), "same Lambda functions"),
+        (lambda o: o.lambda_code_sha256.pop("ProviderLambda"), "same Lambda functions"),
         (lambda o: o.lambda_code_sha256.__setitem__("Extra", _code_sha256(b"x")), "same Lambda functions"),
     ],
 )
 def test_each_single_disagreement_fails_the_binding(sealed, mutate, message):
-    binding, observed, _ = sealed
+    binding, observed, _, _ = sealed
     mutate(observed)
     with pytest.raises(live.ScenarioFailed, match=message):
         live.bind_deployment(binding, observed)
 
 
+def test_a_published_object_whose_content_is_not_the_sealed_asset_fails(sealed, monkeypatch):
+    """The live function may carry the published object's exact digest and STILL not be the
+    candidate: the published object itself must be the sealed asset, file by file."""
+    binding, observed, _, published = sealed
+    forged = dict(published)
+    forged["1111.zip"] = _zip_of({"app/handler.py": b"def handler(): return 'backdoor'\n", "app/data.json": b"{}\n"})
+    monkeypatch.setattr(live, "_published_asset", lambda binding, key, cache_dir: forged[key])
+    observed.lambda_code_sha256["WorkflowLambda"] = _code_sha256(forged["1111.zip"])
+    observed.lambda_code_sha256["DeploymentLambda"] = _code_sha256(forged["1111.zip"])
+    with pytest.raises(live.ScenarioFailed, match="content differs from the sealed asset directory"):
+        live.bind_deployment(binding, observed)
+    forged["2222.zip"] = _zip_of({"index.js": b"exports.handler = () => { backdoor(); };\n"})
+    observed.lambda_code_sha256["ProviderLambda"] = _code_sha256(forged["2222.zip"])
+    with pytest.raises(live.ScenarioFailed, match="differs from the sealed zip asset"):
+        live.bind_deployment(binding, observed)
+
+
 def test_a_missing_sealed_assembly_blocks_instead_of_passing(sealed):
-    binding, observed, target = sealed
+    binding, observed, target, _ = sealed
     (target / "acf-production.template.json").unlink()
     with pytest.raises(live.ScenarioBlocked, match="no sealed assembly"):
         live.bind_deployment(binding, observed)
 
 
 def test_a_missing_asset_in_the_assembly_blocks(sealed):
-    binding, observed, target = sealed
+    binding, observed, target, _ = sealed
     (target / "asset.2222.zip").unlink()
-    with pytest.raises(live.ScenarioBlocked, match="lacks asset.2222.zip"):
+    with pytest.raises(live.ScenarioBlocked, match="lacks the asset for 2222.zip"):
         live.bind_deployment(binding, observed)
 
 
 def test_provenance_has_exactly_the_keys_the_recorder_accepts(sealed, tmp_path: Path):
-    binding, observed, _ = sealed
+    binding, observed, _, _ = sealed
     spec = importlib.util.spec_from_file_location("release_evidence", RECORDER)
     recorder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recorder)
