@@ -287,7 +287,10 @@ def _delete_runtime_and_gateway(session: Any, runtime_id: str | None, gateway_na
             gateways = control.list_gateways().get("items", [])
             for gateway in gateways:
                 if str(gateway.get("name") or "") == gateway_name:
-                    control.delete_gateway(gatewayIdentifier=gateway["gatewayId"])
+                    gid = gateway["gatewayId"]
+                    for target in control.list_gateway_targets(gatewayIdentifier=gid).get("items", []):
+                        control.delete_gateway_target(gatewayIdentifier=gid, targetId=target["targetId"])
+                    control.delete_gateway(gatewayIdentifier=gid)
                     result["gateway_deleted"] = True
             result.setdefault("gateway_deleted", True)
         except ClientError as error:
