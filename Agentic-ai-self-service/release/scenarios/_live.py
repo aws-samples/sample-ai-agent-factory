@@ -260,6 +260,7 @@ class ObservedStack:
     template_sha256: str  # infrastructure digest: everything but the CDKMetadata telemetry resource
     raw_template_sha256: str = ""
     lambda_code_sha256: dict[str, str] = field(default_factory=dict)  # logical id -> base64 CodeSha256
+    lambda_physical: dict[str, str] = field(default_factory=dict)  # logical id -> physical function name
 
     @property
     def cloudfront_url(self) -> str:
@@ -297,6 +298,7 @@ def observe_stack(binding: RunBinding, *, with_lambda_hashes: bool = True) -> Ob
                     continue
                 configuration = lam.get_function(FunctionName=resource["PhysicalResourceId"])["Configuration"]
                 observed.lambda_code_sha256[resource["LogicalResourceId"]] = configuration["CodeSha256"]
+                observed.lambda_physical[resource["LogicalResourceId"]] = resource["PhysicalResourceId"]
     return observed
 
 

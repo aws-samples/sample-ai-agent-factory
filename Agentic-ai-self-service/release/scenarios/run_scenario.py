@@ -124,6 +124,7 @@ SCENARIOS: dict[str, Callable[[argparse.Namespace, Path], dict]] = {
 
 def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
+    import audit_controls
     import browser_widget
     import downloadable_cfn
     import downloadable_python
@@ -166,6 +167,9 @@ def _register_live_families() -> None:
     SCENARIOS["identical-replay-is-idempotent"] = triggers.identical_replay_is_idempotent
     SCENARIOS["changed-body-same-id-conflicts"] = triggers.changed_body_same_id_conflicts
     SCENARIOS["concurrent-claim-conflicts-and-recovers"] = triggers.concurrent_claim_conflicts_and_recovers
+    SCENARIOS["mutation-intent-and-outcome-visible"] = audit_controls.mutation_intent_and_outcome_visible
+    SCENARIOS["audit-store-outage-blocks-mutation"] = audit_controls.audit_store_outage_blocks_mutation
+    SCENARIOS["tampered-row-read-denied"] = audit_controls.tampered_row_read_denied
 
 
 _register_live_families()
