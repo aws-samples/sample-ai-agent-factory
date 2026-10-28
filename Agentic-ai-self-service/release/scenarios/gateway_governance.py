@@ -24,6 +24,7 @@ no half-working id is dispatchable from this commit.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -372,7 +373,11 @@ CEDAR_DENIAL_PREFIX = "Tool Execution Denied: Tool call not allowed due to polic
 ORACLES: dict[str, dict[str, Any]] = {
     "model-and-tool-content-allowed": {
         "runtimeSuccess": True,
+        "receiptCount": 1,
         "receiptStatus": "success",
+        "receiptLeaf": "guardrail_safe_echo",
+        "receiptInputMatch": True,
+        "receiptArgsMatch": True,
         "fixtureDispatches": 1,
         "responseKind": "guardrail-safe",
         "responseValue": "safe-dublin",
@@ -381,19 +386,24 @@ ORACLES: dict[str, dict[str, Any]] = {
         "runtimeSuccess": True,
         "receiptCount": 0,
         "fixtureDispatches": 0,
-        "responseText": "Your request was blocked by a safety guardrail.",
     },
     "tool-argument-blocked": {
         "runtimeSuccess": True,
+        "receiptCount": 1,
         "receiptStatus": "error",
+        "receiptLeaf": "guardrail_safe_echo",
+        "receiptInputMatch": True,
+        "receiptArgsMatch": True,
         "fixtureDispatches": 0,
-        "responseText": "Tool input blocked by the safety guardrail.",
     },
     "tool-result-blocked": {
         "runtimeSuccess": True,
+        "receiptCount": 1,
         "receiptStatus": "error",
+        "receiptLeaf": "guardrail_blocked_result",
+        "receiptInputMatch": True,
+        "receiptArgsMatch": True,
         "fixtureDispatches": 1,
-        "responseText": "Tool result blocked by the safety guardrail.",
     },
     "guardrail-outage-fails-closed": {
         "runtimeSuccess": False,
@@ -434,20 +444,34 @@ ORACLES: dict[str, dict[str, Any]] = {
     },
     "connector-tool-guardrail-denial": {
         "runtimeSuccess": True,
+        "receiptCount": 1,
         "receiptStatus": "error",
+        "receiptLeaf": "connector_guardrail_denied",
+        "receiptInputMatch": True,
+        "receiptArgsMatch": True,
         "fixtureDispatches": 0,
-        "responseText": "Tool input blocked by the safety guardrail.",
     },
 }
 
 # Scenario id -> the operation the agent is driven to call, and the tool `value`.
-RUNTIME_PROBES = (
-    "model-and-tool-content-allowed",
-    "prompt-attack-blocked",
-    "tool-argument-blocked",
-    "tool-result-blocked",
-    "connector-tool-guardrail-denial",
-)
+RUNTIME_PROBES = {
+    "model-and-tool-content-allowed": ("guardrail_safe_echo", "safe-dublin"),
+    "prompt-attack-blocked": ("guardrail_safe_echo", "safe-dublin"),
+    "tool-argument-blocked": ("guardrail_safe_echo", "ACFPR_BLOCK_ARGUMENT_B43627B"),
+    "tool-result-blocked": ("guardrail_blocked_result", None),
+    "connector-tool-guardrail-denial": ("connector_guardrail_denied", "ACFPR_CONNECTOR_GUARDRAIL_B43627B"),
+}
+
+
+def _probe_arguments(marker: str, value: str | None) -> dict[str, Any]:
+    """The exact argument object the agent is instructed to call the tool with.
+
+    This is the object the receipt's ``input_sha256`` / ``argument_sha256`` are asserted against, so it
+    must match what the prompt directs (marker always; value only when the scenario supplies one)."""
+    arguments: dict[str, Any] = {"marker": marker}
+    if value is not None:
+        arguments["value"] = value
+    return arguments
 
 
 def _prompt(scenario_id: str, marker: str) -> str:
@@ -533,6 +557,38 @@ def _receipts(body: dict[str, Any]) -> list[dict[str, Any]]:
     return value
 
 
+def _json_digest(value: Any) -> str:
+    """Byte-identical to the candidate's codegen_templates/tool_receipts._receipt_digest."""
+    serialized = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _receipt_facts(body: dict[str, Any], operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Forgery-resistant facts about the single tool receipt the agent's loop recorded this turn.
+
+    Mirrors the audited runner's ``_receipt_for``: the receipt is bound to the exact tool (leaf name
+    after the gateway ``___`` qualifier) and the exact arguments via the product's own SHA-256 digests
+    (``input_sha256`` over the whole argument object, ``argument_sha256`` per key). The model's text
+    cannot forge these — they are computed in the runtime tool-use loop, not the response."""
+    receipts = _receipts(body)
+    facts: dict[str, Any] = {
+        "receiptCount": len(receipts),
+        "receiptStatus": None,
+        "receiptLeaf": None,
+        "receiptInputMatch": False,
+        "receiptArgsMatch": False,
+    }
+    if len(receipts) == 1:
+        receipt = receipts[0]
+        facts["receiptStatus"] = receipt.get("status")
+        facts["receiptLeaf"] = str(receipt.get("name") or "").split("___")[-1]
+        facts["receiptInputMatch"] = receipt.get("input_sha256") == _json_digest(arguments)
+        facts["receiptArgsMatch"] = receipt.get("argument_sha256") == {
+            str(key)[:128]: _json_digest(val) for key, val in arguments.items()
+        }
+    return facts
+
+
 def _dispatch_count(boto_session: Any, log_group: str, marker: str, *, settle_seconds: int = 35) -> int:
     """Count unique fixture log events carrying this marker over a settle window (CloudWatch lags)."""
     logs = boto_session.client("logs")
@@ -589,13 +645,6 @@ def _parse_kind_value(response_text: str | None, marker: str) -> tuple[str | Non
     return None, None
 
 
-def _receipt_status(receipts: list[dict[str, Any]]) -> str | None:
-    """The status of the single tool receipt the agent's loop recorded this turn (exactly one), else None."""
-    if len(receipts) != 1:
-        return None
-    return receipts[0].get("status")
-
-
 def runtime_observation(
     session: Any,
     base: str,
@@ -604,23 +653,29 @@ def runtime_observation(
     boto_session: Any,
     log_group: str,
     *,
+    operation: str,
+    arguments: dict[str, Any],
     prompt: str,
     marker: str,
 ) -> dict[str, Any]:
-    """Drive one runtime-path probe via test-runtime-async and return the facts the oracles assert."""
+    """Drive one runtime-path probe via test-runtime-async and return the facts the oracles assert.
+
+    The oracle gate is the deterministic receipt contract (``_receipt_facts``: exact tool leaf +
+    per-argument SHA-256 digests + status) plus the fixture dispatch count. ``responseText`` is
+    recorded as evidence only: the candidate routes block text through Bedrock guardrail messaging
+    and Strands output redaction, so the final-turn string is LLM/path-dependent, not a stable
+    source-defined contract — unlike the receipt, which the tool-use loop computes directly."""
     body = _invoke_runtime_async(session, base, endpoint, runtime_id, prompt, marker)
-    receipts = _receipts(body)
     response_text = body.get("response") if isinstance(body.get("response"), str) else None
     kind, parsed_value = _parse_kind_value(response_text, marker)
     return {
         "runtimeSuccess": bool(body.get("success")),
         "error": body.get("error"),
         "responseText": response_text,
-        "receiptCount": len(receipts),
-        "receiptStatus": _receipt_status(receipts),
         "responseKind": kind,
         "responseValue": parsed_value,
         "fixtureDispatches": _dispatch_count(boto_session, log_group, marker),
+        **_receipt_facts(body, operation, arguments),
     }
 
 
@@ -1084,7 +1139,7 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                 outcome.update(runtime_id=runtime_id, gateway_id=facts["gateway_id"], deployment_id=deployment_id)
 
                 # (A) runtime-path probes while the guardrail is healthy.
-                for scenario_id in RUNTIME_PROBES:
+                for scenario_id, (operation, probe_value) in RUNTIME_PROBES.items():
                     marker = new_marker(names["token"], scenario_id)
                     observations[scenario_id] = runtime_observation(
                         session,
@@ -1093,6 +1148,8 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                         runtime_id,
                         aws,
                         names["log_group"],
+                        operation=operation,
+                        arguments=_probe_arguments(marker, probe_value),
                         prompt=_prompt(scenario_id, marker),
                         marker=marker,
                     )
@@ -1158,6 +1215,8 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                     runtime_id,
                     aws,
                     names["log_group"],
+                    operation="guardrail_safe_echo",
+                    arguments=_probe_arguments(marker, "safe-dublin"),
                     prompt=_prompt("model-and-tool-content-allowed", marker),
                     marker=marker,
                 )
