@@ -124,10 +124,14 @@ SCENARIOS: dict[str, Callable[[argparse.Namespace, Path], dict]] = {
 
 def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
+    import downloadable_python
     import regional_core
 
     SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
         regional_core.core_runtime_gateway_identity_policy_evaluation
+    )
+    SCENARIOS["ui-authenticated-python-download-clean-recipient-lock-install-compile-start-invoke"] = (
+        downloadable_python.ui_authenticated_python_download_clean_recipient
     )
 
 
