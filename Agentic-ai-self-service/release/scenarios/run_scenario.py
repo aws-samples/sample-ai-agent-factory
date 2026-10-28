@@ -131,6 +131,7 @@ def _register_live_families() -> None:
     import downloadable_cfn
     import downloadable_python
     import jit_controls
+    import kms_controls
     import regional_core
     import rollback
     import triggers
@@ -181,6 +182,9 @@ def _register_live_families() -> None:
     SCENARIOS["leased-approval-applies-exact-policy"] = jit_controls.leased_approval_applies_exact_policy
     SCENARIOS["concurrent-rejection-cannot-win"] = jit_controls.concurrent_rejection_cannot_win
     SCENARIOS["gateway-policy-mutation-request-denied"] = jit_controls.gateway_policy_mutation_request_denied
+    SCENARIOS["target-cmk-encrypts-batch-evaluation"] = kms_controls.target_cmk_encrypts_batch_evaluation
+    SCENARIOS["wrong-account-key-denied"] = kms_controls.wrong_account_key_denied
+    SCENARIOS["wrong-region-key-denied"] = kms_controls.wrong_region_key_denied
     SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
         download_integrity.cfn_download_digest_verified
     )
