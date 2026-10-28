@@ -224,13 +224,14 @@ export const facts: Record<ProjectId, ProjectFacts> = {
 
   'self-service': {
     regions: {
-      value: 'Any AWS region; us-east-1 is the default',
+      value:
+        'One of seven selected release Regions: us-east-1, us-east-2, us-west-2, eu-central-1, eu-west-1, eu-west-2 or eu-west-3; us-east-1 is the default',
       source: {
         file: SELF_SERVICE_README,
         heading: 'Prerequisites',
-        quote: '`us-east-1` is the default; see [Deploying to another region]',
+        quote: '`us-east-1` is the default. See [Deploying to another region]',
       },
-      note: 'Outside us-east-1 the WAF web ACL is REGIONAL on the Cognito user pool and the CloudFront distribution runs without an edge ACL. APAC regions may need the model ID set explicitly.',
+      note: 'Every other value of AWS_REGION is refused by deploy.sh, by the CDK app at synth, and by the deploy API. Outside us-east-1 the WAF web ACL is REGIONAL on the Cognito user pool and the CloudFront distribution runs without an edge ACL. eu-central-1 and eu-west-2 run without managed Web Search; eu-west-3 also has no AWS Agent Registry.',
     },
     defaultRegion: {
       value: 'us-east-1',
