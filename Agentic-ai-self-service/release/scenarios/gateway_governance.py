@@ -530,13 +530,19 @@ def runtime_observation(
     """Drive one runtime-path probe and return the observed facts the runtime oracles assert."""
     response = _invoke(session, base, runtime_name, _prompt(operation, marker, value, attack=attack), marker)
     status = response.status_code
-    body = response.json() if response.content else {}
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
     receipts = body.get("toolReceipts")
     kind, parsed_value = _parse_kind_value(body.get("response"))
     return {
         "httpStatus": status,
         "runtimeSuccess": bool(body.get("success")),
         "error": body.get("error"),
+        "failureDetail": (body.get("detail") or response.text[:300]) if status != 200 else None,
         "responseText": body.get("response"),
         "receiptCount": len(receipts or []),
         "receiptStatus": _receipt_status(receipts),
@@ -976,6 +982,13 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
             tracker = DeploymentCleanupTracker(session, logs_client=logs_client)
             budgets = RuntimeBudgetTracker(session)
             budgets.authorize(names["runtime_name"])
+            try:
+                listed = session.get(f"{base}/api/cost/budgets", timeout=30)
+                outcome["authorized_budgets"] = (
+                    listed.json() if listed.ok else f"{listed.status_code}:{listed.text[:150]}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                outcome["authorized_budgets"] = f"list-error:{type(exc).__name__}"
             try:
                 response = session.post(f"{base}/api/deploy", json=deploy_body(names, fixture_url, secret), timeout=120)
                 if response.status_code != 202:
