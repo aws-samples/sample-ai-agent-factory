@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
-from _live import REQUIRED_USER_GROUPS
+import requests
+from _live import REQUIRED_USER_GROUPS, ScenarioFailed
 
 FAMILY = "gateway-governance"
 GOV_GROUPS = REQUIRED_USER_GROUPS | {"g-admins-super"}
@@ -410,7 +412,7 @@ RUNTIME_PROBES = {
     "connector-tool-guardrail-denial": ("connector_guardrail_denied", "ACFPR_CONNECTOR_GUARDRAIL_B43627B", False),
 }
 
-_JSON_OBJECT = __import__("re").compile(r"\{[^{}]*\}")
+_JSON_OBJECT = re.compile(r"\{[^{}]*\}")
 
 
 def _prompt(operation: str, marker: str, value: str | None, *, attack: bool = False) -> str:
@@ -507,6 +509,262 @@ def runtime_observation(
     }
 
 
+# ---------------------------------------------------------------------------
+# Direct Gateway MCP JSON-RPC (the 4 Cedar/connector oracles) + the IAM
+# control-plane denial simulation (1 oracle). These mirror the proven b43627b
+# runner: the gateway inbound token is minted from the gateway's own deployment-
+# bound m2m client (client_credentials); MCP responses stream as JSON or SSE; and
+# the runtime execution role is proven unable to mutate the gateway/policy plane.
+# ---------------------------------------------------------------------------
+MCP_PROTOCOL_VERSION = "2025-11-25"
+MARKER_PATTERN = re.compile(r"^gg-[0-9a-f]{12}-[a-z0-9-]{3,48}$")
+FORBIDDEN_RUNTIME_CONTROL_ACTIONS = frozenset(
+    {
+        "bedrock-agentcore:CreateGateway",
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:DeleteGateway",
+        "bedrock-agentcore:CreateGatewayTarget",
+        "bedrock-agentcore:UpdateGatewayTarget",
+        "bedrock-agentcore:DeleteGatewayTarget",
+        "bedrock-agentcore:SynchronizeGatewayTargets",
+        "bedrock-agentcore:CreatePolicyEngine",
+        "bedrock-agentcore:UpdatePolicyEngine",
+        "bedrock-agentcore:DeletePolicyEngine",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy",
+        "bedrock-agentcore:ManageAdminPolicy",
+    }
+)
+
+
+def gateway_token(boto_session: Any, client_info: dict[str, Any]) -> str:
+    """Mint the gateway inbound Bearer via its deployment-bound m2m client (client_credentials)."""
+    client_id = str(client_info.get("client_id") or "")
+    secret_ref = str(client_info.get("minted_client_secret_ref") or "")
+    token_endpoint = str(client_info.get("token_endpoint") or "")
+    scope = str(client_info.get("scope") or "")
+    if not client_id or not secret_ref.startswith("arn:aws:secretsmanager:"):
+        raise ScenarioFailed("gateway client credentials are not deployment-bound references")
+    if not token_endpoint.startswith("https://") or not scope:
+        raise ScenarioFailed("gateway token endpoint or scope unavailable")
+    raw = boto_session.client("secretsmanager").get_secret_value(SecretId=secret_ref).get("SecretString")
+    if not isinstance(raw, str) or not raw:
+        raise ScenarioFailed("gateway client credential reference is empty")
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        decoded = None
+    if isinstance(decoded, dict):
+        client_secret = next(
+            (str(decoded[k]) for k in ("clientSecret", "client_secret", "secret", "value") if decoded.get(k)), ""
+        )
+    else:
+        client_secret = raw.strip()
+    if not client_secret:
+        raise ScenarioFailed("gateway client credential reference has no supported value")
+    response = requests.post(
+        token_endpoint,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": scope,
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise ScenarioFailed(f"gateway token endpoint returned {response.status_code}")
+    value = response.json()
+    token = value.get("access_token") if isinstance(value, dict) else None
+    if not isinstance(token, str) or not token or value.get("token_type") != "Bearer":
+        raise ScenarioFailed("gateway token response differs")
+    return token
+
+
+def _mcp_post(gateway_url: str, token: str, payload: dict[str, Any], timeout: int = 60) -> Any:
+    return requests.post(
+        gateway_url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+        },
+        json=payload,
+        timeout=timeout,
+    )
+
+
+def _mcp_objects(response: Any) -> list[dict[str, Any]]:
+    """Parse MCP objects whether the gateway answered as JSON or an SSE 'data:' stream."""
+    values: list[dict[str, Any]] = []
+    for line in response.text.splitlines():
+        candidate = line.strip()
+        if candidate.startswith("data:"):
+            candidate = candidate[5:].strip()
+        if not candidate.startswith("{"):
+            continue
+        try:
+            value = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            values.append(value)
+    if not values and response.text.strip().startswith("{"):
+        try:
+            value = response.json()
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            values.append(value)
+    return values
+
+
+def _walk_json(value: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    pending = [value]
+    visited = 0
+    while pending:
+        current = pending.pop()
+        visited += 1
+        if visited > 512:
+            break
+        if isinstance(current, dict):
+            found.append(current)
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, str) and current.strip().startswith(("{", "[")) and len(current) <= 65536:
+            try:
+                pending.append(json.loads(current))
+            except ValueError:
+                pass
+    return found
+
+
+def list_tools(
+    gateway_url: str, token: str, allowed: set[str], forbidden: set[str], *, timeout_seconds: int = 600
+) -> dict[str, str]:
+    """Poll tools/list until the exact Cedar-filtered leaf set appears; return leaf->qualified map."""
+    deadline = time.monotonic() + timeout_seconds
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        response = _mcp_post(
+            gateway_url,
+            token,
+            {"jsonrpc": "2.0", "id": "gg-list-tools", "method": "tools/list", "params": {}},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            for value in _mcp_objects(response):
+                tools = (value.get("result") or {}).get("tools") or []
+                names = [str(item.get("name") or "") for item in tools if isinstance(item, dict)]
+                last = names
+                by_leaf = {name.split("___")[-1]: name for name in names}
+                if (
+                    len(names) == len(allowed)
+                    and len(by_leaf) == len(names)
+                    and set(by_leaf) == set(allowed)
+                    and not (set(by_leaf) & set(forbidden))
+                ):
+                    return by_leaf
+        time.sleep(10)
+    raise ScenarioFailed(f"gateway tools/list did not expose the exact Cedar-filtered set: {last}")
+
+
+def direct_allowed(
+    gateway_url: str, token: str, qualified_name: str, arguments: dict[str, Any], expected_kind: str
+) -> dict[str, Any]:
+    """tools/call an allowed tool; assert HTTP 200 + its exact fixture result (kind + marker)."""
+    response = _mcp_post(
+        gateway_url,
+        token,
+        {
+            "jsonrpc": "2.0",
+            "id": f"gg-{arguments['marker']}",
+            "method": "tools/call",
+            "params": {"name": qualified_name, "arguments": arguments},
+        },
+    )
+    if response.status_code != 200:
+        raise ScenarioFailed(f"authorized gateway tool returned {response.status_code}: {response.text[:300]}")
+    objects = [item for value in _mcp_objects(response) for item in _walk_json(value)]
+    matches = [o for o in objects if o.get("kind") == expected_kind and o.get("marker") == arguments["marker"]]
+    if len(matches) != 1:
+        raise ScenarioFailed("authorized gateway tool did not return its exact fixture result")
+    return {"httpStatus": 200, "jsonRpcError": False, "responseKind": expected_kind, "marker": arguments["marker"]}
+
+
+def direct_denied(gateway_url: str, token: str, qualified_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """tools/call a Cedar-denied tool; assert HTTP 200 + the exact JSON-RPC default-deny error."""
+    response = _mcp_post(
+        gateway_url,
+        token,
+        {
+            "jsonrpc": "2.0",
+            "id": f"gg-{arguments['marker']}",
+            "method": "tools/call",
+            "params": {"name": qualified_name, "arguments": arguments},
+        },
+    )
+    if response.status_code != 200:
+        raise ScenarioFailed(f"cedar-denied gateway tool returned HTTP {response.status_code}")
+    exact_message = (
+        "Tool Execution Denied: Tool call not allowed due to policy enforcement "
+        "[No policy applies to the request (denied by default).]"
+    )
+    errors = [
+        o["error"] for value in _mcp_objects(response) for o in _walk_json(value) if isinstance(o.get("error"), dict)
+    ]
+    exact = [
+        e for e in errors if isinstance(e.get("code"), int) and e["code"] < 0 and e.get("message") == exact_message
+    ]
+    if len(exact) != 1:
+        raise ScenarioFailed("cedar denial lacks the exact JSON-RPC default-deny message")
+    return {"httpStatus": 200, "jsonRpcError": True, "message": exact_message}
+
+
+def runtime_role_denial(boto_session: Any, role_arn: str, gateway_arn: str) -> dict[str, Any]:
+    """Prove the runtime role cannot mutate the gateway/policy plane: explicitDeny for every
+    forbidden action by simulation, corroborated by the actual NeverMutateGatewayOrPolicyControlPlane
+    explicit-deny statement on the role (read-only; zero mutations)."""
+    iam = boto_session.client("iam")
+    actions = sorted(FORBIDDEN_RUNTIME_CONTROL_ACTIONS)
+    results = (
+        iam.simulate_principal_policy(PolicySourceArn=role_arn, ActionNames=actions, ResourceArns=[gateway_arn]).get(
+            "EvaluationResults"
+        )
+        or []
+    )
+    decisions = {str(r.get("EvalActionName")): str(r.get("EvalDecision")) for r in results if isinstance(r, dict)}
+    if set(decisions) != set(FORBIDDEN_RUNTIME_CONTROL_ACTIONS) or set(decisions.values()) != {"explicitDeny"}:
+        raise ScenarioFailed(f"runtime role simulation is not explicitDeny for every forbidden action: {decisions}")
+    role_name = role_arn.rsplit("/", 1)[-1]
+    sid_found = False
+    for policy_name in iam.list_role_policies(RoleName=role_name).get("PolicyNames", []):
+        document = iam.get_role_policy(RoleName=role_name, PolicyName=policy_name).get("PolicyDocument") or {}
+        statements = document.get("Statement") if isinstance(document, dict) else None
+        for statement in statements if isinstance(statements, list) else []:
+            if (
+                isinstance(statement, dict)
+                and statement.get("Sid") == "NeverMutateGatewayOrPolicyControlPlane"
+                and statement.get("Effect") == "Deny"
+            ):
+                sid_found = True
+    if not sid_found:
+        raise ScenarioFailed("runtime role lacks the NeverMutateGatewayOrPolicyControlPlane explicit-deny statement")
+    return {
+        "roleArn": role_arn,
+        "explicitDenyStatement": "NeverMutateGatewayOrPolicyControlPlane",
+        "forbiddenActionCount": len(FORBIDDEN_RUNTIME_CONTROL_ACTIONS),
+        "simulationDecision": "explicitDeny",
+        "allForbiddenActionsCovered": True,
+        "awsMutations": 0,
+    }
+
+
 __all__ = [
     "FAMILY",
     "GOV_GROUPS",
@@ -514,6 +772,9 @@ __all__ = [
     "GUARDRAIL_CONTENT_FILTERS",
     "CEDAR_FORBIDDEN_OPERATIONS",
     "CEDAR_DENIAL_PREFIX",
+    "MCP_PROTOCOL_VERSION",
+    "MARKER_PATTERN",
+    "FORBIDDEN_RUNTIME_CONTROL_ACTIONS",
     "PATH_OPERATIONS",
     "ORACLES",
     "RUNTIME_PROBES",
@@ -525,4 +786,9 @@ __all__ = [
     "policy_config",
     "deploy_body",
     "runtime_observation",
+    "gateway_token",
+    "list_tools",
+    "direct_allowed",
+    "direct_denied",
+    "runtime_role_denial",
 ]
