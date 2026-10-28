@@ -124,6 +124,7 @@ SCENARIOS: dict[str, Callable[[argparse.Namespace, Path], dict]] = {
 
 def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
+    import browser_widget
     import downloadable_cfn
     import downloadable_python
     import regional_core
@@ -148,6 +149,11 @@ def _register_live_families() -> None:
     SCENARIOS["foreign-decoys-preserved"] = downloadable_cfn.foreign_decoys_preserved
     SCENARIOS["direct-service-inventories-zero"] = zero_residue.direct_service_inventories_zero
     SCENARIOS["aliasless-kms-and-log-groups-zero"] = zero_residue.aliasless_kms_and_log_groups_zero
+    SCENARIOS["cloudfront-widget-invokes-production-alias"] = browser_widget.cloudfront_widget_invokes_production_alias
+    SCENARIOS["widget-model-output-renders-inert"] = browser_widget.widget_model_output_renders_inert
+    SCENARIOS["widget-token-attribute-ignored"] = browser_widget.widget_token_attribute_ignored
+    SCENARIOS["widget-target-injection-denied"] = browser_widget.widget_target_injection_denied
+    SCENARIOS["real-browser-cloudfront-widget-flow"] = browser_widget.real_browser_cloudfront_widget_flow
     SCENARIOS["arbitrary-version-rollback-denied"] = rollback.arbitrary_version_rollback_denied
     SCENARIOS["production-serves-exact-previous-version"] = rollback.production_serves_exact_previous_version
 
