@@ -192,6 +192,12 @@ _CLAIMS = {
         (o.get("python_digest") or {}).get("verified") is True
         and bool((o.get("python_digest") or {}).get("artifact_manifest_sha256"))
     ),
+    "downloadable-assets-source-contract-and-archive-digests-match": lambda o: all(
+        (o.get(k) or {}).get("verified") is True
+        and bool((o.get(k) or {}).get("archive_sha256"))
+        and bool((o.get(k) or {}).get("artifact_manifest_sha256"))
+        for k in ("cfn_digest", "python_digest")
+    ),
     "tampered-archive-or-manifest-rejected-before-use": lambda o: (
         (o.get("tamper") or {}).get("rejectedBeforeUse") is True
     ),
@@ -245,6 +251,10 @@ def cfn_download_digest_verified(args, artifact_dir):
 
 def python_download_digest_verified(args, artifact_dir):
     return _scenario(args, artifact_dir, "deployed-api-authenticated-python-download-archive-digest-manifest-verified")
+
+
+def source_contract_and_archive_digests_match(args, artifact_dir):
+    return _scenario(args, artifact_dir, "downloadable-assets-source-contract-and-archive-digests-match")
 
 
 def tampered_archive_rejected(args, artifact_dir):
