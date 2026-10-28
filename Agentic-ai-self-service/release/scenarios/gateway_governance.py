@@ -718,7 +718,13 @@ def direct_allowed(
     objects = [item for value in _mcp_objects(response) for item in _walk_json(value)]
     matches = [o for o in objects if o.get("kind") == expected_kind and o.get("marker") == arguments["marker"]]
     if len(matches) != 1:
-        raise ScenarioFailed("authorized gateway tool did not return its exact fixture result")
+        kinds = [o.get("kind") for o in objects if o.get("kind") is not None]
+        marker_seen = any(o.get("marker") == arguments["marker"] for o in objects)
+        raise ScenarioFailed(
+            f"authorized gateway tool did not return its exact fixture result: expected_kind={expected_kind!r} "
+            f"matches={len(matches)} objects={len(objects)} kinds={kinds[:8]} marker_seen={marker_seen} "
+            f"snippet={response.text[:400]!r}"
+        )
     return {"httpStatus": 200, "jsonRpcError": False, "responseKind": expected_kind, "marker": arguments["marker"]}
 
 
