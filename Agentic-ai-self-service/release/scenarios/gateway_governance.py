@@ -23,16 +23,31 @@ no half-working id is dispatchable from this commit.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
+import os
 import re
+import secrets
+import sys
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import requests
-from _live import REQUIRED_USER_GROUPS, ScenarioFailed
+from _live import (
+    BACKEND,
+    REQUIRED_USER_GROUPS,
+    BearerSession,
+    ScenarioFailed,
+    boto3_session,
+    bound_deployment,
+    family_journey,
+    redact,
+    with_synthetic_user,
+    write_json,
+)
 
 FAMILY = "gateway-governance"
 GOV_GROUPS = REQUIRED_USER_GROUPS | {"g-admins-super"}
@@ -773,6 +788,322 @@ def runtime_role_denial(boto_session: Any, role_arn: str, gateway_arn: str) -> d
         "allForbiddenActionsCovered": True,
         "awsMutations": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Live journey: deploy the guardrailed + Cedar + connector agent once, drive all
+# eleven oracles across the three paths, and tear down via the product's own
+# idempotent delete. One journey is cached per commit/region/family; each
+# scenario id checks its own observed facet against ORACLES.
+# ---------------------------------------------------------------------------
+DEPLOY_TIMEOUT_SECONDS = 25 * 60
+ALLOWED_LEAVES = {
+    "guardrail_safe_echo",
+    "guardrail_blocked_result",
+    "policy_allowed_probe",
+    "connector_allowed_probe",
+    "connector_guardrail_denied",
+}
+DENIED_LEAVES = {"policy_denied_probe", "connector_denied_probe"}
+
+
+def _names() -> dict[str, str]:
+    token = secrets.token_hex(6)  # 12 hex chars — matches MARKER_PATTERN's token field
+    return {
+        "token": token,
+        "node_id": f"it-gg-{token}",
+        "runtime_name": f"itgg{token}",
+        "gateway": f"itgg{token}",
+        "function": f"acfpr-gg-fixture-{token}",
+        "role": f"acfpr-gg-fixture-{token}-role",
+        "parameter": f"/acfpr/gg/fixture/{token}",
+        "log_group": f"/aws/lambda/acfpr-gg-fixture-{token}",
+        "policy": f"acfpr-gg-policy-{token}",
+        "guardrail": f"acfpr-gg-guardrail-{token}",
+    }
+
+
+def _qualified_sibling(qualified_name: str, leaf: str) -> str:
+    """Build the qualified name of a Cedar-hidden sibling tool from a visible one."""
+    segments = qualified_name.split("___")
+    if len(segments) < 2 or any(re.fullmatch(r"[A-Za-z0-9_-]+", s) is None for s in segments):
+        raise ScenarioFailed("gateway published an invalid qualified tool name")
+    return "___".join([*segments[:-1], leaf])
+
+
+def _gateway_facts(status: dict[str, Any], aws: Any, names: dict[str, str], runtime_id: str | None) -> dict[str, Any]:
+    """Resolve gateway_url, client_info, gateway_arn and the runtime role ARN from the deploy status,
+    falling back to the control plane for ARNs/url the status body omits."""
+    control = aws.client("bedrock-agentcore-control")
+    gw = status.get("gateway_result") or status.get("gateway") or {}
+    client_info = gw.get("client_info") or {}
+    gateway_id = gw.get("gateway_id") or gw.get("gatewayId") or ""
+    gateway_url = gw.get("gateway_url") or ""
+    gateway_arn = gw.get("gateway_arn") or ""
+    if not gateway_id:
+        for item in control.list_gateways(maxResults=100).get("items", []):
+            if item.get("name") == names["gateway"]:
+                gateway_id = item.get("gatewayId") or item.get("gatewayIdentifier") or ""
+                break
+    if gateway_id and not (gateway_url and gateway_arn):
+        detail = control.get_gateway(gatewayIdentifier=gateway_id)
+        gateway_url = gateway_url or detail.get("gatewayUrl") or ""
+        gateway_arn = gateway_arn or detail.get("gatewayArn") or ""
+    role_arn = status.get("role_arn") or (status.get("runtime") or {}).get("role_arn") or ""
+    if not role_arn and runtime_id:
+        runtime = control.get_agent_runtime(agentRuntimeId=runtime_id)
+        role_arn = (runtime.get("agentRuntime") or {}).get("roleArn") or runtime.get("roleArn") or ""
+    missing = [
+        key
+        for key, value in {
+            "gateway_url": gateway_url,
+            "gateway_arn": gateway_arn,
+            "role_arn": role_arn,
+            "client_info": client_info,
+        }.items()
+        if not value
+    ]
+    if missing:
+        raise ScenarioFailed(
+            f"could not resolve gateway facts from deploy status: missing {missing}; status keys={sorted(status)[:20]}"
+        )
+    return {
+        "gateway_id": gateway_id,
+        "gateway_url": gateway_url,
+        "gateway_arn": gateway_arn,
+        "role_arn": role_arn,
+        "client_info": client_info,
+    }
+
+
+def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
+    if str(BACKEND) not in sys.path:
+        sys.path.insert(0, str(BACKEND))
+    from tests.integration.conftest import DeploymentCleanupTracker, wait_for_deployment_terminal
+
+    base = observed.cloudfront_url
+    aws = boto3_session(binding.region)
+    logs_client = aws.client("logs")
+    previous_env = {k: os.environ.get(k) for k in ("AWS_REGION", "AWS_DEFAULT_REGION")}
+    os.environ.update({"AWS_REGION": binding.region, "AWS_DEFAULT_REGION": binding.region})
+    names = _names()
+    secret = secrets.token_urlsafe(24)
+    outcome: dict[str, Any] = {"region": binding.region, "customer_path": base, "names_token": names["token"]}
+    observations: dict[str, Any] = {}
+    cleanup_errors: list[str] = []
+    try:
+        fixture_url = create_fixture(aws, names, binding.region, binding.account_id, secret)
+        with with_synthetic_user(observed, label="gatewaygov", groups=GOV_GROUPS) as user:
+            session = BearerSession(user, base)
+            session.headers["Content-Type"] = "application/json"
+            tracker = DeploymentCleanupTracker(session, logs_client=logs_client)
+            try:
+                response = session.post(f"{base}/api/deploy", json=deploy_body(names, fixture_url, secret), timeout=120)
+                if response.status_code != 202:
+                    raise ScenarioFailed(f"deploy returned {response.status_code}: {response.text[:300]}")
+                deployment_id = response.json()["deploymentId"]
+                record = tracker.track(deployment_id)
+                status = wait_for_deployment_terminal(session, deployment_id, timeout=DEPLOY_TIMEOUT_SECONDS)
+                if status.get("status") != "succeeded":
+                    raise ScenarioFailed(f"deploy ended {status.get('status')}: {str(status)[:300]}")
+                runtime_id = status.get("runtime_id") or status.get("runtimeId")
+                tracker.bind_runtime(record, runtime_id)
+                guardrail_id = (
+                    status.get("guardrail_id")
+                    or (status.get("gateway_result") or {}).get("guardrail_id")
+                    or (status.get("guardrails_result") or {}).get("guardrail_id")
+                )
+                facts = _gateway_facts(status, aws, names, runtime_id)
+                outcome.update(runtime_id=runtime_id, gateway_id=facts["gateway_id"], deployment_id=deployment_id)
+
+                # (A) runtime-path probes while the guardrail is healthy.
+                for scenario_id, (operation, value, attack) in RUNTIME_PROBES.items():
+                    marker = new_marker(names["token"], scenario_id)
+                    observations[scenario_id] = runtime_observation(
+                        session,
+                        base,
+                        names["runtime_name"],
+                        aws,
+                        names["log_group"],
+                        operation=operation,
+                        value=value,
+                        marker=marker,
+                        attack=attack,
+                    )
+
+                # (B) direct Gateway MCP JSON-RPC.
+                gw_token = gateway_token(aws, facts["client_info"])
+                by_leaf = list_tools(facts["gateway_url"], gw_token, ALLOWED_LEAVES, DENIED_LEAVES)
+                m = new_marker(names["token"], "cedar-authorized")
+                observations["cedar-authorized-tool-call"] = {
+                    **direct_allowed(
+                        facts["gateway_url"], gw_token, by_leaf["policy_allowed_probe"], {"marker": m}, "policy-allowed"
+                    ),
+                    "fixtureDispatches": _dispatch_count(aws, names["log_group"], m),
+                }
+                m = new_marker(names["token"], "connector-authorized")
+                observations["connector-tools-list-and-authorized-call"] = {
+                    **direct_allowed(
+                        facts["gateway_url"],
+                        gw_token,
+                        by_leaf["connector_allowed_probe"],
+                        {"marker": m},
+                        "connector-allowed",
+                    ),
+                    "listed": "connector_allowed_probe" in by_leaf,
+                    "fixtureDispatches": _dispatch_count(aws, names["log_group"], m),
+                }
+                m = new_marker(names["token"], "cedar-denied")
+                observations["cedar-unauthorized-tool-call-denied"] = {
+                    **direct_denied(
+                        facts["gateway_url"],
+                        gw_token,
+                        _qualified_sibling(by_leaf["policy_allowed_probe"], "policy_denied_probe"),
+                        {"marker": m},
+                    ),
+                    "fixtureDispatches": _dispatch_count(aws, names["log_group"], m),
+                }
+                m = new_marker(names["token"], "connector-denied")
+                observations["connector-cedar-denial"] = {
+                    **direct_denied(
+                        facts["gateway_url"],
+                        gw_token,
+                        _qualified_sibling(by_leaf["connector_allowed_probe"], "connector_denied_probe"),
+                        {"marker": m},
+                    ),
+                    "listed": "connector_denied_probe" in by_leaf,
+                    "fixtureDispatches": _dispatch_count(aws, names["log_group"], m),
+                }
+
+                # (C) IAM control-plane denial.
+                observations["runtime-role-update-gateway-denied"] = runtime_role_denial(
+                    aws, facts["role_arn"], facts["gateway_arn"]
+                )
+
+                # (D) guardrail-outage fail-closed — LAST, as it destroys the owned guardrail.
+                if not guardrail_id:
+                    raise ScenarioFailed("deploy status did not surface the guardrail id for the outage probe")
+                aws.client("bedrock").delete_guardrail(guardrailIdentifier=guardrail_id)
+                marker = new_marker(names["token"], "guardrail-outage")
+                observations["guardrail-outage-fails-closed"] = runtime_observation(
+                    session,
+                    base,
+                    names["runtime_name"],
+                    aws,
+                    names["log_group"],
+                    operation="guardrail_safe_echo",
+                    value="safe-dublin",
+                    marker=marker,
+                    attack=False,
+                )
+
+                outcome["observations"] = observations
+            finally:
+                for record in reversed(tracker.records):
+                    try:
+                        tracker.cleanup(record)
+                    except Exception as exc:  # noqa: BLE001
+                        cleanup_errors.append(
+                            "deployment cleanup: " + redact(f"{type(exc).__name__}: {exc}", *user.secrets())
+                        )
+                session.close()
+    finally:
+        try:
+            delete_fixture(aws, names)
+        except Exception as exc:  # noqa: BLE001
+            cleanup_errors.append("fixture cleanup: " + redact(f"{type(exc).__name__}: {exc}", secret))
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    outcome["cleanup_errors"] = cleanup_errors
+    write_json(artifacts / "journey-outcome.json", outcome)
+    if cleanup_errors:
+        raise ScenarioFailed("gateway-governance journey left residue: " + "; ".join(cleanup_errors)[:800])
+    return outcome
+
+
+def _oracle_holds(observed: dict[str, Any], oracle: dict[str, Any]) -> bool:
+    for key, expected in oracle.items():
+        if key == "messageContains":
+            if expected not in str((observed or {}).get("message") or ""):
+                return False
+        elif (observed or {}).get(key) != expected:
+            return False
+    return True
+
+
+def _scenario(args: argparse.Namespace, artifact_dir: Path, scenario_id: str) -> dict:
+    binding, observed_stack, comparison = bound_deployment(args, artifact_dir)
+    journey = family_journey(
+        binding,
+        observed_stack,
+        family=FAMILY,
+        run=lambda artifacts: _journey(binding, observed_stack, artifacts),
+        artifact_dir=artifact_dir,
+    )
+    outcome = journey["outcome"]
+    observed = (outcome.get("observations") or {}).get(scenario_id) or {}
+    oracle = ORACLES[scenario_id]
+    holds = _oracle_holds(observed, oracle)
+    report = {
+        "scenario": scenario_id,
+        "region": binding.region,
+        "deployment_binding": comparison,
+        "journey": {k: v for k, v in journey.items() if k != "outcome"},
+        "oracle": oracle,
+        "observed": observed,
+        "claim_holds": holds,
+    }
+    write_json(artifact_dir / "report", report)
+    if not holds:
+        raise ScenarioFailed(f"{scenario_id} oracle not satisfied: oracle={oracle} observed={observed}")
+    return report
+
+
+def model_and_tool_content_allowed(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "model-and-tool-content-allowed")
+
+
+def prompt_attack_blocked(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "prompt-attack-blocked")
+
+
+def tool_argument_blocked(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "tool-argument-blocked")
+
+
+def tool_result_blocked(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "tool-result-blocked")
+
+
+def guardrail_outage_fails_closed(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "guardrail-outage-fails-closed")
+
+
+def cedar_authorized_tool_call(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "cedar-authorized-tool-call")
+
+
+def cedar_unauthorized_tool_call_denied(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "cedar-unauthorized-tool-call-denied")
+
+
+def runtime_role_update_gateway_denied(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "runtime-role-update-gateway-denied")
+
+
+def connector_tools_list_and_authorized_call(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "connector-tools-list-and-authorized-call")
+
+
+def connector_cedar_denial(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "connector-cedar-denial")
+
+
+def connector_tool_guardrail_denial(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    return _scenario(args, artifact_dir, "connector-tool-guardrail-denial")
 
 
 __all__ = [
