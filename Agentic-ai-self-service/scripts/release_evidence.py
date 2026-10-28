@@ -65,6 +65,23 @@ _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 _TOOL_PLACEHOLDERS = frozenset({"backend_python", "infra_python", "actionlint", "npm", "uv", "cdk"})
 _CONTEXT_PLACEHOLDERS = frozenset({"artifact_dir", "junit_xml", "run_dir", "region", "account_id", "scenario_id"})
 _PASSTHROUGH_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "USER", "SHELL")
+# Names a LIVE scenario child may inherit so the AWS SDK resolves the credential the operator
+# brokered for this run -- by FILE and PROFILE only. Raw key material names
+# (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN) are deliberately absent: a
+# static key sitting in the recorder's environment must never become the identity a live
+# receipt was produced under. The scenario still proves its identity with STS and the
+# recorder still refuses provenance naming any account but the run's bound one.
+_LIVE_PASSTHROUGH_ENVIRONMENT = (
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_EC2_METADATA_DISABLED",
+    "AWS_CA_BUNDLE",
+    "AWS_STS_REGIONAL_ENDPOINTS",
+)
 _MAX_ARTIFACT_FILES = 20_000
 _MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
 _MAX_JUNIT_BYTES = 64 * 1024 * 1024
@@ -774,11 +791,14 @@ def _verify_required_tools(required: dict[str, str], tools: dict[str, dict[str, 
     return versions
 
 
-def _child_environment(required_names: dict[str, str] | list[str]) -> dict[str, str]:
+def _child_environment(
+    required_names: dict[str, str] | list[str], *, optional_names: tuple[str, ...] = ()
+) -> dict[str, str]:
     """A minimal child environment: PATH-class basics plus the suite's declared names.
 
-    Values are passed through to the child but never written to the receipt; the
-    receipt records only WHICH names were set.
+    ``optional_names`` are inherited only when set (a live scenario's AWS file/profile
+    names); a required name that is unset is an error. Values are passed through to the
+    child but never written to the receipt; the receipt records only WHICH names were set.
     """
     env: dict[str, str] = {}
     for name in _PASSTHROUGH_ENVIRONMENT:
@@ -788,6 +808,9 @@ def _child_environment(required_names: dict[str, str] | list[str]) -> dict[str, 
         if name not in os.environ:
             raise EvidenceError(f"Required environment variable {name} is not set")
         env[name] = os.environ[name]
+    for name in optional_names:
+        if name in os.environ:
+            env[name] = os.environ[name]
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.setdefault("LANG", "C.UTF-8")
     return env
@@ -1604,11 +1627,16 @@ def _run_scenario_unlocked(
         context["region"] = str(region)
         context["account_id"] = str(account_id)
     argv = _substitute(scenario["command"], tool_records, context)
+    # A live scenario inherits the brokered credential's FILE/PROFILE names (never raw key
+    # names); an offline scenario inherits nothing beyond PATH-class basics. The receipt
+    # records which names were actually set, as it does for suites.
+    scenario_env = _child_environment([], optional_names=_LIVE_PASSTHROUGH_ENVIRONMENT if regional else ())
+    environment_names = [name for name in _LIVE_PASSTHROUGH_ENVIRONMENT if name in scenario_env] if regional else []
     record = _execute(
         argv,
         cwd=cwd,
         timeout=int(scenario["timeout_seconds"]),
-        env=_child_environment([]),
+        env=scenario_env,
         stdout_path=artifact_dir / "stdout-0.log",
         stderr_path=artifact_dir / "stderr-0.log",
     )
@@ -1658,7 +1686,7 @@ def _run_scenario_unlocked(
             "runner": run["runner"],
             "tools": tool_records,
             "tool_versions": {},
-            "environment_names": [],
+            "environment_names": environment_names,
             "commands": [record],
             "selectors_verified": [],
             "selectors_unverified": [],

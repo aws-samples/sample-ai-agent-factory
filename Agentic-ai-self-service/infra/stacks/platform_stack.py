@@ -18,10 +18,12 @@ Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4, 7.5
 """
 
 import os
+from pathlib import Path
 
 import aws_cdk as cdk
 from aws_cdk import RemovalPolicy
 from constructs import Construct
+from source_identity import SourceIdentity, derive_source_identity
 
 from .platform.api import add_cloudfront_cors_origin, build_api_gateway
 from .platform.buckets import build_artifacts_bucket, build_logging_bucket, upload_agentcore_deps
@@ -64,9 +66,13 @@ class PlatformStack(cdk.Stack):
         otel_auth_secret_arn: str = "",
         otel_sample_rate: str = "1.0",
         otel_service_name_prefix: str = "",
+        source_identity: SourceIdentity | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        # Derived here when the caller does not supply it, so a stack synthesized by the
+        # tests or by `cdk synth` alone still says what it was built from.
+        source_identity = source_identity or derive_source_identity(Path(__file__).resolve().parents[2])
 
         cdk.Tags.of(self).add("Environment", environment_name)
         cdk.Tags.of(self).add("Project", project_name)
@@ -328,6 +334,7 @@ class PlatformStack(cdk.Stack):
             bucket=self.bucket,
             user_pool=self.user_pool,
             user_pool_client=self.user_pool_client,
+            source_identity=source_identity,
         )
 
         # --- CDK-NAG suppressions (per-construct, audit issue #4) ---

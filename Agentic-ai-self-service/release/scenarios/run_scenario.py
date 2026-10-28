@@ -31,6 +31,13 @@ from pathlib import Path
 
 BLOCKED = 3
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# `python -I` (isolated mode) does not put this script's directory on sys.path; the sibling
+# modules here are tracked project code, so add exactly this directory and nothing else.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+# Never write bytecode into the tree being certified: a __pycache__ would make it dirty.
+sys.dont_write_bytecode = True
 ROOT_WORKFLOW_RELATIVE = ".github/workflows/agentic-ai-self-service-ci.yml"
 CONTRACTS = (
     "release/production-readiness-controls.json",
@@ -39,12 +46,7 @@ CONTRACTS = (
 )
 
 
-class ScenarioBlocked(RuntimeError):
-    """The scenario cannot run here; recorded as blocked, never as pass."""
-
-
-class ScenarioFailed(RuntimeError):
-    """The scenario ran and the production claim did not hold."""
+from _live import ScenarioBlocked, ScenarioFailed  # noqa: E402  -- shared with every family module
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -118,6 +120,18 @@ def source_commit_tree_and_contract_digests_match(args: argparse.Namespace, arti
 SCENARIOS: dict[str, Callable[[argparse.Namespace, Path], dict]] = {
     "source-commit-tree-and-contract-digests-match": source_commit_tree_and_contract_digests_match,
 }
+
+
+def _register_live_families() -> None:
+    """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
+    import regional_core
+
+    SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
+        regional_core.core_runtime_gateway_identity_policy_evaluation
+    )
+
+
+_register_live_families()
 
 
 def main(argv: list[str] | None = None) -> int:

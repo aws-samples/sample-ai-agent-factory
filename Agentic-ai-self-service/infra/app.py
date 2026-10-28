@@ -18,6 +18,7 @@ from pathlib import Path
 import aws_cdk as cdk
 import cdk_nag
 from release_regions import require_release_region
+from source_identity import derive_source_identity
 from stacks.platform_stack import PlatformStack
 
 
@@ -103,6 +104,7 @@ stack = PlatformStack(
     otel_auth_secret_arn=otel_auth_secret_arn,
     otel_sample_rate=otel_sample_rate,
     otel_service_name_prefix=otel_service_name_prefix,
+    source_identity=derive_source_identity(Path(__file__).resolve().parent.parent),
 )
 
 # ---------------------------------------------------------------------------

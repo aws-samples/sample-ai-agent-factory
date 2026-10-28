@@ -111,7 +111,11 @@ run = json.loads((args.run_dir / "run.json").read_text())
 args.artifact_dir.mkdir(parents=True, exist_ok=True)
 omit = set(mine.get("omit", []))
 if "report" not in omit:
-    (args.artifact_dir / "report").write_text(json.dumps({"scenario": args.scenario_id, "region": args.region}) + "\n")
+    import os
+    seen = sorted(name for name in os.environ if name.startswith("AWS_"))
+    (args.artifact_dir / "report").write_text(
+        json.dumps({"scenario": args.scenario_id, "region": args.region, "aws_environment_names": seen}) + "\n"
+    )
 if args.region is not None and "provenance" not in omit:
     provenance = {
         "account_id": args.account_id, "region": args.region, "stack_id": f"acf-production-{args.region}",
@@ -178,7 +182,10 @@ def evidence_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     shutil.copy2(CONTROLS_PATH, release_dir / CONTROLS_PATH.name)
     shutil.copy2(REGIONS_PATH, release_dir / REGIONS_PATH.name)
     shutil.copy2(SCRIPT_PATH, scripts_dir / SCRIPT_PATH.name)
-    shutil.copy2(DISPATCHER_PATH, release_dir / "scenarios" / DISPATCHER_PATH.name)
+    # The dispatcher ships with its sibling family modules; a clean clone carries the directory.
+    for tracked in DISPATCHER_PATH.parent.iterdir():
+        if tracked.is_file() and tracked.suffix in (".py", ".mjs"):
+            shutil.copy2(tracked, release_dir / "scenarios" / tracked.name)
     shutil.copy2(ROOT_WORKFLOW_PATH, repo / release_evidence.ROOT_WORKFLOW_RELATIVE)
     (fixture_dir / "fixture_suite.py").write_text(FIXTURE_SUITE, encoding="utf-8")
     (fixture_dir / "fixture_scenario.py").write_text(FIXTURE_SCENARIO, encoding="utf-8")
@@ -189,7 +196,7 @@ def evidence_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     )
     for name in ("backend", "infra", "frontend"):
         (project / name / ".keep").write_text("", encoding="utf-8")
-    (project / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (project / ".gitignore").write_text("build/\n__pycache__/\n", encoding="utf-8")
     (project / "README.md").write_text("# Evidence fixture\n", encoding="utf-8")
 
     _git(repo, "init", "-b", "main")
@@ -608,6 +615,33 @@ def test_live_scenario_requires_an_account_bound_run_and_matching_provenance(evi
     assert release_evidence.status_run(run_dir)["coverage"]["total_event_count"] == 0, (
         "a refused scenario records nothing"
     )
+
+
+def test_live_scenarios_inherit_only_file_and_profile_aws_names(evidence_project: dict, monkeypatch):
+    """The recorder strips the environment; without the brokered credential's FILE/PROFILE
+    names a live child falls back to whatever static key sits in ~/.aws -- another account.
+    Raw key names must never flow, and offline scenarios must inherit nothing AWS."""
+    for name in release_evidence._LIVE_PASSTHROUGH_ENVIRONMENT:
+        monkeypatch.setenv(name, f"value-of-{name}")
+    for raw in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"):
+        monkeypatch.setenv(raw, "must-not-reach-the-child")
+    assert not set(release_evidence._LIVE_PASSTHROUGH_ENVIRONMENT) & {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+    }
+    run_dir = _start(evidence_project, "env-passthrough")
+
+    live = _scenario(run_dir, "prompt-attack-blocked")
+    live_report = json.loads((run_dir / "artifacts" / live[0]["event_id"] / "report").read_text())
+    assert live_report["aws_environment_names"] == sorted(release_evidence._LIVE_PASSTHROUGH_ENVIRONMENT)
+    assert live[0]["receipt"]["environment_names"] == list(release_evidence._LIVE_PASSTHROUGH_ENVIRONMENT)
+
+    offline = _scenario(run_dir, "source-commit-tree-and-contract-digests-match", region=None)
+    offline_report = json.loads((run_dir / "artifacts" / offline[0]["event_id"] / "report").read_text())
+    assert offline_report["aws_environment_names"] == []
+    assert offline[0]["receipt"]["environment_names"] == []
 
 
 def test_a_stale_deployed_build_cannot_be_recorded(evidence_project: dict):
