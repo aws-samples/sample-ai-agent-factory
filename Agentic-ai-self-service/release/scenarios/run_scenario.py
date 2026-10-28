@@ -129,6 +129,7 @@ def _register_live_families() -> None:
     import cost_controls
     import downloadable_cfn
     import downloadable_python
+    import jit_controls
     import regional_core
     import rollback
     import triggers
@@ -176,6 +177,9 @@ def _register_live_families() -> None:
     )
     SCENARIOS["exhausted-budget-denies-before-dispatch"] = cost_controls.exhausted_budget_denies_before_dispatch
     SCENARIOS["budget-store-outage-denies-before-dispatch"] = cost_controls.budget_store_outage_denies_before_dispatch
+    SCENARIOS["leased-approval-applies-exact-policy"] = jit_controls.leased_approval_applies_exact_policy
+    SCENARIOS["concurrent-rejection-cannot-win"] = jit_controls.concurrent_rejection_cannot_win
+    SCENARIOS["gateway-policy-mutation-request-denied"] = jit_controls.gateway_policy_mutation_request_denied
 
 
 _register_live_families()

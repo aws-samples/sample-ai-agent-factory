@@ -110,6 +110,10 @@ EXACT_ORACLES = {
     "budgetExhaustedDetail": "Invocation denied: an applicable monthly authorization limit has no remaining capacity.",
     "budgetOutageStatus": 503,
     "budgetOutageDetail": "Invocation budget authorization is temporarily unavailable; no runtime call was made.",
+    "jitBusyStatus": 409,
+    "jitBusyDetail": "Request already APPLYING",
+    "jitForbiddenStatus": 400,
+    "jitForbiddenDetail": "Gateway/Policy control-plane action not permitted via JIT request: bedrock-agentcore:UpdateGateway",
 }
 
 
