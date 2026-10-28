@@ -231,38 +231,80 @@ def delete_fixture(session: Any, names: dict[str, str]) -> dict[str, bool]:
     return result
 
 
-def cedar_policy_component() -> dict[str, Any]:
-    """A Cedar policy component permitting the allowed probes and forbidding the two denied ones."""
-    rules = []
-    for operation in CEDAR_FORBIDDEN_OPERATIONS:
-        rules.append(
-            {
-                "rule_id": f"forbid-{operation}".replace("_", "-")[:100],
-                "effect": "forbid",
-                "principal": "*",
-                "action": 'Action::"invoke_tool"',
-                "resource": f'Tool::"{operation}"',
-                "description": f"Deny the {operation} governance probe",
-            }
-        )
+def _runtime_config(runtime_name: str) -> dict[str, Any]:
+    """Deterministic governance-verifier runtime config (mirrors the proven b43627b payload)."""
     return {
-        "component_type": "policy",
-        "name": "gateway-governance-cedar",
-        "enabled": True,
-        "rules": rules,
-        "default_effect": "permit",
+        "name": runtime_name,
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {
+            "provider": "anthropic",
+            "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "temperature": 0,
+            "topP": 0.9,
+        },
+        "modelProvider": "bedrock",
+        "systemPrompt": (
+            "You are a deterministic governance verifier. When a request names one available tool, call that "
+            "tool exactly once. Copy the supplied marker exactly. When asked to join two value fragments, "
+            "concatenate them without separators and use the result as the value. Return the tool result as "
+            "JSON and never invent one."
+        ),
+        "deploymentType": "direct_code_deploy",
+        "pythonRuntime": "PYTHON_3_13",
+        "protocol": "HTTP",
+        "idleTimeout": 300,
+        "maxLifetime": 3600,
+        "enableOtel": False,
+        "multiAgentPattern": "none",
     }
 
 
-def deploy_body(names: dict[str, str], fixture_url: str, secret: str, runtime_config: dict[str, Any]) -> dict[str, Any]:
-    """The product /api/deploy body: runtime + m2m connector (the 7 ops) + guardrail word filters + Cedar."""
+def policy_config(names: dict[str, str]) -> dict[str, Any]:
+    """Default-deny Cedar, fail-closed, explicitly forbidding the two denied probes.
+
+    Mirrors the proven b43627b payload exactly: defaultEffect 'forbid' plus simple
+    {ruleId, effect, action} rules keyed on the bare operationId. The oracles' 'No policy applies
+    to the request (denied by default)' denial comes from this default-deny posture; the allowed
+    probes are permitted by the deployer's served-tool permits.
+    """
+    token = names.get("token", "x")
     return {
+        "name": names.get("policy") or f"acfpr-gg-policy-{token}",
+        "enabled": True,
+        "mode": "ENFORCE",
+        "on_enforce_failure": "fail_closed",
+        "defaultEffect": "forbid",
+        "rules": [
+            {"ruleId": "deny_policy_probe", "effect": "forbid", "action": "policy_denied_probe"},
+            {"ruleId": "deny_connector_probe", "effect": "forbid", "action": "connector_denied_probe"},
+        ],
+    }
+
+
+def deploy_body(names: dict[str, str], fixture_url: str, secret: str) -> dict[str, Any]:
+    """The product /api/deploy body mirroring the proven b43627b payload: deterministic runtime +
+    api_key connector (the 7 ops) + guardrail (word + prompt_attack filters) + default-deny Cedar.
+    """
+    token = names.get("token", "x")
+    return {
+        "deploymentMode": "runtime",
+        "deploymentSlot": "staging",
+        "versionDescription": f"Gateway governance live gate {token}",
         "nodeId": names["node_id"],
-        "config": runtime_config,
-        "connectedTools": ["gateway"],
-        "gatewayConfig": {"name": names["runtime_name"]},
-        "guardrailsConfig": {"word_filters": GUARDRAIL_WORD_FILTERS, "contentFilters": GUARDRAIL_CONTENT_FILTERS},
-        "policy": cedar_policy_component(),
+        "config": _runtime_config(names["runtime_name"]),
+        "connectedTools": ["gateway", "identity", "guardrails", "policy"],
+        "gatewayConfig": {"name": names.get("gateway") or names["runtime_name"]},
+        "gatewayTools": [],
+        "identityConfig": {"mode": "shared", "provider": "cognito", "clientId": "", "discoveryUrl": "", "scopes": []},
+        "guardrailsConfig": {
+            "name": names.get("guardrail") or f"acfpr-gg-guardrail-{token}",
+            "enabled": True,
+            "mode": "create_new",
+            "contentFilters": GUARDRAIL_CONTENT_FILTERS,
+            "wordFilters": GUARDRAIL_WORD_FILTERS,
+        },
+        "policyConfig": policy_config(names),
         "connectors": [
             {
                 "connectorId": "generic_openapi",
@@ -480,7 +522,7 @@ __all__ = [
     "fixture_zip",
     "create_fixture",
     "delete_fixture",
-    "cedar_policy_component",
+    "policy_config",
     "deploy_body",
     "runtime_observation",
 ]
