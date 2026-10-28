@@ -127,6 +127,7 @@ def _register_live_families() -> None:
     import audit_controls
     import browser_widget
     import cost_controls
+    import download_integrity
     import downloadable_cfn
     import downloadable_python
     import jit_controls
@@ -180,6 +181,18 @@ def _register_live_families() -> None:
     SCENARIOS["leased-approval-applies-exact-policy"] = jit_controls.leased_approval_applies_exact_policy
     SCENARIOS["concurrent-rejection-cannot-win"] = jit_controls.concurrent_rejection_cannot_win
     SCENARIOS["gateway-policy-mutation-request-denied"] = jit_controls.gateway_policy_mutation_request_denied
+    SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
+        download_integrity.cfn_download_digest_verified
+    )
+    SCENARIOS["deployed-api-authenticated-python-download-archive-digest-manifest-verified"] = (
+        download_integrity.python_download_digest_verified
+    )
+    SCENARIOS["tampered-archive-or-manifest-rejected-before-use"] = download_integrity.tampered_archive_rejected
+    SCENARIOS["generated-ci-defaults-remain-inert"] = download_integrity.generated_ci_defaults_inert
+    SCENARIOS["cfn-wrong-account-or-region-refused"] = download_integrity.cfn_wrong_account_or_region_refused
+    SCENARIOS["python-missing-or-incompatible-dependency-rejected"] = (
+        download_integrity.python_missing_dependency_rejected
+    )
 
 
 _register_live_families()
