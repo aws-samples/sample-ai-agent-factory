@@ -449,8 +449,6 @@ RUNTIME_PROBES = {
     "connector-tool-guardrail-denial": ("connector_guardrail_denied", "ACFPR_CONNECTOR_GUARDRAIL_B43627B", False),
 }
 
-_JSON_OBJECT = re.compile(r"\{[^{}]*\}")
-
 
 def _prompt(operation: str, marker: str, value: str | None, *, attack: bool = False) -> str:
     """A tightly-constrained instruction so the agent calls exactly one tool and echoes its JSON."""
@@ -466,13 +464,58 @@ def _prompt(operation: str, marker: str, value: str | None, *, attack: bool = Fa
     return call
 
 
-def _invoke(session: Any, base: str, runtime_name: str, prompt: str, session_id: str, *, slot: str = "staging") -> Any:
-    """POST the staging-slot invoke and return the raw requests.Response (caller inspects status + json)."""
-    return session.post(
-        f"{base}/api/runtimes/{runtime_name}/slots/{slot}/invoke",
-        json={"input": prompt, "sessionId": session_id},
-        timeout=150,
+def _invoke_runtime_async(
+    session: Any, base: str, endpoint: str, runtime_id: str, prompt: str, session_id: str, *, timeout_seconds: int = 540
+) -> dict[str, Any]:
+    """Drive the agent through the product's async test-runtime path.
+
+    Unlike the slot invoke, this path returns the agent's UNREDACTED response and surfaces
+    ``toolReceipts`` — the only way to observe the fixture result + tool-call status when a guardrail
+    (which redacts the slot-invoke response) is attached. Mirrors the audited runner's drive."""
+    start = session.post(
+        f"{base}/api/test-runtime-async",
+        json={"endpoint": endpoint, "input": prompt, "runtimeId": runtime_id, "sessionId": session_id},
+        timeout=60,
     )
+    if start.status_code != 202:
+        raise ScenarioFailed(f"async runtime start returned {start.status_code}: {start.text[:300]}")
+    test_id = (start.json() or {}).get("testId")
+    if not isinstance(test_id, str) or not test_id:
+        raise ScenarioFailed("async runtime start returned no testId")
+    poll_url = f"{base}/api/test-runtime-async/{test_id}"
+    deadline = time.monotonic() + timeout_seconds
+    body: dict[str, Any] | None = None
+    try:
+        while time.monotonic() < deadline:
+            polled = session.get(poll_url, timeout=30)
+            polled.raise_for_status()
+            candidate = polled.json()
+            if not isinstance(candidate, dict):
+                raise ScenarioFailed("async runtime poll returned a non-object")
+            state = candidate.get("status")
+            if state == "completed":
+                body = candidate
+                break
+            if state != "running":
+                raise ScenarioFailed(f"async runtime poll returned invalid state: {str(candidate)[:200]}")
+            time.sleep(3)
+        if body is None:
+            raise ScenarioFailed("async runtime invocation exceeded the poll deadline")
+    finally:
+        session.delete(poll_url, timeout=30)
+    return body
+
+
+def _receipts(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """The agent's tool-call receipts this turn (name, status, argument digests)."""
+    value = body.get("toolReceipts")
+    if value is None:
+        value = body.get("tool_receipts")
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ScenarioFailed("runtime tool receipts are malformed")
+    return value
 
 
 def _dispatch_count(boto_session: Any, log_group: str, marker: str, *, settle_seconds: int = 35) -> int:
@@ -494,31 +537,55 @@ def _dispatch_count(boto_session: Any, log_group: str, marker: str, *, settle_se
         time.sleep(5)
 
 
-def _parse_kind_value(response_text: str | None) -> tuple[str | None, str | None]:
-    """Pull kind/value from the first JSON object the agent echoed from the tool result."""
+def _json_values(text: str) -> list[Any]:
+    """Every JSON value embedded in the agent's unredacted response, incl. fenced code blocks."""
+    values: list[Any] = []
+    decoder = json.JSONDecoder()
+    candidates = [text.strip()]
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    )
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            values.append(json.loads(candidate))
+        except ValueError:
+            pass
+        for index, character in enumerate(candidate):
+            if character not in "[{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(candidate[index:])
+            except ValueError:
+                continue
+            values.append(value)
+    return values
+
+
+def _parse_kind_value(response_text: str | None, marker: str) -> tuple[str | None, str | None]:
+    """Pull kind/value from the response JSON object carrying this marker (response is unredacted)."""
     if not response_text:
         return None, None
-    for match in _JSON_OBJECT.finditer(response_text):
-        try:
-            obj = json.loads(match.group(0))
-        except ValueError:
-            continue
-        if isinstance(obj, dict) and "kind" in obj:
-            return obj.get("kind"), obj.get("value")
+    for value in _json_values(response_text):
+        if isinstance(value, dict) and value.get("marker") == marker and "kind" in value:
+            return value.get("kind"), value.get("value")
     return None, None
 
 
-def _receipt_status(receipts: list[dict[str, Any]] | None) -> str | None:
-    """The status of the last tool receipt the agent's loop recorded this turn, if any."""
-    if not receipts:
+def _receipt_status(receipts: list[dict[str, Any]]) -> str | None:
+    """The status of the single tool receipt the agent's loop recorded this turn (exactly one), else None."""
+    if len(receipts) != 1:
         return None
-    return receipts[-1].get("status")
+    return receipts[0].get("status")
 
 
 def runtime_observation(
     session: Any,
     base: str,
-    runtime_name: str,
+    endpoint: str,
+    runtime_id: str,
     boto_session: Any,
     log_group: str,
     *,
@@ -527,24 +594,18 @@ def runtime_observation(
     marker: str,
     attack: bool,
 ) -> dict[str, Any]:
-    """Drive one runtime-path probe and return the observed facts the runtime oracles assert."""
-    response = _invoke(session, base, runtime_name, _prompt(operation, marker, value, attack=attack), marker)
-    status = response.status_code
-    try:
-        body = response.json() if response.content else {}
-    except ValueError:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    receipts = body.get("toolReceipts")
-    kind, parsed_value = _parse_kind_value(body.get("response"))
+    """Drive one runtime-path probe via test-runtime-async and return the facts the oracles assert."""
+    body = _invoke_runtime_async(
+        session, base, endpoint, runtime_id, _prompt(operation, marker, value, attack=attack), marker
+    )
+    receipts = _receipts(body)
+    response_text = body.get("response") if isinstance(body.get("response"), str) else None
+    kind, parsed_value = _parse_kind_value(response_text, marker)
     return {
-        "httpStatus": status,
         "runtimeSuccess": bool(body.get("success")),
         "error": body.get("error"),
-        "failureDetail": (body.get("detail") or response.text[:300]) if status != 200 else None,
-        "responseText": body.get("response"),
-        "receiptCount": len(receipts or []),
+        "responseText": response_text,
+        "receiptCount": len(receipts),
         "receiptStatus": _receipt_status(receipts),
         "responseKind": kind,
         "responseValue": parsed_value,
@@ -999,6 +1060,9 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                 if status.get("status") != "succeeded":
                     raise ScenarioFailed(f"deploy ended {status.get('status')}: {str(status)[:300]}")
                 runtime_id = status.get("runtime_id") or status.get("runtimeId")
+                runtime_endpoint = status.get("runtime_endpoint") or status.get("runtimeEndpoint") or ""
+                if not runtime_endpoint:
+                    raise ScenarioFailed(f"deploy status did not surface runtime_endpoint; keys={sorted(status)[:20]}")
                 tracker.bind_runtime(record, runtime_id)
                 guardrail_id = (
                     status.get("guardrail_id")
@@ -1014,7 +1078,8 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                     observations[scenario_id] = runtime_observation(
                         session,
                         base,
-                        names["runtime_name"],
+                        runtime_endpoint,
+                        runtime_id,
                         aws,
                         names["log_group"],
                         operation=operation,
@@ -1080,7 +1145,8 @@ def _journey(binding: Any, observed: Any, artifacts: Path) -> dict[str, Any]:
                 observations["guardrail-outage-fails-closed"] = runtime_observation(
                     session,
                     base,
-                    names["runtime_name"],
+                    runtime_endpoint,
+                    runtime_id,
                     aws,
                     names["log_group"],
                     operation="guardrail_safe_echo",
@@ -1124,6 +1190,10 @@ def _oracle_holds(observed: dict[str, Any], oracle: dict[str, Any]) -> bool:
     for key, expected in oracle.items():
         if key == "messageContains":
             if expected not in str((observed or {}).get("message") or ""):
+                return False
+        elif key == "responseText":
+            # Guardrail block messages are embedded in the agent's response; assert containment.
+            if expected not in str((observed or {}).get("responseText") or ""):
                 return False
         elif (observed or {}).get(key) != expected:
             return False
