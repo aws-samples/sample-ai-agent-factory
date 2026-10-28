@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — `deploy.sh` builds the frontend on a machine that has never seen the lock
+
+- `build_frontend` installed the frontend with `npm ci --offline`. On a machine whose npm
+  cache had never seen `frontend/package-lock.json` — every fresh clone — npm failed with
+  `ENOTCACHED` *after* the CloudFormation stack had been created, leaving a platform with
+  an API and no UI. Observed on the first us-east-1 production create of this candidate.
+  The install now uses `--prefer-offline`: a cached package is used without a registry
+  round-trip, a missing one is fetched, and npm verifies either against the lock's
+  integrity hash. The credential boundary is unchanged and now pinned by
+  `infra/tests/test_deploy_frontend_install_works_on_a_fresh_clone.py`: the install and the
+  build still run under `env -i` with no `AWS_*` name, user and global npm config disabled,
+  and `--ignore-scripts`. `--offline` was never that boundary.
+
 ### Changed — release evidence is executed and receipt-backed; a pass can no longer be asserted
 
 - `scripts/release_evidence.py` no longer has a `record` command. The only writers are

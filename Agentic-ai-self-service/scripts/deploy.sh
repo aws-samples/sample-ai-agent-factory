@@ -1230,15 +1230,18 @@ build_frontend() {
   # scripts are not run at all (the lock needs none: proven by a disposable credential-free install + production build).
   # npm verifies every package against the lock's integrity hashes; the resulting inventory digest is logged.
   # a PRIVATE empty HOME for npm/vite (nothing discovered through the account home), the npm cache named explicitly,
-  # and --offline: every package comes from the cache and is verified against the lock's integrity hashes (a disposable
-  # credential-free offline install + production build was proven for this lock).
+  # and --prefer-offline: a package already in the cache is used without a registry round-trip, one that is not is
+  # fetched from the registry -- either way npm verifies it against the lock's integrity hash. (This was --offline,
+  # which failed with ENOTCACHED on any machine whose npm cache had never seen this lock -- i.e. every fresh clone --
+  # AFTER the stack was created, leaving a platform with no UI. The credential boundary above never depended on the
+  # network being closed: it is the stripped environment plus --ignore-scripts.)
   # the reinstall must reproduce the PREPARED install byte for byte, modes included: the caller's umask never decides
   # them (a 077 launcher would turn every 0644 into 0600 and the bound inventory would no longer verify)
   umask 022
   local fe_home; fe_home="$(mktemp -d "${TMPDIR:-/tmp}/fe_home.XXXXXX")"; chmod 700 "${fe_home}"
   FE_HOMES+=("${fe_home}"); trap cleanup_fe_homes EXIT   # removed on EVERY exit path (error, signal), not only success
   local -a fe_env=(env -i "PATH=${PATH}" "HOME=${fe_home}" "LANG=${LANG:-C.UTF-8}" CI=1 NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/var/empty/npmrc "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE:-${HOME}/.npm}")
-  "${fe_env[@]}" npm ci --offline --ignore-scripts --no-audit --no-fund --loglevel=error
+  "${fe_env[@]}" npm ci --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error
   if ! FE_INVENTORY="$(frontend_inventory)" || [[ ! "${FE_INVENTORY}" =~ ^[0-9a-f]{64}$ ]]; then
     log_error "the frontend dependency inventory cannot be derived (hard links or unreadable entries); refusing."; exit 1
   fi
