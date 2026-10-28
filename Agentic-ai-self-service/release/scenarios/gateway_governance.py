@@ -1,14 +1,24 @@
 """``safety.guardrails`` + ``policy.cedar_enforce`` + ``connector.gateway_framework`` — gateway governance.
 
-Foundation module (deterministic deploy/teardown + the deploy-body builder). The live drive and the
-eleven exact oracles are added on top of this base. The family deploys, through the product
-``/api/deploy``, a gateway+runtime whose ``generic_openapi`` connector points at a private fixture
-exposing seven operations, with a Bedrock Guardrail (word filters) and a Cedar policy component
-(forbidding the two "denied" probes). Each scenario drives the product runtime to call one operation
-and asserts the contract's exact oracle (runtime success, fixture-dispatch count, response shape).
+Drive module for ``safety.guardrails`` + ``policy.cedar_enforce`` + ``connector.gateway_framework``.
 
-This base intentionally does NOT register scenario ids yet — the drive/oracle layer that follows
-registers them, so no half-working id is dispatchable from this commit.
+The family deploys, through the product's durable deploy boundary
+(``POST /api/deploy`` -> 202 ``{deploymentId}``; poll ``GET /api/deploy/{id}`` to ``succeeded`` via
+``wait_for_deployment_terminal``), a deterministic runtime wired to a Gateway whose
+``generic_openapi`` connector (static Bearer, ``api_key`` auth) points at a private seven-operation
+fixture, with a Bedrock Guardrail (word filters + a managed ``prompt_attack`` content filter) and a
+default-deny Cedar ``policyConfig`` that forbids the two "denied" probes. Teardown uses the product's
+own idempotent delete (``request_delete_and_verify`` -> ``DELETE /api/runtime/{id}`` tombstone).
+
+The eleven exact oracles are proven over three drive paths: (A) the product runtime
+(``POST /api/runtimes/{name}/slots/staging/invoke``) for the six guardrail/runtime scenarios, with
+fixture dispatches counted from the fixture's own CloudWatch log; (B) direct Gateway MCP JSON-RPC
+(``tools/list`` + ``tools/call`` with a client-credentials-minted gateway token) for the four
+Cedar/connector scenarios; (C) ``iam:SimulatePrincipalPolicy`` for the runtime-role control-plane
+denial. Deploy payload and drive helpers mirror the proven b43627b audited runner exactly.
+
+This base does NOT register scenario ids yet — the journey/registration layer that follows does, so
+no half-working id is dispatchable from this commit.
 """
 
 from __future__ import annotations
