@@ -475,27 +475,31 @@ _BAD_REFERENCE_CASES = (
         },
         "marker-raw-key",
     ),
+    # detect-secrets' allowlist pragma is line-local, so each flagged literal keeps its pragma on
+    # its OWN line; the magic trailing commas stop the formatter from re-flowing them apart.
     (
         "provider-namespace",
         {
-            "config": {"providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/provider"}
-        },  # pragma: allowlist secret
+            "config": {
+                "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/provider",  # pragma: allowlist secret
+            },
+        },
         "wrong/provider",
     ),
     (
         "account-shape",
         {
             "config": {
-                "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:not-account:secret:agentcore-provider/key"
-            }
-        },  # pragma: allowlist secret
+                "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:not-account:secret:agentcore-provider/key",  # pragma: allowlist secret
+            },
+        },
         "not-account",
     ),
     (
         "oauth-name",
-        {"identityConfig": {"provider": "okta", "clientSecretRef": "bare-secret-name"}},
+        {"identityConfig": {"provider": "okta", "clientSecretRef": "bare-secret-name"}},  # pragma: allowlist secret
         "bare-secret-name",
-    ),  # pragma: allowlist secret
+    ),
     (
         "otel-namespace",
         {
@@ -527,8 +531,14 @@ _BAD_REFERENCE_CASES = (
     (
         "connector-typed-secret",
         {
-            "connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-connector-raw"}]
-        },  # pragma: allowlist secret
+            "connectors": [
+                {
+                    "connectorId": "asana",
+                    "authMethod": "api_key",
+                    "secretValue": "marker-connector-raw",  # pragma: allowlist secret
+                },
+            ],
+        },
         "marker-connector-raw",
     ),
     (
@@ -574,8 +584,14 @@ def test_typed_write_only_connector_secret_is_refused_by_the_validator_itself_wi
         _merge_case(
             _body(),
             {
-                "connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-typed-secret"}]
-            },  # pragma: allowlist secret
+                "connectors": [
+                    {
+                        "connectorId": "asana",
+                        "authMethod": "api_key",
+                        "secretValue": "marker-typed-secret",  # pragma: allowlist secret
+                    },
+                ],
+            },
         )
     )
     assert request.connectors[0].secret_value == "marker-typed-secret"  # pragma: allowlist secret

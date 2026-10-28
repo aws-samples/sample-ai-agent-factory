@@ -250,9 +250,12 @@ def test_ci_cannot_skip_release_documentation_or_downloadable_contracts():
     for relative in DOWNLOAD_SUITE_FILES:
         assert relative in export_commands
     assert "releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" in export_commands
-    assert (
-        "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" in export_commands
-    )  # pragma: allowlist secret
+    # The pragma must share a physical line with the literal: detect-secrets' allowlist is
+    # line-local, and a formatter-wrapped `assert (...)` stranded the hex on a bare line.
+    actionlint_linux_amd64_sha256 = (
+        "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"  # pragma: allowlist secret
+    )
+    assert actionlint_linux_amd64_sha256 in export_commands
     assert "actionlint .github/workflows/agentic-ai-self-service-ci.yml" in export_commands
     assert "$RUNNER_TEMP/export-gate.xml" in export_commands
     assert "/tmp/export-gate.xml" not in export_commands
