@@ -359,7 +359,12 @@ def delete_clone(session: Any, name: str, *, run_id: str, commit: str) -> bool:
     lam.delete_function(FunctionName=name)
     logs = session.client("logs")
     log_group = f"/aws/lambda/{name}"
-    groups = logs.describe_log_groups(logGroupNamePrefix=log_group).get("logGroups", [])
-    if any(item.get("logGroupName") == log_group for item in groups):
-        logs.delete_log_group(logGroupName=log_group)
+    # Lambda creates the log group lazily on first invocation, so it can materialise moments after
+    # the function is gone. Poll briefly and delete it whenever it appears, leaving zero residue.
+    for _attempt in range(6):
+        groups = logs.describe_log_groups(logGroupNamePrefix=log_group).get("logGroups", [])
+        if any(item.get("logGroupName") == log_group for item in groups):
+            logs.delete_log_group(logGroupName=log_group)
+            return True
+        time.sleep(2)
     return True
