@@ -333,10 +333,11 @@ def ui_authenticated_python_download_clean_recipient(args: argparse.Namespace, a
 
         # Start the real generated agent on loopback and invoke it.
         port = 8080
+        # The bundle's own run.sh: verify-integrity.py under the anchor, then exec .venv/bin/python agent.py.
         agent = subprocess.Popen(
-            [str(venv_python), "agent.py"],
+            ["bash", "run.sh"],
             cwd=root,
-            env={**env, "PYTHONUNBUFFERED": "1"},
+            env={**anchored_env, "PYTHONUNBUFFERED": "1"},
             stdout=subprocess.DEVNULL,
             stderr=open(artifact_dir / "agent-stderr.log", "w", encoding="utf-8"),  # noqa: SIM115
             text=True,

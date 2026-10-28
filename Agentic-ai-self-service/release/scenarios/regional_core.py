@@ -87,7 +87,19 @@ def core_runtime_gateway_identity_policy_evaluation(args: argparse.Namespace, ar
                     user=user,
                     artifact_dir=journey_artifacts,
                     timeout=timeout,
-                    extra_env={"INTEGRATION_TRIGGERS_TABLE_NAME": "acf-production-triggers"},
+                    extra_env={
+                        "INTEGRATION_TRIGGERS_TABLE_NAME": "acf-production-triggers",
+                        # Batch Evaluation scores OpenTelemetry spans and needs the account's
+                        # Transaction Search destination to be CloudWatch Logs in this Region. The
+                        # lease records the exact baseline, switches only if needed, and restores it.
+                        "INTEGRATION_MANAGE_TRANSACTION_SEARCH": "true",
+                        "INTEGRATION_TRANSACTION_SEARCH_STATE_FILE": str(
+                            journey_artifacts / "transaction-search-state.json"
+                        ),
+                        "INTEGRATION_EVALUATION_LOG_TIMEOUT_SECONDS": "900",
+                        "INTEGRATION_EVALUATION_INDEX_SETTLE_SECONDS": "180",
+                        "INTEGRATION_PROMOTION_TIMEOUT_SECONDS": "1800",
+                    },
                 )
             if record.get("failed"):
                 raise ScenarioFailed(f"phase {phase} failed (exit {record['exit_status']})")

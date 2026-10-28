@@ -421,3 +421,41 @@ def test_obo_gateway_and_runtime_transport_match_pinned_botocore_models(monkeypa
         runtime_headers,
         runtime_operation.input_shape.members["requestHeaderConfiguration"],
     )
+
+
+def _generated_header_resolution(code: str) -> str:
+    """The exact generated lines from `request_headers = ...` through `subject_token = str(...)`."""
+    start = code.index("    request_headers = ")
+    end = code.index('        or ""\n    )', start) + len('        or ""\n    )')
+    return "\n".join(line[4:] if line.startswith("    ") else line for line in code[start:end].splitlines())
+
+
+def test_generated_agent_treats_a_none_request_headers_context_as_no_headers():
+    """Found live: the exported Python project's run.sh starts a local BedrockAgentCoreApp, whose
+    context carries request_headers=None when the caller sent no AgentCore headers. The generated
+    invoke() dereferenced it -- `'NoneType' object has no attribute 'get'`, HTTP 500 on every
+    local /invocations. getattr's default only applies when the attribute is ABSENT."""
+    from types import SimpleNamespace
+
+    from app.services import code_generator
+
+    code = code_generator._generate_strands_gateway(
+        "Use the connector.", "us.anthropic.claude-sonnet-5", {}, region="us-east-1"
+    )
+    snippet = _generated_header_resolution(code)
+    for context in (SimpleNamespace(request_headers=None), None, SimpleNamespace()):
+        namespace = {"context": context, "globals": lambda: {}}
+        exec(snippet, namespace)  # noqa: S102 -- executing the project's own generated code under test
+        assert namespace["subject_token"] == "", context
+    with_header = SimpleNamespace(request_headers={"X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token": "tok"})
+    namespace = {"context": with_header, "globals": lambda: {}}
+    exec(snippet, namespace)  # noqa: S102
+    assert namespace["subject_token"] == "tok"
+    # Mutation: the former getattr-default form must fail on request_headers=None.
+    broken = snippet.replace(
+        'request_headers = (getattr(context, "request_headers", None) if context is not None else None) or {}',
+        'request_headers = getattr(context, "request_headers", {}) if context is not None else {}',
+    )
+    assert broken != snippet
+    with pytest.raises(AttributeError):
+        exec(broken, {"context": SimpleNamespace(request_headers=None), "globals": lambda: {}})  # noqa: S102

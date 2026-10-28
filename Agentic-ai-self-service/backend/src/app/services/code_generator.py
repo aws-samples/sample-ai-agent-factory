@@ -941,7 +941,9 @@ __TOOL_RECEIPTS__
 def invoke(payload, context=None):
     """Strands Agent with MCP Gateway tools."""
     message = payload.get("prompt", "Hello")
-    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    # A local BedrockAgentCoreApp (the exported project's run.sh) passes a context whose
+    # request_headers is None when the caller sent no AgentCore headers; treat that as none.
+    request_headers = (getattr(context, "request_headers", None) if context is not None else None) or {{}}
     workforce_token_header = globals().get(
         "WORKFORCE_TOKEN_HEADER",
         "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
@@ -2393,7 +2395,9 @@ def invoke(payload, context=None):
     # Strands Agent handles tool discovery + calling via MCPClient automatically.
     # OBO credentials are request-scoped: never place the bearer, transport,
     # tools, or Agent in a module cache shared by warm Runtime invocations.
-    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    # A local BedrockAgentCoreApp (the exported project's run.sh) passes a context whose
+    # request_headers is None when the caller sent no AgentCore headers; treat that as none.
+    request_headers = (getattr(context, "request_headers", None) if context is not None else None) or {{}}
     workforce_token_header = globals().get(
         "WORKFORCE_TOKEN_HEADER",
         "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
