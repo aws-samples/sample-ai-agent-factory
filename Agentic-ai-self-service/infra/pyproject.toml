@@ -16,7 +16,7 @@ dependencies = [
 dev = [
     "pytest>=8.3.0",
     # the Cognito provisioner handler tests import botocore; the system site used to supply it silently
-    "boto3>=1.43.66",
+    "boto3==1.43.109",
     # route-parity, ownership and tool-sandbox tests import the backend application (app.*): its real dependency set
     # comes from the backend project itself, never from a system site
     "agentcore-workflow-backend",

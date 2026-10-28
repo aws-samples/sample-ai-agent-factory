@@ -66,6 +66,11 @@ import re
 
 import boto3
 
+from app.services.region_capabilities import (
+    aws_agent_registry_region_supported as _region_supported,
+)
+from app.services.region_capabilities import feature_unavailable_message
+
 logger = logging.getLogger(__name__)
 
 # A2A agent-card schema version, passed as `dataSchemaVersion` at GA.
@@ -173,6 +178,27 @@ class RegistryQueryFailed(RuntimeError):
 
 def _region() -> str:
     return os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+
+
+def agent_registry_region() -> str:
+    """The Region whose Agent Registry control and data planes would be used."""
+
+    return _region()
+
+
+def agent_registry_region_supported(region: str | None = None) -> bool:
+    """Whether AWS Agent Registry is available in the resolved Region."""
+
+    return _region_supported(region or agent_registry_region())
+
+
+def agent_registry_region_unavailable_reason(region: str | None = None) -> str | None:
+    """Return an actionable reason when federation is unavailable."""
+
+    resolved = region or agent_registry_region()
+    if agent_registry_region_supported(resolved):
+        return None
+    return feature_unavailable_message("aws_agent_registry", resolved)
 
 
 def _record_id_from_arn(arn: str) -> str:
@@ -517,8 +543,16 @@ class AwsAgentRegistry:
     def __init__(self, registry_id: str, region: str | None = None) -> None:
         self.registry_id = registry_id
         self.region = region or _region()
-        self.control = _make_client(CONTROL_SERVICE, self.region)
-        self.data = _make_client(DATA_SERVICE, self.region)
+        if agent_registry_region_supported(self.region):
+            self.control = _make_client(CONTROL_SERVICE, self.region)
+            self.data = _make_client(DATA_SERVICE, self.region)
+        else:
+            logger.info(
+                "AWS Agent Registry disabled in unsupported Region %s",
+                self.region,
+            )
+            self.control = None
+            self.data = None
 
     # -- health ----------------------------------------------------------
 

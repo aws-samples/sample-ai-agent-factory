@@ -15,10 +15,11 @@ these tests exist specifically to pin that.
 
 import aws_cdk as cdk
 import pytest
+from stacks.platform.config import AWS_AGENT_REGISTRY_SUPPORTED_REGIONS
 from stacks.platform_stack import PlatformStack
 
 HOME_REGION = "us-east-1"
-OTHER_REGION = "eu-central-1"
+OTHER_REGION = "eu-west-3"
 
 
 def _synth(region: str) -> dict:
@@ -254,6 +255,18 @@ class TestAccountGlobalNames:
         assert not any(OTHER_REGION in n for n in table_names)
 
 
+def test_external_widget_cors_is_token_only_and_exposes_retry_after(other_template):
+    policy = _only(other_template, "AWS::CloudFront::ResponseHeadersPolicy")
+    cors = policy["Properties"]["ResponseHeadersPolicyConfig"]["CorsConfig"]
+    assert cors["AccessControlAllowCredentials"] is False
+    assert cors["AccessControlAllowOrigins"]["Items"] == ["*"]
+    assert cors["AccessControlAllowMethods"]["Items"] == ["ALL"]
+    assert "Authorization" in cors["AccessControlAllowHeaders"]["Items"]
+    assert "Content-Type" in cors["AccessControlAllowHeaders"]["Items"]
+    assert cors["AccessControlExposeHeaders"]["Items"] == ["Retry-After"]
+    assert cors["OriginOverride"] is True
+
+
 # ---------------------------------------------------------------
 # Region threading
 # ---------------------------------------------------------------
@@ -267,7 +280,7 @@ class TestRegionThreading:
                 assert env["APP_AWS_REGION"] == OTHER_REGION
 
     def test_tool_generator_model_uses_the_regional_inference_prefix(self, other_template):
-        """A ``us.`` inference profile does not exist in eu-central-1 — the tool
+        """A ``us.`` inference profile does not exist in an EU Region — the tool
         generator would fail on every invoke."""
         models = {
             r["Properties"]["Environment"]["Variables"]["TOOL_GENERATOR_MODEL_ID"]
@@ -282,5 +295,51 @@ class TestRegionThreading:
         csp = rhp["Properties"]["ResponseHeadersPolicyConfig"]["SecurityHeadersConfig"]["ContentSecurityPolicy"][
             "ContentSecurityPolicy"
         ]
-        assert f"https://cognito-idp.{OTHER_REGION}.amazonaws.com" in csp
-        assert f"cognito-idp.{HOME_REGION}.amazonaws.com" not in csp
+        parts = csp["Fn::Join"][1] if isinstance(csp, dict) else [csp]
+        static_csp = "".join(part for part in parts if isinstance(part, str))
+        assert f"https://cognito-idp.{OTHER_REGION}.amazonaws.com" in static_csp
+        assert f"cognito-idp.{HOME_REGION}.amazonaws.com" not in static_csp
+
+
+# ---------------------------------------------------------------
+# Optional regional services — permissions follow availability
+# ---------------------------------------------------------------
+
+
+def _all_iam_actions(template: dict) -> set[str]:
+    actions: set[str] = set()
+    for resource in template["Resources"].values():
+        documents: list[dict] = []
+        if resource["Type"] == "AWS::IAM::Policy":
+            documents.append(resource["Properties"]["PolicyDocument"])
+        if resource["Type"] == "AWS::IAM::Role":
+            documents.extend(policy["PolicyDocument"] for policy in resource["Properties"].get("Policies", []))
+        for document in documents:
+            for statement in document.get("Statement", []):
+                raw = statement.get("Action", [])
+                actions.update([raw] if isinstance(raw, str) else raw)
+    return actions
+
+
+class TestOptionalRegionalServicePermissions:
+    def test_the_reviewed_agent_registry_region_set_is_exact(self):
+        assert AWS_AGENT_REGISTRY_SUPPORTED_REGIONS == {
+            "ap-northeast-1",
+            "ap-southeast-2",
+            "ca-central-1",
+            "eu-central-1",
+            "eu-west-1",
+            "eu-west-2",
+            "us-east-1",
+            "us-east-2",
+            "us-west-2",
+        }
+
+    def test_supported_region_retains_agent_registry_permissions(self, home_template):
+        actions = _all_iam_actions(home_template)
+        assert "agent-registry:GetRegistry" in actions
+        assert "agent-registry:CreateRegistryRecord" in actions
+
+    def test_reduced_region_has_no_agent_registry_permissions(self, other_template):
+        actions = _all_iam_actions(other_template)
+        assert not any(action.startswith("agent-registry:") for action in actions)

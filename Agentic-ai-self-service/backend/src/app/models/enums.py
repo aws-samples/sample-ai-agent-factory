@@ -97,7 +97,7 @@ class AgentCoreComponentType(str, Enum):
     POLICY = "policy"
     A2A = "a2a"  # Agent-to-Agent communication
     GUARDRAILS = "guardrails"
-    TOOL = "tool"  # Tool nodes (DuckDuckGo, Weather, custom tools, etc.)
+    TOOL = "tool"  # Tool nodes (managed search, weather, custom tools, etc.)
 
 
 class A2ACommunicationPattern(str, Enum):

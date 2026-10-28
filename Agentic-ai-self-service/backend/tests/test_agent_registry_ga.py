@@ -434,20 +434,20 @@ def test_the_module_docstring_states_the_correct_enum():
 
 
 def test_lambda_bundle_pins_boto3_with_agent_registry_models():
-    """1.43.66 is the first boto3 with the agent-registry service models.
+    """The Lambda hash lock carries the reviewed SDK with all required models.
 
     The Lambda bundle installs this file into backend/lib/, which PYTHONPATH
-    shadows ahead of the runtime's built-in boto3 — so this floor is what
-    actually decides whether the GA clients exist at runtime.
+    shadows ahead of the runtime's built-in boto3. Exact pinning prevents a
+    service-model update from changing a deployment built from an unchanged commit.
     """
     text = (_BACKEND / "requirements-lambda.txt").read_text()
-    match = re.search(r"^boto3>=(\d+)\.(\d+)\.(\d+)", text, re.M)
-    assert match, "boto3 pin not found in requirements-lambda.txt"
-    assert tuple(int(g) for g in match.groups()) >= (1, 43, 66)
+    match = re.search(r"^boto3==(\d+)\.(\d+)\.(\d+)", text, re.M)
+    assert match, "exact boto3 lock not found in requirements-lambda.txt"
+    assert tuple(int(g) for g in match.groups()) == (1, 43, 109)
 
 
 def test_pyproject_pins_boto3_with_agent_registry_models():
     text = (_BACKEND / "pyproject.toml").read_text()
-    match = re.search(r'"boto3>=(\d+)\.(\d+)\.(\d+)"', text)
-    assert match, "boto3 pin not found in pyproject.toml"
-    assert tuple(int(g) for g in match.groups()) >= (1, 43, 66)
+    match = re.search(r'"boto3==(\d+)\.(\d+)\.(\d+)"', text)
+    assert match, "exact boto3 pin not found in pyproject.toml"
+    assert tuple(int(g) for g in match.groups()) == (1, 43, 109)

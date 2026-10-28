@@ -8,11 +8,13 @@ so only super-admins (g-admins-super / org-admin) can read the org's audit trail
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.services.auth import get_caller_sub
+from app.services.production_safety import is_production_like_environment
 from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
@@ -25,18 +27,31 @@ async def get_audit(
     limit: int = Query(default=200, ge=1, le=1000),
     _caller_sub: str = Depends(get_caller_sub),
 ) -> dict:
-    """Return {total, by_action, by_actor, events[]} over recent audit events.
-
-    Best-effort: if the audit table is unavailable (fresh stack) return an empty
-    summary rather than 500 — the dashboard renders an empty state.
-    """
+    """Return verified audit analytics and incomplete production attempts."""
     try:
         from app.services.audit_store import get_audit_store
 
         return get_audit_store().summarize("default", limit=limit)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("audit summarize failed (returning empty): %s", exc)
-        return {"total": 0, "by_action": {}, "by_actor": {}, "events": []}
+        logger.error("audit summarize failed (%s)", type(exc).__name__)
+        if is_production_like_environment():
+            raise HTTPException(
+                status_code=503,
+                detail="Audit evidence is unavailable or failed integrity verification.",
+            ) from exc
+        return {
+            "total": 0,
+            "audit_records": 0,
+            "incomplete_attempts": 0,
+            "unverified_legacy_events": 0,
+            "distinct_actors": 0,
+            "distinct_sessions": 0,
+            "by_action": {},
+            "by_actor": {},
+            "by_day": [],
+            "events": [],
+            "incomplete_events": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +66,9 @@ class EnableTargetsRequest(BaseModel):
 
 class RegionTargetRequest(BaseModel):
     region: str = Field(min_length=2, max_length=32, pattern=r"^[a-z]{2}-[a-z]+-\d$")
+    evaluation_kms_key_arn: str = Field(
+        pattern=r"^arn:aws(?:-[a-z0-9-]+)?:kms:[a-z0-9-]+:\d{12}:key/[A-Za-z0-9-]+$",
+    )
     artifact_bucket: str | None = Field(
         default=None,
         min_length=3,
@@ -58,9 +76,21 @@ class RegionTargetRequest(BaseModel):
         pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
     )
 
+    @field_validator("region")
+    @classmethod
+    def _release_region(cls, value: str) -> str:
+        # The admin allowlist narrows the release envelope; it cannot widen it. Refused
+        # here, before the route spends an STS/S3/KMS round trip validating the target.
+        from app.services.region_capabilities import require_release_region
+
+        return require_release_region(value, surface="a deployment target")
+
 
 class AccountTargetRequest(BaseModel):
     account_id: str = Field(pattern=r"^\d{12}$")
+    evaluation_kms_key_arn: str = Field(
+        pattern=r"^arn:aws(?:-[a-z0-9-]+)?:kms:[a-z0-9-]+:\d{12}:key/[A-Za-z0-9-]+$",
+    )
     role_arn: str = Field(
         pattern=(
             r"^arn:aws(?:-[a-z0-9-]+)?:iam::\d{12}:"
@@ -87,6 +117,13 @@ class AccountTargetRequest(BaseModel):
     )
     region: str = Field(min_length=2, max_length=32, pattern=r"^[a-z]{2}-[a-z]+-\d$")
 
+    @field_validator("region")
+    @classmethod
+    def _release_region(cls, value: str) -> str:
+        from app.services.region_capabilities import require_release_region
+
+        return require_release_region(value, surface="a deployment target")
+
 
 @router.get("/deploy-targets", dependencies=[Depends(require_scopes("admin"))])
 async def get_deploy_targets(_caller_sub: str = Depends(get_caller_sub)) -> dict:
@@ -101,6 +138,7 @@ async def get_deploy_targets(_caller_sub: str = Depends(get_caller_sub)) -> dict
                 "region": target.get("region"),
                 "account_id": target.get("account_id"),
                 "artifact_bucket": target.get("artifact_bucket"),
+                "evaluation_kms_key_arn": target.get("evaluation_kms_key_arn"),
             }
             for target in dt.list_region_targets()
         ],
@@ -117,6 +155,7 @@ async def get_deploy_targets(_caller_sub: str = Depends(get_caller_sub)) -> dict
                     a.get("account_id"),
                     a.get("region") or dt.home_region(),
                 ),
+                "evaluation_kms_key_arn": a.get("evaluation_kms_key_arn"),
                 "region": a.get("region"),
             }
             for a in dt.list_accounts()
@@ -154,6 +193,16 @@ async def add_region_target(body: RegionTargetRequest, _caller_sub: str = Depend
             artifact_bucket=body.artifact_bucket,
             same_account=True,
         )
+        deployment_role_arn = os.environ.get("DEPLOYMENT_LAMBDA_ROLE_ARN", "").strip()
+        if not deployment_role_arn:
+            raise dt.TargetError("The platform deployment role ARN is unavailable for evaluation-key validation")
+        evaluation_kms_key_arn = dt.validate_evaluation_kms_key(
+            session,
+            account_id=account_id,
+            region=body.region,
+            key_arn=body.evaluation_kms_key_arn,
+            deployment_role_arn=deployment_role_arn,
+        )
     except dt.TargetError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -166,11 +215,13 @@ async def add_region_target(body: RegionTargetRequest, _caller_sub: str = Depend
         body.region,
         account_id=account_id,
         artifact_bucket=artifact_bucket,
+        evaluation_kms_key_arn=evaluation_kms_key_arn,
     )
     return {
         "region": body.region,
         "account_id": account_id,
         "artifact_bucket": artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
         "validated": True,
         "regions": dt.list_regions(),
         "region_targets": dt.list_region_targets(),
@@ -205,6 +256,13 @@ async def add_account_target(body: AccountTargetRequest, _caller_sub: str = Depe
             region=body.region,
             artifact_bucket=body.artifact_bucket,
         )
+        evaluation_kms_key_arn = dt.validate_evaluation_kms_key(
+            session,
+            account_id=body.account_id,
+            region=body.region,
+            key_arn=body.evaluation_kms_key_arn,
+            deployment_role_arn=body.role_arn,
+        )
     except dt.TargetError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     dt.add_account(
@@ -215,6 +273,7 @@ async def add_account_target(body: AccountTargetRequest, _caller_sub: str = Depe
         mcp_runtime_role_arn=mcp_runtime_role_arn,
         harness_role_arn=harness_role_arn,
         artifact_bucket=artifact_bucket,
+        evaluation_kms_key_arn=evaluation_kms_key_arn,
     )
     return {
         "account_id": body.account_id,
@@ -222,5 +281,6 @@ async def add_account_target(body: AccountTargetRequest, _caller_sub: str = Depe
         "mcp_runtime_role_arn": mcp_runtime_role_arn,
         "harness_role_arn": harness_role_arn,
         "artifact_bucket": artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
         "validated": True,
     }

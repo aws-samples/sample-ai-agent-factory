@@ -587,10 +587,10 @@ def _create_tag_policy_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.
 def _create_budget_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table:
     """Phase 4 (Loom) FinOps — cost budgets table.
 
-    PK ``org_id``, SK ``BUDGET#<scope>#<key>`` (single-table; see
-    services/budget_store). Low-volume org config; no GSI.
+    PK ``org_id`` with budget definitions, monthly spend counters, and
+    reservation ledger rows. Only settled reservations carry ``ttl``.
     """
-    return dynamodb.Table(
+    table = dynamodb.Table(
         stack,
         "BudgetTable",
         table_name=f"{cfg.project}-{cfg.env}-budget",
@@ -610,17 +610,30 @@ def _create_budget_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Tabl
         # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
         deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
+        time_to_live_attribute="ttl",
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
         ),
     )
+    table.add_global_secondary_index(
+        index_name="reservation-status-expires-index",
+        partition_key=dynamodb.Attribute(
+            name="reservation_status",
+            type=dynamodb.AttributeType.STRING,
+        ),
+        sort_key=dynamodb.Attribute(
+            name="expires_epoch",
+            type=dynamodb.AttributeType.NUMBER,
+        ),
+    )
+    return table
 
 
 def _create_audit_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table:
-    """Phase 5 (Loom) — action-audit trail.
+    """Append-only action-audit projection.
 
-    PK ``org_id``, SK ``<ts_iso>#<event_id>`` (sortable). TTL on ``ttl``
-    (90-day) bounds growth. See services/audit_store.
+    DynamoDB TTL stays enabled so pre-upgrade/development rows carrying ``ttl``
+    expire. New production events omit that attribute and therefore never expire.
     """
     return dynamodb.Table(
         stack,

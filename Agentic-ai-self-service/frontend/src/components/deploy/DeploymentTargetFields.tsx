@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { authFetch } from '../../auth/authFetch';
+import { isReleaseRegion, releaseRegionUnavailableReason } from '../../utils/awsRegion';
 
 export interface DeploymentTargetSelection {
   targetAccountId?: string;
@@ -9,6 +10,7 @@ export interface DeploymentTargetSelection {
 interface DeploymentTargetOptions {
   enabled: boolean;
   home_region: string;
+  home_region_admissible: boolean;
   regions: string[];
   accounts: Array<{ account_id: string; region: string }>;
 }
@@ -39,24 +41,33 @@ export function DeploymentTargetFields({
     void authFetch('/api/deploy-targets')
       .then(async (response) => {
         if (!response.ok) return null;
-        return response.json() as Promise<DeploymentTargetOptions>;
+        return response.json() as Promise<Partial<DeploymentTargetOptions> & { home_region_admissible?: boolean }>;
       })
       .then((result) => {
         if (!active || !result) return;
+        // Twin of the server-side filter in /api/deploy-targets: never offer a target the
+        // deploy route would refuse, even if an older backend returned an unfiltered list.
         setOptions({
           enabled: result.enabled === true,
           home_region: typeof result.home_region === 'string'
             ? result.home_region
             : 'platform default',
+          // Refuse only on a KNOWN inadmissible home Region: the backend's own verdict when it
+          // sends one, else the predicate over a real Region string. A catalog that names no
+          // home Region (older backend, minimal response) is unknown, not refused -- the deploy
+          // route remains the enforcement point and will refuse an inadmissible home itself.
+          home_region_admissible: typeof result.home_region === 'string'
+            ? result.home_region_admissible !== false && isReleaseRegion(result.home_region)
+            : true,
           regions: Array.isArray(result.regions)
-            ? result.regions.filter((region): region is string => typeof region === 'string')
+            ? result.regions.filter((region): region is string => isReleaseRegion(region))
             : [],
           accounts: Array.isArray(result.accounts)
             ? result.accounts.filter(
                 (account): account is { account_id: string; region: string } =>
                   Boolean(account)
                   && typeof account.account_id === 'string'
-                  && typeof account.region === 'string',
+                  && isReleaseRegion(account.region),
               )
             : [],
         });
@@ -87,7 +98,7 @@ export function DeploymentTargetFields({
     if (options && !allowedValues.has(selectedValue)) onChange({});
   }, [allowedValues, onChange, options, selectedValue]);
 
-  if (!options || (!options.enabled && selectedValue === 'default')) return null;
+  if (!options || (!options.enabled && selectedValue === 'default' && options.home_region_admissible)) return null;
 
   return (
     <section className="rounded-lg border border-[#d5dbdb] bg-[#fafafa] p-3 space-y-2">
@@ -97,6 +108,11 @@ export function DeploymentTargetFields({
           This applies only to Deploy to AgentCore. Exports remain account-neutral.
         </p>
       </div>
+      {!options.home_region_admissible && (
+        <p role="alert" className="text-[11px] text-[#d13212]">
+          {releaseRegionUnavailableReason(options.home_region, 'deploying to the platform account')}
+        </p>
+      )}
       <label className="block text-xs font-medium text-[#414d5c]" htmlFor="live-deployment-target">
         Account and region
       </label>

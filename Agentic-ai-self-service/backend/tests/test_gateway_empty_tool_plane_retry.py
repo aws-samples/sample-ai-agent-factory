@@ -30,6 +30,7 @@ RuntimeError message and an SFN failure cause.
 """
 
 import contextlib
+import json
 import socket
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -53,10 +54,14 @@ class _FakeIamExceptions:
 class _FakeIam:
     exceptions = _FakeIamExceptions()
 
+    def __init__(self):
+        self.role_policies: list[dict] = []
+
     def create_role(self, **kw):
         return {"Role": {"Arn": f"arn:aws:iam::123456789012:role/{kw['RoleName']}"}}
 
     def put_role_policy(self, **kw):
+        self.role_policies.append(kw)
         return {}
 
 
@@ -836,6 +841,219 @@ def _shared_pool_cognito(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("inline_tool_count", [0, 2], ids=["crawled-only", "mixed-inline-and-crawled"])
+def test_hosted_mcp_target_uses_served_tools_for_cedar_actions(monkeypatch, inline_tool_count):
+    class ReadyMcpCtrl(_FakeCtrl):
+        def list_gateway_targets(self, **kw):
+            return {
+                "items": [
+                    {
+                        "name": "MCPServerRuntime",
+                        "targetId": "mcp-target",
+                        "status": "READY",
+                    }
+                ]
+            }
+
+    ctrl = ReadyMcpCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=4, expected=inline_tool_count)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_ensure_oauth2_credential_provider",
+        lambda *args, **kwargs: "arn:aws:bedrock-agentcore:us-east-1:1:provider/mcp",
+    )
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_create_gateway_target_with_retry",
+        lambda *args, **kwargs: {"targetId": "mcp-target"},
+    )
+    served_actions = [
+        "MCPServerRuntime___get_order",
+        "MCPServerRuntime___get_customer",
+        "MCPServerRuntime___list_orders",
+        "MCPServerRuntime___process_refund",
+    ]
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_qualified_tools_from_served",
+        lambda *_args: served_actions,
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        owner_sub="owner-a",
+        deployment_id="d-mcp-served",
+        secrets_prebound=True,
+        mcp_server_runtime_arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/mcp",
+        mcp_oauth={
+            "discovery_url": "https://issuer.example/.well-known/openid-configuration",
+            "client_id": "client",
+            "scope": "mcp/invoke",
+            "client_secret_ref": ("arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/owner/ref"),
+        },
+    )
+
+    assert out["success"] is True, out.get("error")
+    assert out["qualified_tools"] == served_actions
+    assert out["expected_tool_count"] == 4
+    assert out["tool_plane_verified"] is True
+
+
+def test_two_openapi_config_targets_each_require_a_served_tool(monkeypatch):
+    """Two targets of one family are two obligations, not one set member."""
+    ctrl = _FakeCtrl()
+    # Two inline actions plus one operationId from each static OpenAPI schema.
+    _install(monkeypatch, ctrl=ctrl, served=3, expected=4)
+    monkeypatch.setattr(gateway_deployer, "_deploy_config_targets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_qualified_tools_from_served",
+        lambda *_args: ["Inline___one", "Inline___two", "OpenApiA___one"],
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {
+            "name": "agent-gateway",
+            "targets": [
+                {"type": "openapi", "name": "OpenApiA"},
+                {"type": "openapi", "name": "OpenApiB"},
+            ],
+        },
+        "us-east-1",
+        deployment_id="d-config-count",
+    )
+
+    assert out["success"] is False
+    assert "served 3/4 tools" in out["error"]
+
+
+def test_obo_static_actions_defer_tools_list_to_the_authenticated_user_gate(monkeypatch):
+    ctrl = _FakeCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=0, expected=1)
+    iam = _FakeIam()
+    monkeypatch.setattr(gateway_deployer, "_create_iam_client", lambda: iam)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "workforce_gateway_identity",
+        lambda region, owner_sub: {
+            "authorizer_config": {
+                "customJWTAuthorizer": {
+                    "discoveryUrl": "https://issuer.example/.well-known/openid-configuration",
+                    "allowedClients": ["workforce-client"],
+                    "customClaims": [
+                        {
+                            "inboundTokenClaimName": "sub",
+                            "inboundTokenClaimValueType": "STRING",
+                            "authorizingClaimMatchValue": {
+                                "claimMatchValue": {"matchValueString": owner_sub},
+                                "claimMatchOperator": "EQUALS",
+                            },
+                        }
+                    ],
+                }
+            },
+            "client_info": {"provider": "workforce_jwt", "delegation_mode": "obo"},
+            "resource_server_created": False,
+        },
+    )
+    probes: list[tuple] = []
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_wait_for_gateway_to_serve_tools",
+        lambda *args, **kwargs: probes.append((args, kwargs)),
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        deployment_id="d-obo-static",
+        owner_sub="owner-sub",
+        connectors=[{"delegation_mode": "obo"}],
+    )
+
+    assert out["success"] is True, out.get("error")
+    assert out["qualified_tools"] == ["DynamicTools___t0"]
+    assert out["expected_tool_count"] == 1
+    assert out["tool_plane_verified"] is False
+    assert out["obo_required"] is True
+    assert out["delegated_identity_live_gate"] == "first_authenticated_user_tool_call"
+    assert len(iam.role_policies) == 1
+    role_policy = json.loads(iam.role_policies[0]["PolicyDocument"])
+    workload_statement = next(
+        statement for statement in role_policy["Statement"] if statement["Sid"] == "WorkloadIdentityToken"
+    )
+    assert workload_statement["Action"] == [
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+    ]
+    assert probes == [], "an OBO gateway has no deployment-time machine token; the authenticated user is the live gate"
+
+
+def test_obo_mixed_with_served_only_targets_fails_before_partial_cedar(monkeypatch):
+    ctrl = _FakeCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=0, expected=1)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "workforce_gateway_identity",
+        lambda region, owner_sub: {
+            "authorizer_config": {"customJWTAuthorizer": {}},
+            "client_info": {"provider": "workforce_jwt", "delegation_mode": "obo"},
+            "resource_server_created": False,
+        },
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        deployment_id="d-obo-mixed",
+        owner_sub="owner-sub",
+        connectors=[{"delegation_mode": "obo"}],
+        external_mcp_servers=[{"name": "dynamic"}],
+    )
+
+    assert out["success"] is False
+    assert "cannot combine static schema-bound tools" in out["error"]
+    assert "separate gateway" in out["error"]
+
+
+def test_mixed_inline_and_crawled_plane_requires_both_contributions(monkeypatch):
+    class ReadyMcpCtrl(_FakeCtrl):
+        def list_gateway_targets(self, **kw):
+            return {"items": [{"name": "MCPServerRuntime", "targetId": "mcp-target", "status": "READY"}]}
+
+    ctrl = ReadyMcpCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=2, expected=2)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_ensure_oauth2_credential_provider",
+        lambda *_args, **_kwargs: "arn:aws:bedrock-agentcore:us-east-1:1:provider/mcp",
+    )
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_create_gateway_target_with_retry",
+        lambda *_args, **_kwargs: {"targetId": "mcp-target"},
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        owner_sub="owner-a",
+        deployment_id="d-mixed-served",
+        secrets_prebound=True,
+        mcp_server_runtime_arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/mcp",
+        mcp_oauth={
+            "discovery_url": "https://issuer.example/.well-known/openid-configuration",
+            "client_id": "client",
+            "scope": "mcp/invoke",
+            "client_secret_ref": "arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/owner/ref",
+        },
+    )
+
+    assert out["success"] is False
+    assert "served 2/3 tools" in out["error"]
+
+
 def test_a_failed_shared_pool_deploy_hands_back_the_credentials_it_must_revoke(monkeypatch):
     """The abort inventory reduced ``client_info`` to {provider, user_pool_id}, which
     kept the secret out and took three teardown handles with it.
@@ -844,6 +1062,7 @@ def test_a_failed_shared_pool_deploy_hands_back_the_credentials_it_must_revoke(m
     ``gwfixaafac57e-client`` (secret still mintable) and resource server
     ``agentcore-gwfixaafac57e`` were left in the platform pool, because neither the
     abort cleanup nor the manifest could name them.
+
     """
     ctrl = _FakeCtrl()
     _install(monkeypatch, ctrl=ctrl, served=9, expected=9)

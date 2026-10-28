@@ -153,6 +153,37 @@ check_prerequisites() {
 
 # ── Step 2: Validate AWS credentials ─────────────────────────────────
 
+report_region_feature_profile() {
+  case "${AWS_REGION}" in
+    us-east-1|us-east-2|us-west-2|eu-west-1)
+      log_success "Regional feature profile: full (${AWS_REGION})."
+      log_info "  * Managed Web Search and AWS Agent Registry federation are available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Built-in Tools, and Observability are in the supported profile."
+      ;;
+    eu-central-1|eu-west-2)
+      log_warning "Regional feature profile: reduced core platform (${AWS_REGION})."
+      log_warning "  * NOT SUPPORTED: Amazon Bedrock AgentCore managed Web Search."
+      log_info "  * AWS Agent Registry federation is available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Built-in Tools, and Observability remain in the supported profile."
+      ;;
+    eu-west-3)
+      log_warning "Regional feature profile: reduced core platform (${AWS_REGION})."
+      log_warning "  * NOT SUPPORTED: Amazon Bedrock AgentCore managed Web Search."
+      log_warning "  * NOT SUPPORTED: AWS Agent Registry federation."
+      log_info "  * The built-in DynamoDB agent registry remains available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Built-in Tools, and Observability remain in the supported profile."
+      ;;
+    *)
+      log_error "AWS_REGION='${AWS_REGION}' is outside this release's support envelope."
+      log_error "Supported single-Region deployments: eu-central-1, eu-west-1, eu-west-2, eu-west-3, us-east-1, us-east-2, us-west-2."
+      return 1
+      ;;
+  esac
+}
+
 check_aws_credentials() {
   log_info "Checking AWS credentials..."
   # The stack is region-agnostic, but two things differ outside us-east-1 and
@@ -172,6 +203,7 @@ check_aws_credentials() {
     log_error "AWS_REGION='${AWS_REGION}' is not a valid AWS region name."
     exit 1
   fi
+  report_region_feature_profile
   if [[ "${AWS_REGION}" != "us-east-1" ]]; then
     log_info "Deploying to '${AWS_REGION}' (not us-east-1)."
     log_info "  * CloudFront will have NO WebACL; the WAF rule set is applied to"
@@ -435,11 +467,16 @@ preserve_existing_cognito_users() {
     rc=$?
   fi
   if (( rc != 0 )); then
-    # Exact absent-stack classification: the AWS error code AND the exact GetTemplate message for THIS stack, as one
-    # whole line. Any other ValidationError (or any other text) is unknown and fails closed.
-    local stack_re
-    stack_re="$(printf '%s' "${STACK_NAME}" | sed 's/[][\.*^$\\/+?(){}|]/\\&/g')"
-    if grep -Eq "^An error occurred \(ValidationError\) when calling the GetTemplate operation: Stack with id ${stack_re} does not exist\$" "${err}"; then
+    # Exact absent-stack classification: require one nonblank stderr line containing the
+    # ValidationError and THIS stack's exact GetTemplate message. AWS CLI 2.33 prefixes
+    # service errors with `aws: [ERROR]:`; older CLI 2 releases do not. Those are the only
+    # accepted forms. Any second diagnostic, different code/operation/stack, or extra text
+    # remains unknown and fails closed.
+    local missing_stack_error expected_missing_stack_error
+    missing_stack_error="$(sed '/^[[:space:]]*$/d' "${err}")"
+    expected_missing_stack_error="An error occurred (ValidationError) when calling the GetTemplate operation: Stack with id ${STACK_NAME} does not exist"
+    if [[ "${missing_stack_error}" == "${expected_missing_stack_error}" ||
+          "${missing_stack_error}" == "aws: [ERROR]: ${expected_missing_stack_error}" ]]; then
       log_info "Stack '${STACK_NAME}' is absent (exact ValidationError + message): no users to carry forward."
       rm -f "${err}"
       return
@@ -1092,15 +1129,22 @@ cdk_diff_pinned() {
 cdk_deploy_pinned() {
   local gate_asm="${PROJECT_ROOT}/infra/cdk.out.preflight"
   local gate_log_dir="${PROJECT_ROOT}/.cdk-gate"
+  local deploy_rc
   cd "${PROJECT_ROOT}/infra"
   verify_pinned_assembly pre-deploy
   log_info "CDK safety gate 3/3: deploying the reviewed assembly (no re-synth)..."
-  "${CDK_BIN}" deploy "${STACK_NAME}" \
+  if "${CDK_BIN}" deploy "${STACK_NAME}" \
     --app "${gate_asm}" \
     --exclusively \
-    --require-approval never
-  cd "${PROJECT_ROOT}"
-  log_success "CDK stack deployed."
+    --require-approval never; then
+    cd "${PROJECT_ROOT}"
+    log_success "CDK stack deployed."
+  else
+    deploy_rc=$?
+    cd "${PROJECT_ROOT}"
+    log_error "CDK deployment failed with exit ${deploy_rc}; the stack did not reach the requested state."
+    return "${deploy_rc}"
+  fi
 }
 
 run_cdk_deploy() {
@@ -1186,15 +1230,18 @@ build_frontend() {
   # scripts are not run at all (the lock needs none: proven by a disposable credential-free install + production build).
   # npm verifies every package against the lock's integrity hashes; the resulting inventory digest is logged.
   # a PRIVATE empty HOME for npm/vite (nothing discovered through the account home), the npm cache named explicitly,
-  # and --offline: every package comes from the cache and is verified against the lock's integrity hashes (a disposable
-  # credential-free offline install + production build was proven for this lock).
+  # and --prefer-offline: a package already in the cache is used without a registry round-trip, one that is not is
+  # fetched from the registry -- either way npm verifies it against the lock's integrity hash. (This was --offline,
+  # which failed with ENOTCACHED on any machine whose npm cache had never seen this lock -- i.e. every fresh clone --
+  # AFTER the stack was created, leaving a platform with no UI. The credential boundary above never depended on the
+  # network being closed: it is the stripped environment plus --ignore-scripts.)
   # the reinstall must reproduce the PREPARED install byte for byte, modes included: the caller's umask never decides
   # them (a 077 launcher would turn every 0644 into 0600 and the bound inventory would no longer verify)
   umask 022
   local fe_home; fe_home="$(mktemp -d "${TMPDIR:-/tmp}/fe_home.XXXXXX")"; chmod 700 "${fe_home}"
   FE_HOMES+=("${fe_home}"); trap cleanup_fe_homes EXIT   # removed on EVERY exit path (error, signal), not only success
   local -a fe_env=(env -i "PATH=${PATH}" "HOME=${fe_home}" "LANG=${LANG:-C.UTF-8}" CI=1 NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/var/empty/npmrc "NPM_CONFIG_CACHE=${NPM_CONFIG_CACHE:-${HOME}/.npm}")
-  "${fe_env[@]}" npm ci --offline --ignore-scripts --no-audit --no-fund --loglevel=error
+  "${fe_env[@]}" npm ci --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error
   if ! FE_INVENTORY="$(frontend_inventory)" || [[ ! "${FE_INVENTORY}" =~ ^[0-9a-f]{64}$ ]]; then
     log_error "the frontend dependency inventory cannot be derived (hard links or unreadable entries); refusing."; exit 1
   fi

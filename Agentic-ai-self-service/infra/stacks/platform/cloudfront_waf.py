@@ -208,6 +208,7 @@ def build_cloudfront_distribution(
     cfg: PlatformConfig,
     *,
     bucket: s3.Bucket,
+    artifacts_bucket: s3.Bucket,
     api: apigwv2.HttpApi,
     web_acl: wafv2.CfnWebACL,
     logging_bucket: s3.Bucket,
@@ -253,6 +254,24 @@ def build_cloudfront_distribution(
         stack,
         "SecurityHeadersPolicy",
         response_headers_policy_name=cfg.global_resource_name(stack, "security-headers"),
+        cors_behavior=cloudfront.ResponseHeadersCorsBehavior(
+            access_control_allow_credentials=False,
+            access_control_allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "X-Amz-Date",
+                "X-Api-Key",
+                "X-AgentCore-Timestamp",
+                "X-AgentCore-Delivery-Id",
+                "X-AgentCore-Signature",
+                "X-Session-Id",
+            ],
+            access_control_allow_methods=["ALL"],
+            access_control_allow_origins=["*"],
+            access_control_expose_headers=["Retry-After"],
+            access_control_max_age=Duration.minutes(5),
+            origin_override=True,
+        ),
         security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
             content_type_options=cloudfront.ResponseHeadersContentTypeOptions(override=True),
             frame_options=cloudfront.ResponseHeadersFrameOptions(
@@ -279,7 +298,10 @@ def build_cloudfront_distribution(
                 # for scripts and styles. We allow 'unsafe-inline' for styles
                 # because Tailwind/runtime-injected CSS uses inline rules;
                 # scripts are NOT inline-allowed. connect-src includes
-                # CloudFront (same-origin via /api/*) and Cognito for auth.
+                # CloudFront (same-origin via /api/*), Cognito for auth, and
+                # this stack's exact private artifacts-bucket regional domain
+                # for browser-verified presigned downloads. It deliberately
+                # grants no broad S3 host wildcard.
                 #
                 # CSP Level 3 host-source grammar only allows `*` at the
                 # *start* of the host (e.g. `*.example.com`). A middle
@@ -297,7 +319,8 @@ def build_cloudfront_distribution(
                     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                     "img-src 'self' data: https:; "
                     "font-src 'self' data: https://fonts.gstatic.com; "
-                    f"connect-src 'self' https://*.amazoncognito.com https://cognito-idp.{stack.region}.amazonaws.com; "
+                    f"connect-src 'self' https://*.amazoncognito.com https://cognito-idp.{stack.region}.amazonaws.com "
+                    f"https://{artifacts_bucket.bucket_regional_domain_name}; "
                     "frame-ancestors 'none'; "
                     "object-src 'none'; "
                     "base-uri 'self'; "

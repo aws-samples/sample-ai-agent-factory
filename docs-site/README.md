@@ -6,6 +6,7 @@ Static, prerendered React + TypeScript + Vite site for the Agentic AI Factory re
 
 - Node.js 22.12 or newer locally (`.nvmrc` pins 24, which CI uses)
 - npm 10 or newer
+- The lockfile pins the audited build/test toolchain (Vite 7.3.7 and Vitest 4.1.12); CI audits development dependencies as well as production dependencies
 - Python 3 (for `npm run validate:static`)
 
 ## Setup
@@ -23,6 +24,7 @@ npm ci
 | `npm run preview` | Serve `dist/` locally at the base path; like GitHub Pages, unknown paths get `404.html` with status 404 and `/dir` redirects to `/dir/` |
 | `npm run typecheck` | TypeScript for `src/`, the Node-side config, plugins and scripts, and `tests/browser` |
 | `npm run lint` | ESLint, zero warnings allowed |
+| `npm run audit` | Fail on high-severity findings across production and development dependencies, matching CI |
 | `npm run test` | Vitest (jsdom, testing-library, axe) |
 | `npm run test:browser` | Playwright gate against `dist/` (see Browser tests) |
 | `npm run validate:static` | Fail-closed checks on `dist/` and the source tree |
@@ -136,6 +138,8 @@ Every page is built from a small set of shared primitives in `src/components/`, 
 
 ## Validation
 
+Repository fact sources are fail-closed: every `source.quote` in `src/content/` must be a 20-120 character verbatim substring of its cited repository file. When source documentation changes, update both the displayed fact and its quote rather than weakening or removing the provenance test.
+
 Before committing:
 
 ```bash
@@ -144,7 +148,7 @@ npm run lint
 npm run test
 npm run build
 npm run validate:static
-npm audit --omit=dev --audit-level=high
+npm run audit
 ```
 
 ## Assets

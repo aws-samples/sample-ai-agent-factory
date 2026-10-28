@@ -13,6 +13,7 @@ import os
 import subprocess
 import zipfile
 
+import pytest
 from app.models.deployment_models import DeployRequest, RuntimeConfig
 from app.services.code_generator import generate_agent_code
 from app.services.python_exporter import (
@@ -49,13 +50,25 @@ def _make_deploy_request(config: RuntimeConfig, **overrides) -> DeployRequest:
 
 
 _EXPECTED_FILES = {
-    "agent.py",
-    "requirements.txt",
+    ".dockerignore",
+    ".env.example",
+    ".github/workflows/verify.yml",
+    "CI-CD.md",
     "Dockerfile",
     "README.md",
-    ".env.example",
-    "run.sh",
+    "agent.py",
+    "buildspec.yml",
+    "check-installed.sh",
+    "ci/smoke-start.py",
+    "ci/verify-runtime-bind.py",
+    "ci/verify.sh",
+    "install-locked.sh",
+    "requirements.lock",
+    "requirements.txt",
     "run-docker.sh",
+    "run.sh",
+    "verify-integrity.py",
+    "verify-lock.py",
 }
 
 
@@ -126,7 +139,7 @@ def test_zip_marks_launchers_executable_but_not_source_files():
 
 def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secrets(tmp_path):
     marker = tmp_path / "docker-launcher-must-not-execute"
-    dangerous = f"value $(touch${{IFS}}{marker})"
+    dangerous = f"https://gateway.example.invalid/$(touch${{IFS}}{marker})"
     files = build_python_project(
         _make_deploy_request(
             _make_runtime_config(),
@@ -137,7 +150,7 @@ def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secr
             identityConfig={
                 "provider": "okta",
                 "clientId": dangerous,
-                "clientSecretRef": "oauth/client-ref",
+                "clientSecretRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/oauth-AbCdEf",  # pragma: allowlist secret
                 "scopes": ["gateway/read"],
             },
         )
@@ -147,6 +160,7 @@ def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secr
     launcher = tmp_path / "run-docker.sh"
     launcher.write_text(files["run-docker.sh"])
     launcher.chmod(0o755)
+    (tmp_path / "verify-integrity.py").write_text("raise SystemExit(0)\n")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -183,7 +197,7 @@ def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secr
 
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert records[0]["args"] == ["build", "-t", "exported-agent", "."]
-    assert records[1]["args"][:5] == ["run", "--rm", "-p", "8080:8080", "--env"]
+    assert records[1]["args"][:5] == ["run", "--rm", "-p", "127.0.0.1:8080:8080", "--env"]
     assert records[1]["args"][-1] == "exported-agent"
     assert "GATEWAY_URL" in records[1]["args"]
     assert "OAUTH_CLIENT_ID" in records[1]["args"]
@@ -191,7 +205,9 @@ def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secr
     assert "GUARDRAIL_ID" not in records[1]["args"]
     assert records[1]["env"]["GATEWAY_URL"] == dangerous
     assert records[1]["env"]["OAUTH_CLIENT_ID"] == dangerous
-    assert records[1]["env"]["OAUTH_CLIENT_SECRET_REF"] == "oauth/client-ref"
+    assert records[1]["env"]["OAUTH_CLIENT_SECRET_REF"] == (
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/oauth-AbCdEf"
+    )
     assert records[1]["env"]["GUARDRAIL_ID"] is None
     assert not marker.exists()
     assert "./run-docker.sh my-agent" in files["README.md"]
@@ -235,9 +251,9 @@ def _pkg_names(reqs: str) -> set[str]:
     out = set()
     for line in reqs.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith(("#", "-c ")):
             continue
-        out.add(re.split(r"[><=]", line, maxsplit=1)[0])
+        out.add(re.split(r"[><=]", line, maxsplit=1)[0].split("[", 1)[0])
     return out
 
 
@@ -257,20 +273,16 @@ def test_openai_provider_adds_openai_package():
     config = _make_runtime_config(modelProvider="openai")
     pkgs = _pkg_names(build_requirements(config))
 
-    assert "openai" in pkgs
+    assert "strands-agents[openai]==1.56.0" in build_requirements(config)
     assert "strands-agents" in pkgs
     assert "bedrock-agentcore" in pkgs
 
 
-def test_unknown_provider_falls_back_to_bedrock_packages():
-    # model_provider is a Literal, so simulate an out-of-map value by mutating
-    # the attribute directly (bypassing validation) to prove .get() fallback.
+def test_unknown_provider_fails_loudly():
     config = _make_runtime_config()
     object.__setattr__(config, "model_provider", "totally-unknown-provider")
-    pkgs = _pkg_names(build_requirements(config))
-
-    assert "strands-agents" in pkgs
-    assert "bedrock-agentcore" in pkgs  # no KeyError, fell back gracefully
+    with pytest.raises(ValueError, match="Unsupported model provider"):
+        build_requirements(config)
 
 
 def test_observability_adds_otel_distro():
@@ -283,20 +295,22 @@ def test_no_observability_omits_otel_distro():
     assert "aws-opentelemetry-distro" not in _pkg_names(build_requirements(config, connected_tools=[]))
 
 
-def test_requirements_are_version_floored_with_header():
-    """Holmes supply-chain finding: known packages carry a '>=' floor and the
-    body leads with a 'pin exact versions for production' header."""
+def test_requirements_are_exact_and_constrained_by_the_accepted_lock():
     config = _make_runtime_config()
     reqs = build_requirements(config)
-    assert reqs.lstrip().startswith("#")  # header present
-    assert "boto3>=" in reqs and "bedrock-agentcore>=" in reqs
+    package_lines = [line for line in reqs.splitlines() if line and not line.startswith(("#", "-c "))]
+    assert "-c requirements.lock" in reqs
+    assert package_lines and all(line.count("==") == 1 for line in package_lines)
+    assert ">=" not in reqs and "~=" not in reqs
+    assert "boto3==1.43.109" in reqs
+    assert "bedrock-agentcore==1.23.1" in reqs
 
 
 def test_requirements_package_lines_sorted_and_deduped():
     import re
 
     config = _make_runtime_config()
-    pkg_lines = [ln for ln in build_requirements(config).splitlines() if ln and not ln.startswith("#")]
+    pkg_lines = [ln for ln in build_requirements(config).splitlines() if ln and not ln.startswith(("#", "-c "))]
     # Lines are ordered by PACKAGE NAME (the version specifier is appended after).
     names = [re.split(r"[><=]", ln, maxsplit=1)[0] for ln in pkg_lines]
     assert names == sorted(names)
@@ -392,15 +406,13 @@ def test_prefilled_env_values_cannot_execute_shell_syntax(tmp_path):
 
 
 def test_litellm_gateway_is_inferred_and_fully_wired_without_connected_tools():
-    raw_key = "sk-must-never-be-exported"
-    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:litellm-key"
+    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-connector/litellm-AbCdEf"
     request = _make_deploy_request(
         _make_runtime_config(),
         gatewayConfig={
             "gatewayProvider": "litellm",
             "litellmBaseUrl": "https://litellm.example.internal",
             "litellmServers": ["github"],
-            "litellmApiKey": raw_key,
             "litellmApiKeyRef": key_ref,
         },
     )
@@ -412,11 +424,10 @@ def test_litellm_gateway_is_inferred_and_fully_wired_without_connected_tools():
     assert "GATEWAY_AUTH_MODE=static_bearer" in files[".env.example"]
     assert "GATEWAY_MCP_SERVERS=github" in files[".env.example"]
     assert f"GATEWAY_API_KEY_SECRET_ARN={key_ref}" in files[".env.example"]
-    assert all(raw_key not in content for content in files.values())
 
 
 def test_deployed_litellm_result_shape_keeps_static_bearer_auth():
-    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:litellm-key"
+    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-connector/litellm-AbCdEf"
     request = _make_deploy_request(
         _make_runtime_config(),
         gatewayConfig={
@@ -481,8 +492,7 @@ def test_component_configs_are_not_silently_dropped_when_tool_ids_are_omitted():
 
 
 def test_existing_guardrail_external_identity_and_otel_settings_survive_export():
-    raw_header = "Authorization=Bearer must-never-be-exported"
-    oauth_secret_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:oauth/client-AbCdEf"
+    oauth_secret_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-connector/oauth-AbCdEf"  # pragma: allowlist secret
     otel_secret_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-otel/team-AbCdEf"
     request = _make_deploy_request(
         _make_runtime_config(),
@@ -507,7 +517,6 @@ def test_existing_guardrail_external_identity_and_otel_settings_survive_export()
             "sampleRate": 0.25,
             "resourceAttributes": {"environment": "test", "team": "agent platform"},
             "authHeaderSecretArn": otel_secret_ref,
-            "extraHeaders": {"Authorization": "Bearer must-never-be-exported"},
         },
     )
 
@@ -527,7 +536,6 @@ def test_existing_guardrail_external_identity_and_otel_settings_survive_export()
     assert "OTEL_TRACES_SAMPLER_ARG=0.25" in env
     assert "OTEL_RESOURCE_ATTRIBUTES='environment=test,team=agent platform'" in env
     assert f"OTEL_AUTH_SECRET_ARN={otel_secret_ref}" in env
-    assert all(raw_header not in content for content in files.values())
     assert "OTEL_EXPORTER_OTLP_HEADERS=" in env
     assert "OTEL_EXPORTER_OTLP_EXTRA_HEADERS=" in env
 

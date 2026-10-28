@@ -23,6 +23,9 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
   const [cost, setCost] = useState<CostSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [budgetLimit, setBudgetLimit] = useState('');
+  const [savingBudget, setSavingBudget] = useState(false);
+  const [budgetMessage, setBudgetMessage] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!runtimeName) {
@@ -48,6 +51,25 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
       setLoading(false);
     }
   }, [runtimeName]);
+
+  const saveBudget = useCallback(async () => {
+    const limit = Number(budgetLimit);
+    if (!Number.isFinite(limit) || limit <= 0) {
+      setBudgetMessage('Enter a monthly limit greater than zero.');
+      return;
+    }
+    setSavingBudget(true);
+    setBudgetMessage(null);
+    try {
+      await getApiClient().upsertOwnerBudget(limit, 80);
+      setBudgetMessage(`Monthly invocation authorization set to $${limit.toFixed(2)}.`);
+      await reload();
+    } catch (e) {
+      setBudgetMessage(getErrorMessage(e));
+    } finally {
+      setSavingBudget(false);
+    }
+  }, [budgetLimit, reload]);
 
   useEffect(() => {
     void reload();
@@ -112,6 +134,45 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
           {error}
         </div>
       )}
+
+      <div className="rounded-lg border border-gray-200 px-3 py-2.5">
+        <div className="text-xs font-semibold text-gray-800">Monthly invocation authorization</div>
+        <p className="mt-1 text-[11px] text-gray-500">
+          Production requires an applicable limit. Each platform-mediated invocation operation, including a bounded MCP handshake, atomically reserves one configured USD-denominated authorization unit before its first Runtime dispatch. This is not an actual AWS bill cap and excludes downstream tool/vendor charges and calls made outside the platform.
+        </p>
+        <div className="mt-2 flex items-end gap-2">
+          <label className="flex-1 text-[11px] text-gray-600">
+            Limit (USD)
+            <input
+              aria-label="Monthly invocation authorization limit"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={budgetLimit}
+              placeholder={cost?.owner_budget?.limit ? cost.owner_budget.limit.toFixed(2) : '100.00'}
+              onChange={(event) => setBudgetLimit(event.target.value)}
+              className="mt-1 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-900"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void saveBudget()}
+            disabled={savingBudget}
+            className="rounded bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+          >
+            {savingBudget ? 'Saving…' : 'Set budget'}
+          </button>
+        </div>
+        {budgetMessage && <div role="status" className="mt-2 text-[11px] text-gray-700">{budgetMessage}</div>}
+        {cost?.owner_budget && (
+          <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-gray-600">
+            <span>Authorized units: ${(cost.owner_budget.authorized ?? 0).toFixed(2)}</span>
+            <span>Reserved now: ${(cost.owner_budget.reserved ?? 0).toFixed(2)}</span>
+            <span>Committed units: ${(cost.owner_budget.committed ?? 0).toFixed(2)}</span>
+            <span>Remaining: ${(cost.owner_budget.remaining_authorization ?? cost.owner_budget.limit).toFixed(2)}</span>
+          </div>
+        )}
+      </div>
 
       {loading && !cost ? (
         <div className="text-xs text-gray-500">Loading cost data…</div>

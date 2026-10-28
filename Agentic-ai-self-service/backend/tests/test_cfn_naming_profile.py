@@ -1138,7 +1138,9 @@ def test_profiled_template_has_no_cfn_lint_errors():
                     "gateway_provider": "litellm",
                     "litellm_base_url": "https://litellm.example.internal",
                     "litellm_servers": ["github", "jira"],
-                    "litellm_api_key_ref": ("arn:aws:secretsmanager:us-east-1:123456789012:secret:litellm-key-AbCdEf"),
+                    "litellm_api_key_ref": (
+                        "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/litellm-key-AbCdEf"
+                    ),
                 },
                 "memoryConfig": {"enabled": True},
                 "namingProfile": {"prefix": "ecb"},

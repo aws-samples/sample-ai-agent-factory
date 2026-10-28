@@ -82,6 +82,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
+from app.services.region_capabilities import SUPPORTED_SINGLE_REGION_RELEASES
+
 #: Allowlists, taken from the Literal annotations on ``DeployRequest`` rather than invented
 #: here. An allowlist is required over a deny list by cnt_ik6StRHfs118ea.
 ALLOWED_DEPLOYMENT_MODES = frozenset({"runtime", "harness"})
@@ -92,10 +94,12 @@ ALLOWED_DEPLOYMENT_SLOTS = frozenset({"staging", "production"})
 #: policy, and accepting an arbitrary string means the ARN was never parsed at all.
 ALLOWED_PARTITIONS = frozenset({"aws", "aws-cn", "aws-us-gov"})
 
-#: Syntactic region check only -- a real region list would go stale and reject new regions.
-#: The AUTHORIZATION decision about which regions are permitted is made elsewhere (the
-#: admin-gated allowlist); this rejects values that are not region-shaped at all. Coherence
-#: with the partition IS checked, by ``_partition_for_region``.
+#: Syntactic region check. Shape alone used to be the whole check here on the theory that a
+#: real region list would go stale; in this product Region support is a REVIEWED release
+#: decision (release/agentcore-regions.json, mirrored by
+#: ``region_capabilities.SUPPORTED_SINGLE_REGION_RELEASES``), so ``_validate_target`` also
+#: holds the prepared payload to that envelope. Coherence with the partition IS checked, by
+#: ``_partition_for_region``.
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-\d$")
 
 _ACCOUNT_RE = re.compile(r"^\d{12}$")
@@ -172,6 +176,8 @@ _PREPARED_TOP_LEVEL_FIELDS = frozenset(
         "target_mcp_runtime_role_arn",
         "target_harness_role_arn",
         "target_artifact_bucket",
+        "evaluation_kms_key_arn",
+        "production_gate_required",
         "version_id",
         "friendly_runtime_name",
         "agentcore_runtime_name",
@@ -1305,6 +1311,15 @@ def validate_deployment_payload(
                         "this payload was not produced by the deployment API",
                     )
                 )
+        production_gate_required = payload.get("production_gate_required")
+        if not isinstance(production_gate_required, bool):
+            errors.append(
+                PayloadError(
+                    "$.production_gate_required",
+                    "missing_server_field",
+                    "is a required server-authored boolean consumed by code generation, IAM, and Runtime configuration",
+                )
+            )
         for key in sorted(k for k in payload if k in _VALIDATOR_OUTPUT_FIELDS):
             errors.append(
                 PayloadError(
@@ -1452,6 +1467,20 @@ def validate_deployment_payload(
             resolved_region = target_region
         else:
             errors.append(PayloadError("$.target_region", "bad_region", "must be an AWS region such as 'eu-central-1'"))
+        # Shape is necessary, not sufficient. Region support is a reviewed release decision in
+        # this product (release/agentcore-regions.json), so the prepared payload is held to the
+        # same envelope the deploy handler admitted against: a payload naming an unselected
+        # Region cannot start the state machine, whichever path produced it.
+        if resolved_region is not None and resolved_region not in SUPPORTED_SINGLE_REGION_RELEASES:
+            resolved_region = None
+            errors.append(
+                PayloadError(
+                    "$.target_region",
+                    "unsupported_release_region",
+                    "must be one of the selected production release Regions: "
+                    + ", ".join(sorted(SUPPORTED_SINGLE_REGION_RELEASES)),
+                )
+            )
 
     # The account and region a resource must live in, taken from the resolved target when the
     # deployment names one and otherwise from the TRUSTED context -- never left unconstrained.
@@ -1477,6 +1506,20 @@ def validate_deployment_payload(
                 account_policy="required",
                 expect_account=expected_account,
             )
+
+    evaluation_key = payload.get("evaluation_kms_key_arn")
+    if evaluation_key is not None:
+        _check_arn(
+            errors,
+            "$.evaluation_kms_key_arn",
+            evaluation_key,
+            expect_service="kms",
+            expect_resource_prefix="key/",
+            region_policy="required",
+            expect_region=expected_region,
+            account_policy="required",
+            expect_account=expected_account,
+        )
 
     # Staged secrets are created BY this deployment, in the target account and region
     # (deployment_handler.py:391-422 binds them through a session for the target event), so

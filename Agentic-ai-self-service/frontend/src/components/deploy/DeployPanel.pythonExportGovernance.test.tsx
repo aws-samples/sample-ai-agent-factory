@@ -1,8 +1,10 @@
+/// <reference types="node" />
 /**
  * A standalone Python export creates no AWS resources, so governance tags cannot be
  * applied to it. The UI must refuse visibly -- never strip the fields and succeed --
  * and must show the backend's own 400 detail when the route refuses something.
  */
+import { webcrypto } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { DeployPanel } from './DeployPanel';
@@ -41,6 +43,13 @@ const GOVERNANCE_MESSAGE =
 
 type ExportReply = { ok: boolean; status: number; body: unknown };
 
+const VALID_EXPORT_RESPONSE = {
+  archive_sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',  // pragma: allowlist secret
+  archive_bytes: 4,
+  filename: 'artifact.zip',
+  zip_base64: 'dGVzdA==',
+};
+
 function mockApi(exportReply: ExportReply, cfnReplies: ExportReply[] = []) {
   mockAuthFetch.mockImplementation(async (url: string) => {
     if (url === '/api/settings/tags') {
@@ -73,7 +82,7 @@ function mockApi(exportReply: ExportReply, cfnReplies: ExportReply[] = []) {
       return { ok: exportReply.ok, status: exportReply.status, json: async () => exportReply.body };
     }
     if (url === '/api/generate-cfn-template') {
-      const reply = cfnReplies.shift() ?? { ok: true, status: 200, body: { download_url: 'https://d.example.invalid/c.zip' } };
+      const reply = cfnReplies.shift() ?? { ok: true, status: 200, body: VALID_EXPORT_RESPONSE };
       return { ok: reply.ok, status: reply.status, json: async () => reply.body };
     }
     return { ok: true, json: async () => ({}) };
@@ -124,13 +133,22 @@ function expectDeploymentIntact() {
 describe('DeployPanel standalone Python export and governance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('crypto', webcrypto as unknown as Crypto);
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:verified-export'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
     useWorkflowStore.getState().resetWorkflowDocument(null);
     sessionStorage.clear();
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
   });
 
   it('refuses visibly and sends nothing when a tag profile is selected', async () => {
-    mockApi({ ok: true, status: 200, body: { download_url: 'https://downloads.example.invalid/a.zip' } });
+    mockApi({ ok: true, status: 200, body: VALID_EXPORT_RESPONSE });
     renderPanel();
 
     await waitForGovernanceReady();
@@ -151,7 +169,7 @@ describe('DeployPanel standalone Python export and governance', () => {
   });
 
   it('refuses visibly and sends nothing when only an explicit tag is set', async () => {
-    mockApi({ ok: true, status: 200, body: { download_url: 'https://downloads.example.invalid/a.zip' } });
+    mockApi({ ok: true, status: 200, body: VALID_EXPORT_RESPONSE });
     renderPanel();
 
     await waitForGovernanceReady();
@@ -164,7 +182,7 @@ describe('DeployPanel standalone Python export and governance', () => {
   });
 
   it('exports normally, with no governance fields, when none is selected', async () => {
-    mockApi({ ok: true, status: 200, body: { download_url: 'https://downloads.example.invalid/a.zip' } });
+    mockApi({ ok: true, status: 200, body: VALID_EXPORT_RESPONSE });
     renderPanel();
     await waitForGovernanceReady();
 

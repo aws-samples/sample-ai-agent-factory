@@ -239,7 +239,7 @@ def test_cfn_readme_invoke_without_memory_is_unchanged(tmp_path):
 
 
 def _documented_local_invoke(readme: str) -> dict:
-    block = next(b for b in re.findall(r"```bash\n(.*?)```", readme, re.S) if "localhost:8080/invocations" in b)
+    block = next(b for b in re.findall(r"```bash\n(.*?)```", readme, re.S) if "127.0.0.1:8080/invocations" in b)
     argv = shlex.split(block)
     return json.loads(argv[argv.index("-d") + 1])
 

@@ -19,6 +19,9 @@ from app.routers import admin
 from app.services import deploy_target as dt
 from app.services import step_clients
 
+EVALUATION_KEY_ARN = "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-1234567890ab"
+DEPLOYMENT_ROLE_ARN = "arn:aws:iam::123456789012:role/PlatformDeploymentLambdaRole"
+
 
 class _SettingsTable:
     def __init__(self):
@@ -38,6 +41,7 @@ class _SettingsTable:
 @pytest.fixture(autouse=True)
 def _home_region(monkeypatch):
     monkeypatch.setenv("APP_AWS_REGION", "us-east-1")
+    monkeypatch.setenv("DEPLOYMENT_LAMBDA_ROLE_ARN", DEPLOYMENT_ROLE_ARN)
 
 
 def test_region_registration_persists_its_validated_bucket_and_account(monkeypatch):
@@ -48,6 +52,7 @@ def test_region_registration_persists_its_validated_bucket_and_account(monkeypat
         "eu-west-1",
         account_id="123456789012",
         artifact_bucket="agentcore-flows-artifacts-123456789012-eu-west-1",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
     )
 
     assert dt.get_region_target("eu-west-1") == {
@@ -56,6 +61,7 @@ def test_region_registration_persists_its_validated_bucket_and_account(monkeypat
         "region": "eu-west-1",
         "account_id": "123456789012",
         "artifact_bucket": "agentcore-flows-artifacts-123456789012-eu-west-1",
+        "evaluation_kms_key_arn": EVALUATION_KEY_ARN,
     }
     assert dt.list_regions() == ["eu-west-1"]
     assert dt.list_region_targets() == [dt.get_region_target("eu-west-1")]
@@ -78,15 +84,19 @@ def test_live_region_resolution_revalidates_account_bucket_and_region(monkeypatc
             "region": "eu-west-1",
             "account_id": "123456789012",
             "artifact_bucket": "agentcore-flows-artifacts-123456789012-eu-west-1",
+            "evaluation_kms_key_arn": EVALUATION_KEY_ARN,
         },
     )
     monkeypatch.setattr(dt, "session_for_target", session_for_target)
     monkeypatch.setattr(dt, "validate_artifact_bucket", validate_bucket)
+    validate_key = MagicMock(return_value=EVALUATION_KEY_ARN)
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", validate_key)
 
     assert dt.resolve_registered_region_target("eu-west-1") == {
         "account_id": "123456789012",
         "region": "eu-west-1",
         "artifact_bucket": "agentcore-flows-artifacts-123456789012-eu-west-1",
+        "evaluation_kms_key_arn": EVALUATION_KEY_ARN,
     }
     session_for_target.assert_called_once_with(
         account_id=None,
@@ -99,6 +109,13 @@ def test_live_region_resolution_revalidates_account_bucket_and_region(monkeypatc
         region="eu-west-1",
         artifact_bucket="agentcore-flows-artifacts-123456789012-eu-west-1",
         same_account=True,
+    )
+    validate_key.assert_called_once_with(
+        session,
+        account_id="123456789012",
+        region="eu-west-1",
+        key_arn=EVALUATION_KEY_ARN,
+        deployment_role_arn=DEPLOYMENT_ROLE_ARN,
     )
 
 
@@ -114,6 +131,7 @@ def test_live_region_resolution_rejects_a_changed_platform_account(monkeypatch):
             "region": "eu-west-1",
             "account_id": "123456789012",
             "artifact_bucket": "agentcore-flows-artifacts-123456789012-eu-west-1",
+            "evaluation_kms_key_arn": EVALUATION_KEY_ARN,
         },
     )
     monkeypatch.setattr(dt, "session_for_target", lambda **_kwargs: session)
@@ -143,6 +161,8 @@ def test_admin_region_onboarding_validates_before_persisting(monkeypatch):
     monkeypatch.setattr(dt, "targets_enabled", lambda: True)
     monkeypatch.setattr(dt, "session_for_target", lambda **_kwargs: session)
     monkeypatch.setattr(dt, "validate_artifact_bucket", validate_bucket)
+    validate_key = MagicMock(return_value=EVALUATION_KEY_ARN)
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", validate_key)
     monkeypatch.setattr(dt, "add_region", add_region)
     monkeypatch.setattr(dt, "list_regions", lambda: ["eu-west-1"])
     monkeypatch.setattr(
@@ -159,6 +179,7 @@ def test_admin_region_onboarding_validates_before_persisting(monkeypatch):
 
     body = admin.RegionTargetRequest(
         region="eu-west-1",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         artifact_bucket="agentcore-flows-artifacts-123456789012-eu-west-1",
     )
     result = asyncio.run(admin.add_region_target(body, _caller_sub="admin"))
@@ -174,9 +195,18 @@ def test_admin_region_onboarding_validates_before_persisting(monkeypatch):
         "eu-west-1",
         account_id="123456789012",
         artifact_bucket="agentcore-flows-artifacts-123456789012-eu-west-1",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
     )
     assert result["validated"] is True
     assert result["artifact_bucket"] == "agentcore-flows-artifacts-123456789012-eu-west-1"
+    assert result["evaluation_kms_key_arn"] == EVALUATION_KEY_ARN
+    validate_key.assert_called_once_with(
+        session,
+        account_id="123456789012",
+        region="eu-west-1",
+        key_arn=EVALUATION_KEY_ARN,
+        deployment_role_arn=DEPLOYMENT_ROLE_ARN,
+    )
 
 
 def test_admin_region_onboarding_fails_closed_before_persisting(monkeypatch):
@@ -194,6 +224,7 @@ def test_admin_region_onboarding_fails_closed_before_persisting(monkeypatch):
 
     body = admin.RegionTargetRequest(
         region="eu-west-1",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         artifact_bucket="agentcore-flows-artifacts-123456789012-eu-west-1",
     )
     with pytest.raises(admin.HTTPException, match="bucket is not regional"):
@@ -260,7 +291,11 @@ def test_admin_region_onboarding_refuses_a_bucket_outside_the_namespace(monkeypa
     monkeypatch.setattr(dt, "validate_artifact_bucket", validate_bucket)
     monkeypatch.setattr(dt, "add_region", add_region)
 
-    body = admin.RegionTargetRequest(region="eu-west-1", artifact_bucket=bucket)
+    body = admin.RegionTargetRequest(
+        region="eu-west-1",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
+        artifact_bucket=bucket,
+    )
     with pytest.raises(admin.HTTPException) as exc:
         asyncio.run(admin.add_region_target(body, _caller_sub="admin"))
 
@@ -316,11 +351,17 @@ def test_a_cross_account_target_keeps_its_custom_bucket(monkeypatch):
             "region": "eu-west-1",
             "role_arn": "arn:aws:iam::222222222222:role/AgentCoreFlowsDeploymentRole",
             "artifact_bucket": "customer-owned-bucket",
+            "evaluation_kms_key_arn": "arn:aws:kms:eu-west-1:222222222222:key/12345678-1234-1234-1234-1234567890ab",
         },
     )
     monkeypatch.setattr(dt, "session_for_target", lambda **_kwargs: MagicMock())
     monkeypatch.setattr(dt, "validate_execution_roles", lambda *_a, **_k: ("r", "m", "h"))
     monkeypatch.setattr(dt, "validate_artifact_bucket", validate_bucket)
+    monkeypatch.setattr(
+        dt,
+        "validate_evaluation_kms_key",
+        lambda *_a, **_k: "arn:aws:kms:eu-west-1:222222222222:key/12345678-1234-1234-1234-1234567890ab",
+    )
 
     assert dt.resolve_registered_account_target("222222222222")["artifact_bucket"] == "customer-owned-bucket"
     assert validate_bucket.call_args.kwargs.get("same_account", False) is False

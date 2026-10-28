@@ -23,6 +23,8 @@ cnt_sfiNQzRGEcegFL (timeboxed data purged by lifecycle).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import re
 import urllib.parse
@@ -109,6 +111,19 @@ def test_an_export_is_keyed_by_the_owner_hash_with_the_fixed_tags(s3, route, pre
         "OwnerSubHash": owner_sub_hash(SUB),
         "ArtifactType": artifact_type,
     }
+    digest = hashlib.sha256(put["Body"]).hexdigest()
+    with zipfile.ZipFile(io.BytesIO(put["Body"])) as artifact:
+        manifest_name = next(name for name in artifact.namelist() if name.endswith("/artifact-manifest.json"))
+        manifest_digest = hashlib.sha256(artifact.read(manifest_name)).hexdigest()
+    assert put["Metadata"] == {
+        "archive-sha256": digest,
+        "archive-bytes": str(len(put["Body"])),
+        "artifact-manifest-sha256": manifest_digest,
+    }
+    assert put["ChecksumSHA256"] == base64.b64encode(bytes.fromhex(digest)).decode("ascii")
+    assert response.json()["archive_sha256"] == digest
+    assert response.json()["archive_bytes"] == len(put["Body"])
+    assert response.json()["artifact_manifest_sha256"] == manifest_digest
     # the pre-signed URL names the download itself: a browser saves a cross-origin download under the object's name and
     # ignores the anchor's `download` attribute, so the reported `filename` and the URL's disposition must agree
     reported = response.json()["filename"]
@@ -277,7 +292,10 @@ def test_with_no_bucket_the_bundle_is_returned_inline_and_no_identity_is_needed(
     response = _client(sub=None).post("/api/export-python", json=_body())
 
     assert response.status_code == 200, response.text[:400]
-    assert "zip_base64" in response.json()
+    payload = response.json()
+    archive = base64.b64decode(payload["zip_base64"], validate=True)
+    assert payload["archive_sha256"] == hashlib.sha256(archive).hexdigest()
+    assert payload["archive_bytes"] == len(archive)
 
 
 @pytest.mark.parametrize(("route", "_prefix", "_type"), ROUTES)

@@ -777,6 +777,99 @@ def _keep_claims_for(name_hold, durable: list, standing: set | None) -> None:
     name_hold.only_durable(ids, standing=still)
 
 
+def _version_claim_release_pending(record: dict, event: dict) -> bool:
+    """Whether full teardown must still atomically release version/name metadata."""
+
+    return bool(event.get("version_id") or record.get("version_id"))
+
+
+def _release_failed_deployment_metadata(record: dict, event: dict) -> tuple[bool, list[str]]:
+    """Release and re-read this failed deployment's exact version/name claim.
+
+    This runs only after automatic cleanup has proven every external resource is
+    gone. It reuses the deletion path's owner-, deployment-, version-, slot-,
+    trigger-fence-, and generation-checked transaction instead of implementing a
+    weaker second release protocol here. The result is then independently read
+    back: this deployment's version row and every slot pointer to its version must
+    both be absent before automatic cleanup may publish ``deleted``.
+
+    Any missing identity, inferred name, import failure, transaction conflict, or
+    read-back ambiguity fails closed and leaves ``delete_retained`` as the retry
+    handle.
+    """
+
+    version_id = str(event.get("version_id") or record.get("version_id") or "")
+    if not version_id:
+        return True, []
+    deployment_id = str(record.get("deployment_id") or event.get("deployment_id") or "")
+    owner_sub = str(event.get("owner_sub") or record.get("user_id") or "")
+    if not deployment_id or not owner_sub:
+        return False, ["Version/name metadata release was not attempted because its owner identity is incomplete"]
+    if any(record.get(field) for field in ("runtime_id", "harness_id", "mcp_server_runtime_id")):
+        return False, ["Version/name metadata stays locked because a runtime consumer is still recorded"]
+
+    try:
+        # Lazy import avoids loading the API application on status-Lambda cold
+        # starts that do not enter failure cleanup, while keeping one canonical
+        # release implementation for both cleanup paths.
+        from app import deployment_handler
+        from app.services.agent_versions_store import slot_pointer_pairs
+
+        friendly, proven = deployment_handler._resolve_friendly_runtime_name(record)
+        if not friendly or not proven:
+            return False, ["Version/name metadata release was not attempted because the runtime name is unproven"]
+        outcome: dict[str, bool] = {}
+        messages = deployment_handler._release_runtime_name_claim(
+            record,
+            owner_sub,
+            runtime_may_still_live=False,
+            trigger_cleanup_unconfirmed=False,
+            outcome=outcome,
+        )
+        versions_store = get_versions_store()
+        rows = versions_store.list_for_runtime(friendly, consistent=True)
+        claim_exists = versions_store.name_claim_exists(friendly, consistent=True)
+        own_rows = [
+            version
+            for version in rows
+            if str(version.deployment_id or "") == deployment_id or str(version.version_id or "") == version_id
+        ]
+        slot = get_slots_store().get(friendly, consistent=True)
+        own_pointers = [
+            field
+            for field, value in (slot_pointer_pairs(slot) if slot is not None else ())
+            if value and str(value) == version_id
+        ]
+        # A surviving sentinel is correct only when another version still holds
+        # the name. Calling snapshot_for_name_release here used to recreate an
+        # already-deleted sentinel before this readback and then ignore it,
+        # allowing failed pre-Runtime deploys to report deleted with a permanent
+        # !name-claim row.
+        claim_released_or_still_needed = bool(rows) or not claim_exists
+        released = (
+            outcome.get("released") is True and not own_rows and not own_pointers and claim_released_or_still_needed
+        )
+        if released:
+            return True, [*messages, "Verified this deployment's version row and slot pointers are absent"]
+        if claim_exists and not rows:
+            return False, [
+                *messages,
+                "Version/name metadata release left an unowned name-claim sentinel behind",
+            ]
+        return False, [
+            *messages,
+            "Version/name metadata release did not verify this deployment's row and slot pointers absent",
+        ]
+    except Exception as exc:  # noqa: BLE001 - retain on every uncertain release
+        logger.warning(
+            "Failed deployment metadata release for %s did not verify (%s)",
+            deployment_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return False, [f"Version/name metadata release could not be verified ({type(exc).__name__})"]
+
+
 def _auto_cleanup_on_failure(
     store: DeploymentStateStore,
     deployment_id: str,
@@ -935,11 +1028,12 @@ def _auto_cleanup_on_failure(
                         finalizer_token=finalizer_token,
                     )
                     return
-                store.update_delete_status(
-                    deployment_id,
-                    "deleted",
-                    # Server-authored text. The marker's own reason string is logged above but
-                    # never persisted here, because this message is rendered to an operator.
+                metadata_pending = _version_claim_release_pending(record or {}, event)
+                metadata_messages: list[str] = []
+                if metadata_pending:
+                    metadata_released, metadata_messages = _release_failed_deployment_metadata(record or {}, event)
+                    metadata_pending = not metadata_released
+                empty_message = (
                     (
                         "No resources were created: the gateway step refused the deployment "
                         "before creating anything, and no earlier step recorded a resource. "
@@ -949,7 +1043,16 @@ def _auto_cleanup_on_failure(
                     else (
                         "No resources were created: the deployment was refused at the first "
                         "step, before any resource-creating step ran. Nothing to clean up."
-                    ),
+                    )
+                )
+                if metadata_messages:
+                    empty_message += " " + "; ".join(metadata_messages)
+                if metadata_pending:
+                    empty_message += " Version and runtime-name metadata still require full teardown."
+                store.update_delete_status(
+                    deployment_id,
+                    "delete_retained" if metadata_pending else "deleted",
+                    empty_message,
                     finalizer_token=finalizer_token,
                 )
                 return
@@ -1283,9 +1386,14 @@ def _auto_cleanup_on_failure(
             # Our runtime may still call it: a retention, and the claim stays with it.
             protected += handed_off
             handed_off_gateways = []
+        metadata_pending = _version_claim_release_pending(record or {}, event)
+        metadata_messages: list[str] = []
+        if metadata_pending and not failed and not protected and not handed_off:
+            metadata_released, metadata_messages = _release_failed_deployment_metadata(record or {}, event)
+            metadata_pending = not metadata_released
         if failed:
             delete_status = "delete_failed"
-        elif protected:
+        elif protected or metadata_pending:
             delete_status = "delete_retained"
         else:
             delete_status = "deleted"
@@ -1341,6 +1449,8 @@ def _auto_cleanup_on_failure(
                 (f"{unfinished} " if unfinished else "")
                 + f"Automatic cleanup handled {cleaned}/{len(seen)} resources; protected={protected}, "
                 f"failed={failed}, left for another deployment={handed_off}."
+                + ((" " + "; ".join(metadata_messages)) if metadata_messages else "")
+                + (" Version and runtime-name metadata still require full teardown." if metadata_pending else "")
                 + (
                     f" Gateway {frozen_gateway} was not deleted, so {frozen} resource(s) of its graph were left intact."
                     if frozen
@@ -2127,6 +2237,14 @@ def _auto_register_in_aws_registry(
     )
 
 
+def _stored_deployment_status(state) -> str | DeploymentStatusEnum | None:  # noqa: ANN001
+    """Read status from the store's model or compatibility mapping shape."""
+
+    if isinstance(state, Mapping):
+        return state.get("status")
+    return getattr(state, "status", None)
+
+
 def handler(event: dict, context) -> dict:
     """Lambda handler for the final status update step.
 
@@ -2148,27 +2266,31 @@ def handler(event: dict, context) -> dict:
     # last-resort FAILED write.
     store = None
     finalizer_token: str | None = None
+    entry_was_succeeded = False
 
     try:
         store = _get_deployment_store()
         # THE DEPLOY-VS-DELETE BARRIER, taken before any status write.
         #
-        # Everything below the terminal SUCCEEDED commit -- the version row, the
-        # slot pointer, the registry record, the last manifest appends -- happens
-        # after this deployment already looks finished to a reader. A teardown
-        # starting in that window snapshotted `created_resources`, this handler
-        # appended one more row, and the teardown wrote the FINAL `deleted` over a
-        # row no deleter had ever seen: a permanent leak that DELETE reported as
-        # success. `_claim_delete_status` now refuses while this lease is live.
+        # The lease still covers every finalizer write, including the version,
+        # slot, optional registry and final terminal-status publications. This
+        # prevents teardown from snapshotting a partial manifest. Terminal
+        # ``succeeded`` is now written last as an additional reader-visible
+        # barrier: a caller cannot observe success before its exact slot exists.
         #
         # Acquired FIRST, so a finalizer that has already lost the race to a
         # teardown does no work at all: the refusal arrives as
         # DeploymentLifecycleConflict and lands in the cancellation branch below.
         finalizer_token = store.acquire_finalizer_lease(deployment_id)
+        entry_state = store.get(deployment_id)
+        entry_was_succeeded = (
+            entry_state is not None and _stored_deployment_status(entry_state) == DeploymentStatusEnum.SUCCEEDED
+        )
+        entry_status = DeploymentStatusEnum.SUCCEEDED if entry_was_succeeded else DeploymentStatusEnum.IN_PROGRESS
         store.update_step(
             deployment_id,
             DeploymentStepName.STATUS_UPDATE,
-            DeploymentStatusEnum.IN_PROGRESS,
+            entry_status,
             finalizer_token=finalizer_token,
         )
 
@@ -2287,8 +2409,9 @@ def handler(event: dict, context) -> dict:
                 "version_id": version_id,
             }
 
+        prepublication_state = store.get(deployment_id)
         manifest_errors = _manifest_completion_errors(
-            store.get(deployment_id),
+            prepublication_state,
             event,
         )
         if manifest_errors:
@@ -2329,10 +2452,20 @@ def handler(event: dict, context) -> dict:
                 "version_id": event.get("version_id"),
             }
 
+        # Persist every teardown input before version/slot publication, but keep
+        # the deployment nonterminal. A caller that observes ``succeeded`` must
+        # be able to strongly read the exact published slot immediately; the
+        # live rollback gate caught the old ordering returning the previous
+        # staging pointer after the second deployment had reported success.
+        prepublication_status = (
+            DeploymentStatusEnum.SUCCEEDED
+            if prepublication_state is not None
+            and _stored_deployment_status(prepublication_state) == DeploymentStatusEnum.SUCCEEDED
+            else DeploymentStatusEnum.IN_PROGRESS
+        )
         store.update_status(
             deployment_id,
-            DeploymentStatusEnum.SUCCEEDED,
-            completed_at=now,
+            prepublication_status,
             runtime_endpoint=runtime_endpoint,
             runtime_id=runtime_id,
             runtime_arn=runtime_arn,
@@ -2365,7 +2498,7 @@ def handler(event: dict, context) -> dict:
         # because the deployment record itself is already marked succeeded.
         version_id = event.get("version_id")
         friendly_runtime_name = event.get("friendly_runtime_name")
-        deployment_slot = (event.get("deployment_slot") or "production").lower()
+        deployment_slot = (event.get("deployment_slot") or "staging").lower()
         owner_sub = event.get("owner_sub") or ""
         version_row_updated = False
         if version_id and friendly_runtime_name:
@@ -2390,6 +2523,7 @@ def handler(event: dict, context) -> dict:
                     friendly_runtime_name,
                     version_id,
                 )
+                raise
             # F-83 — the slot upsert is GATED on that write, and this is the whole point of the
             # gate: ``update_status`` now refuses when the version row is absent, which is exactly
             # what a completed teardown looks like. A late finalizer that ran anyway used to
@@ -2490,29 +2624,29 @@ def handler(event: dict, context) -> dict:
                                 deployment_id=version_row.deployment_id,
                                 runtime_id=version_row.runtime_id,
                                 runtime_arn=version_row.runtime_arn,
+                                production_gate_required=version_row.production_gate_required,
+                                promotion_authority="deployment",
                             ),
                         )
                 except SlotWriteConflict:
-                    # A LOST RACE, not an error, and explicitly NOT retried. Nothing was written.
-                    # Retrying would mean re-reading a row that another writer (a promote, a rollback,
-                    # a trigger create, or a teardown) just moved and writing over it with this
-                    # deploy's pointers -- which is the clobber the compare-and-set exists to refuse.
-                    # The deployment record is already succeeded and the version row already says so,
-                    # so the deploy's outcome is recorded; only the slot pointer did not move, and the
-                    # owner can promote explicitly. Logged without a traceback because there is no
-                    # defect here to read one for.
+                    # A lost race means this version was not published to the
+                    # requested slot. The deployment may not become visible as
+                    # succeeded with a stale pointer; the outer failure path
+                    # records the error and tears down this deployment's graph.
                     logger.warning(
                         "RuntimeSlots for %s/%s was not moved: the slot or its version changed while "
-                        "this finalizer was running. Nothing was written and this is not retried.",
+                        "this finalizer was running. Nothing was written.",
                         friendly_runtime_name,
                         version_id,
                     )
+                    raise
                 except Exception:
                     logger.exception(
                         "Failed to update RuntimeSlots for %s/%s",
                         friendly_runtime_name,
                         version_id,
                     )
+                    raise
 
         # Loom-study 0.4 — auto-register the deployed agent into the AWS Agent
         # Registry as a DRAFT record when the federation feature is enabled. Was
@@ -2543,6 +2677,16 @@ def handler(event: dict, context) -> dict:
                 "AWS Agent Registry auto-register skipped (best-effort): %s",
                 str(_reg_exc)[:200],
             )
+
+        # Terminal success is the publication barrier. Everything a caller is
+        # entitled to infer from ``succeeded``—especially the strongly read
+        # version and slot pointers—has completed before this write.
+        store.update_status(
+            deployment_id,
+            DeploymentStatusEnum.SUCCEEDED,
+            completed_at=now,
+            finalizer_token=finalizer_token,
+        )
 
         return {
             "deployment_id": deployment_id,
@@ -2603,6 +2747,13 @@ def handler(event: dict, context) -> dict:
         }
 
     except Exception as exc:
+        if entry_was_succeeded:
+            # This is an idempotent replay after terminal publication. Its
+            # serving version is already committed; a transient reconciliation
+            # error must leave that success intact and escape so Step Functions
+            # can retry, never downgrade or auto-delete it.
+            logger.exception("Successful finalizer replay failed for deployment %s", deployment_id)
+            raise
         logger.exception("Status update step failed for deployment %s", deployment_id)
         # Last-resort: try to mark as failed
         try:
@@ -2623,6 +2774,18 @@ def handler(event: dict, context) -> dict:
             )
         except Exception:
             logger.exception("Failed to write error state for deployment %s", deployment_id)
+        try:
+            _auto_cleanup_on_failure(
+                store,
+                deployment_id,
+                event,
+                finalizer_token=finalizer_token,
+            )
+        except Exception:
+            # The cleanup helper is best-effort and normally retains its own
+            # failures. Preserve the failed deployment and durable manifest if
+            # even entering that recovery path fails.
+            logger.exception("Failed to run automatic cleanup for deployment %s", deployment_id)
 
         return {
             "deployment_id": deployment_id,

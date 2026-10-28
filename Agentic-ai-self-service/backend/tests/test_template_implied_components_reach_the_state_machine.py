@@ -56,7 +56,10 @@ def test_disabling_the_memory_a_template_generates_is_refused_before_any_side_ef
     assert spy.side_effects == []
 
 
-@pytest.mark.parametrize("template_id", ["strands-gateway-agent", "mcp-server-gateway-target"])
+@pytest.mark.parametrize(
+    "template_id",
+    ["web-search-agent", "strands-gateway-agent", "mcp-server-gateway-target"],
+)
 def test_a_gateway_template_provisions_a_gateway_and_no_memory(spy, template_id):  # noqa: F811
     response = _client().post("/api/deploy", json=_body(templateId=template_id))
 
@@ -81,5 +84,5 @@ def test_the_shared_model_matches_what_both_exporters_infer():
     assert template_implied_capabilities("customer-support-blueprint") == {"gateway", "memory"}
     assert template_implied_capabilities("strands-gateway-agent") == {"gateway"}
     assert template_implied_capabilities("mcp-server-gateway-target") == {"gateway"}
-    assert template_implied_capabilities("web-search-agent") == frozenset()
+    assert template_implied_capabilities("web-search-agent") == {"gateway"}
     assert template_implied_capabilities(None) == frozenset()

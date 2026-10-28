@@ -40,13 +40,14 @@ from __future__ import annotations
 import inspect
 import json
 import sys
+from unittest.mock import MagicMock
 
 sys.path.insert(0, "src")
 
 import pytest
 from app import deployment_handler as dh
 from app.services import step_clients
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 OWNER = "b458d4f8-60e1-70fa-98bd-fb664f6e307c"
@@ -84,6 +85,12 @@ class _Table:
 
 class _Store:
     _table = _Table()
+
+
+@pytest.fixture(autouse=True)
+def invocation_budget(monkeypatch):
+    monkeypatch.setattr(dh, "reserve_invocation_budget", lambda **_kwargs: None)
+    monkeypatch.setattr(dh, "settle_invocation_budget", lambda *_args, **_kwargs: None)
 
 
 @pytest.fixture
@@ -381,3 +388,36 @@ class TestARouteThatResolvesADeploymentCanIdentifyItsCaller:
             "these routes resolve a deployment record from a caller-supplied id but cannot "
             f"identify the caller to compare an owner against: {offenders}"
         )
+
+
+def test_streaming_runtime_reserves_and_commits_on_dispatch(runtime_mode, monkeypatch):
+    _record, invoked = runtime_mode
+    reservation = object()
+    reserve = MagicMock(return_value=reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(dh, "reserve_invocation_budget", reserve)
+    monkeypatch.setattr(dh, "settle_invocation_budget", settle)
+
+    response = _post(OWNER)
+
+    assert response.status_code == 200
+    assert invoked
+    reserve.assert_called_once()
+    settle.assert_called_once_with(reservation, dispatched=True)
+
+
+def test_streaming_budget_429_never_dispatches(runtime_mode, monkeypatch):
+    _record, invoked = runtime_mode
+    monkeypatch.setattr(
+        dh,
+        "reserve_invocation_budget",
+        MagicMock(side_effect=HTTPException(status_code=429, detail="hard budget exhausted")),
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(dh, "settle_invocation_budget", settle)
+
+    response = _post(OWNER)
+
+    assert response.status_code == 429
+    assert invoked == []
+    settle.assert_not_called()

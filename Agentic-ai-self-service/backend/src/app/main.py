@@ -21,6 +21,7 @@ from app.routers.workspaces import router as workspaces_router
 # routes here, but API Gateway routes those endpoints directly to the
 # Deployment Lambda (deployment_handler.py). The router files were dead code
 # (see tasks/lessons.md Bug 31) and have been deleted.
+from app.services.audit_middleware import audit_http_request
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -93,6 +94,12 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Api-Key"],
 )
+
+
+@app.middleware("http")
+async def _audit_middleware(request, call_next):
+    return await audit_http_request(request, call_next)
+
 
 # Include routers
 app.include_router(workflows_router)

@@ -6,8 +6,11 @@ id is available, before the runtime id exists. If ``POST /api/deploy`` is
 accepted but its response is lost, the harness recovers the caller-owned row by
 the request's unique ``node_id`` before propagating the original failure.
 Teardown then waits for the deployment to settle, deletes the exact runtime,
-and requires the durable deployment record to reach
-``delete_status == "deleted"``.
+requires the durable deployment record to reach
+``delete_status == "deleted"``, and uses its operator-side Logs client to delete
+only that service-returned Runtime ID's synthetic audit groups. Two consecutive
+empty inventories prove they did not reappear. Production customer deletion
+continues to retain real audit logs for the configured retention period.
 
 These tests make real AWS calls through the deployed API. There is no mocking
 in this module.
@@ -20,10 +23,14 @@ import os
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 import requests
+
+from tests.integration.transaction_search import TransactionSearchLease
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,45 @@ def api_gateway_url() -> str:
     if not url:
         pytest.skip("API_GATEWAY_URL or CLOUDFRONT_URL is required")
     return url.rstrip("/")
+
+
+@pytest.fixture
+def integration_transaction_search(aws_region: str):
+    """Require or reversibly manage Batch Evaluation's account prerequisite."""
+
+    account_id = boto3.client("sts", region_name=aws_region).get_caller_identity()["Account"]
+    manage = os.environ.get("INTEGRATION_MANAGE_TRANSACTION_SEARCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    raw_state_path = os.environ.get("INTEGRATION_TRANSACTION_SEARCH_STATE_FILE", "").strip()
+    state_path = Path(raw_state_path).expanduser().resolve() if raw_state_path else None
+    lease = TransactionSearchLease(
+        account_id=account_id,
+        region=aws_region,
+        manage=manage,
+        state_path=state_path,
+        xray_client=boto3.client("xray", region_name=aws_region),
+        logs_client=boto3.client("logs", region_name=aws_region),
+        sts_client=boto3.client("sts", region_name=aws_region),
+    )
+    restore_stale = os.environ.get("INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if restore_stale:
+        if not manage:
+            pytest.fail(
+                "INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE requires INTEGRATION_MANAGE_TRANSACTION_SEARCH=true",
+                pytrace=False,
+            )
+        lease.restore_from_state()
+    with lease:
+        yield lease
 
 
 @pytest.fixture(scope="session")
@@ -125,15 +171,36 @@ def _deployment_status(
     api_session: requests.Session,
     deployment_id: str,
 ) -> dict[str, Any]:
-    response = api_session.get(
-        f"{_base_url(api_session)}/api/deploy/{deployment_id}",
-        timeout=30,
-    )
-    response.raise_for_status()
-    body = response.json()
-    if not isinstance(body, dict):
-        raise AssertionError(f"Deployment {deployment_id} returned a non-object status body")
-    return body
+    """Read one status with a bounded retry for transport-only failures.
+
+    CloudFront can close an otherwise healthy keep-alive connection while a
+    multi-minute deployment is being polled. A GET is safe to replay, but an
+    HTTP response (including 4xx/5xx) is authoritative and must never be hidden
+    by this retry boundary.
+    """
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            response = api_session.get(
+                f"{_base_url(api_session)}/api/deploy/{deployment_id}",
+                timeout=30,
+            )
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict):
+                raise AssertionError(f"Deployment {deployment_id} returned a non-object status body")
+            return body
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == attempts:
+                raise
+            logger.warning(
+                "Deployment %s status transport failed on attempt %d/%d; retrying idempotent GET",
+                deployment_id,
+                attempt,
+                attempts,
+            )
+            time.sleep(float(attempt))
+    raise AssertionError("unreachable")
 
 
 def _wait_for_status(
@@ -273,14 +340,16 @@ class TrackedDeployment:
     deployment_id: str
     runtime_id: str | None = None
     deleted: bool = False
+    runtime_logs_deleted: bool = False
     last_status: dict[str, Any] = field(default_factory=dict)
 
 
 class DeploymentCleanupTracker:
     """Registers deployments early and verifies every teardown outcome."""
 
-    def __init__(self, api_session: requests.Session) -> None:
+    def __init__(self, api_session: requests.Session, *, logs_client: Any | None = None) -> None:
         self._api_session = api_session
+        self._logs_client = logs_client
         self._records: dict[str, TrackedDeployment] = {}
 
     @property
@@ -368,6 +437,87 @@ class DeploymentCleanupTracker:
             raise AssertionError(f"Deployment {record.deployment_id} produced an empty runtime id")
         record.runtime_id = runtime_id
 
+    def _runtime_log_groups(self, runtime_id: str) -> list[str]:
+        if self._logs_client is None:
+            return []
+        prefix = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-"
+        names: list[str] = []
+        token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            request: dict[str, Any] = {"logGroupNamePrefix": prefix}
+            if token:
+                request["nextToken"] = token
+            page = self._logs_client.describe_log_groups(**request)
+            groups = page.get("logGroups", [])
+            if not isinstance(groups, list):
+                raise AssertionError("CloudWatch returned a non-list Runtime log group inventory")
+            names.extend(
+                name
+                for item in groups
+                if isinstance(item, dict)
+                and isinstance((name := item.get("logGroupName")), str)
+                and name.startswith(prefix)
+            )
+            candidate = page.get("nextToken")
+            if candidate in (None, ""):
+                return sorted(set(names))
+            if not isinstance(candidate, str) or candidate in seen_tokens:
+                raise AssertionError("CloudWatch Runtime log group pagination did not advance")
+            seen_tokens.add(candidate)
+            token = candidate
+
+    def _purge_runtime_logs(self, record: TrackedDeployment) -> None:
+        """Dispose of this harness's synthetic audit logs and prove they stay absent.
+
+        The product deliberately retains real customer Runtime logs for its bounded
+        retention period. Integration deployments are synthetic and promise direct-
+        service zero residue, so the operator-side harness deletes only the exact
+        service-returned Runtime prefix after the customer DELETE path has reached a
+        durable ``deleted`` tombstone.
+        """
+
+        if self._logs_client is None or record.runtime_logs_deleted:
+            return
+        runtime_id = str(record.runtime_id or "")
+        if not runtime_id:
+            return
+        if not record.deleted or record.last_status.get("delete_status") != "deleted":
+            raise AssertionError(
+                f"Refusing to purge Runtime logs before deployment {record.deployment_id} is durably deleted"
+            )
+
+        deadline = time.monotonic() + 90
+        stable_empty_reads = 0
+        removed: set[str] = set()
+        while time.monotonic() < deadline:
+            names = self._runtime_log_groups(runtime_id)
+            if not names:
+                stable_empty_reads += 1
+                if stable_empty_reads >= 2:
+                    record.runtime_logs_deleted = True
+                    logger.info(
+                        "Synthetic deployment %s Runtime log groups are absent (removed: %s)",
+                        record.deployment_id,
+                        ", ".join(sorted(removed)) or "none",
+                    )
+                    return
+                time.sleep(5)
+                continue
+            stable_empty_reads = 0
+            for name in names:
+                try:
+                    self._logs_client.delete_log_group(logGroupName=name)
+                    removed.add(name)
+                except Exception as exc:  # noqa: BLE001 - inspect one AWS code
+                    code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+                    if code != "ResourceNotFoundException":
+                        raise AssertionError(f"Could not delete synthetic Runtime log group {name} ({code})") from exc
+            time.sleep(5)
+
+        remaining = self._runtime_log_groups(runtime_id)
+        raise AssertionError(f"Synthetic Runtime log groups did not stay absent for {runtime_id}: {remaining}")
+
     def delete_and_verify(
         self,
         record: TrackedDeployment,
@@ -394,6 +544,7 @@ class DeploymentCleanupTracker:
             poll_interval=poll_interval,
         )
         record.deleted = True
+        self._purge_runtime_logs(record)
         return record.last_status
 
     def cleanup(self, record: TrackedDeployment) -> None:
@@ -408,6 +559,7 @@ class DeploymentCleanupTracker:
                     f"{stable.get('delete_status')!r}"
                 )
             record.last_status = stable
+            self._purge_runtime_logs(record)
             return
 
         status = wait_for_deployment_terminal(
@@ -429,6 +581,7 @@ class DeploymentCleanupTracker:
             record.last_status = status
         if delete_status == "deleted":
             record.deleted = True
+            self._purge_runtime_logs(record)
             return
 
         # A failed deploy may have finished its automatic cleanup before a
@@ -462,10 +615,14 @@ class DeploymentCleanupTracker:
 @pytest.fixture()
 def deployment_cleanup(
     api_session: requests.Session,
+    aws_region: str,
 ) -> Generator[DeploymentCleanupTracker, None, None]:
     """Cleanup safety net that fails the run on any unverified teardown."""
 
-    tracker = DeploymentCleanupTracker(api_session)
+    tracker = DeploymentCleanupTracker(
+        api_session,
+        logs_client=boto3.client("logs", region_name=aws_region),
+    )
     yield tracker
 
     failures: list[str] = []
@@ -483,6 +640,101 @@ def deployment_cleanup(
             "Integration teardown was not proven complete:\n" + "\n".join(f"  - {failure}" for failure in failures),
             pytrace=False,
         )
+
+
+class RuntimeBudgetTracker:
+    """Authorize unique integration Runtimes and delete every budget afterward."""
+
+    def __init__(self, api_session: requests.Session) -> None:
+        self._api_session = api_session
+        self._keys: list[str] = []
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self._keys)
+
+    def authorize(self, runtime_name: str) -> None:
+        """Create one owner-bound agent budget before the first invocation."""
+
+        if not runtime_name:
+            raise AssertionError("Cannot authorize an empty Runtime name")
+        if runtime_name in self._keys:
+            return
+        # Register before the request: a lost 200 can still have created the
+        # row, and DELETE is idempotent for this caller-owned unique key.
+        self._keys.append(runtime_name)
+        response = self._api_session.post(
+            f"{_base_url(self._api_session)}/api/cost/budgets",
+            json={
+                "scope": "agent",
+                "key": runtime_name,
+                "limit_usd": 100.0,
+                "warn_pct": 100,
+            },
+            timeout=60,
+        )
+        assert response.status_code == 200, (
+            f"Creating integration budget for {runtime_name} returned {response.status_code}: {response.text}"
+        )
+        body = response.json()
+        assert body.get("scope") == "agent"
+        assert body.get("key") == runtime_name
+        assert float(body.get("limit_usd") or 0) == 100.0
+
+    def release(self, runtime_name: str) -> None:
+        """Delete one tracked budget and prove it is absent from inventory."""
+
+        if runtime_name not in self._keys:
+            return
+        response = self._api_session.delete(
+            f"{_base_url(self._api_session)}/api/cost/budgets/agent/{runtime_name}",
+            timeout=60,
+        )
+        assert response.status_code == 200, (
+            f"Deleting integration budget for {runtime_name} returned {response.status_code}: {response.text}"
+        )
+        assert response.json().get("deleted") == {
+            "scope": "agent",
+            "key": runtime_name,
+        }
+        listed = self._api_session.get(
+            f"{_base_url(self._api_session)}/api/cost/budgets",
+            timeout=60,
+        )
+        listed.raise_for_status()
+        body = listed.json()
+        assert isinstance(body, list)
+        assert not any(
+            isinstance(item, dict) and item.get("scope") == "agent" and item.get("key") == runtime_name for item in body
+        ), f"Temporary integration budget agent/{runtime_name} is still visible"
+        self._keys.remove(runtime_name)
+
+    def cleanup(self) -> None:
+        failures: list[str] = []
+        for runtime_name in reversed(self._keys.copy()):
+            try:
+                self.release(runtime_name)
+            except Exception as exc:  # noqa: BLE001 - report every retained budget
+                failures.append(f"{runtime_name}: {type(exc).__name__}: {exc}")
+        if failures:
+            raise AssertionError(
+                "Integration budget cleanup was not proven complete:\n"
+                + "\n".join(f"  - {failure}" for failure in failures)
+            )
+
+
+@pytest.fixture()
+def runtime_budget(
+    api_session: requests.Session,
+) -> Generator[RuntimeBudgetTracker, None, None]:
+    """Owner-bound invocation capacity with a verified teardown safety net."""
+
+    tracker = RuntimeBudgetTracker(api_session)
+    yield tracker
+    try:
+        tracker.cleanup()
+    except Exception as exc:  # noqa: BLE001 - convert cleanup failure to test failure
+        pytest.fail(str(exc), pytrace=False)
 
 
 @pytest.fixture()

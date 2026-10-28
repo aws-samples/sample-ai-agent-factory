@@ -85,7 +85,7 @@ export const sitePaths: SitePath[] = [
     source: {
       file: SELF_SERVICE_README,
       heading: 'Key Features',
-      quote: 'Selected tools deploy as a single Lambda behind an MCP Gateway with Cognito OAuth2',
+      quote: 'Managed search deploys as a pinned AWS connector target',
     },
     timeToFirstResult: facts['self-service'].firstDeploy,
     projects: ['self-service'],

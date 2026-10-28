@@ -6,22 +6,68 @@ Covers the governance data stores added in the enterprise/governance layer.
 
 ## Audit trail (`services/audit_store.py`, table `*-audit`)
 
-- **What's stored:** one row per auditable control-plane WRITE action —
-  `actor_sub`, `action` (fixed vocabulary), `method`, `path`, `status_code`,
-  timestamp. No request bodies, no secrets.
-- **PII assessment:** `actor_sub` is the Cognito **`sub`** — an opaque,
-  non-reversible user identifier, not name/email/PII. It is the same identifier
-  already used for tenant isolation (`owner_sub`) throughout the platform.
-- **Retention:** 90-day TTL (`ttl` attribute, `time_to_live_attribute="ttl"` on
-  the table) — rows auto-expire. Tune in `audit_store._TTL_SECONDS`.
-- **Access:** `GET /api/admin/audit` requires the `admin` scope (super-admins
-  only). No end-user access.
+- **What's stored:** correlated `attempt` and `outcome` rows for every classified
+  control-plane write across both API Lambdas: `actor_sub`, fixed `action`,
+  `method`, `path`, `status_code`, timestamp, session/correlation IDs, and a
+  canonical SHA-256 integrity digest. Request bodies, tokens, and secrets are
+  never stored.
+- **Write contract:** each row is a conditional create; duplicate keys cannot
+  overwrite evidence. Both Lambda roles can `PutItem` but are explicitly denied
+  `UpdateItem`, `DeleteItem`, and `BatchWriteItem`. Production writes must append
+  the attempt before route execution or the route returns 503 without running.
+  Public webhooks append only after HMAC/replay validation and before enqueue.
+  A missing correlated outcome remains visible as an incomplete attempt.
+- **Integrity:** reads recompute every stored digest and production returns 503
+  on mismatch instead of fabricating an empty trail. Pre-upgrade rows without
+  digests remain visible but are explicitly counted as unverified until their
+  legacy TTL expires. This is append-only and
+  tamper-evident inside the platform IAM boundary; it is **not** an S3 Object
+  Lock/WORM compliance claim against account administrators.
+- **PII assessment:** `actor_sub` is a Cognito `sub`: opaque and pseudonymous,
+  but still a persistent user identifier and therefore personal data in many
+  privacy regimes. Treat it accordingly.
+- **Retention:** production events omit the `ttl` attribute and the table is
+  retained/deletion-protected. DynamoDB TTL processing stays enabled so legacy
+  and development rows carrying `ttl` still expire after 90 days.
+- **Access:** `GET /api/admin/audit` requires the `admin` scope. Storage or
+  integrity failures are surfaced, not rendered as an empty audit history.
 
 ## Cost / usage (`services/cost_tracking.py`, table `*-usage-events`)
 
-- Token counts + priced cost per invocation; `owner_sub` for attribution.
-- 90-day TTL. Read via `GET /api/runtimes/{name}/cost` (owner-scoped, 404 cross
-  tenant). Budgets (`*-budget` table) hold only limit config, no usage data.
+- Usage events store token counts, priced cost per invocation, and pseudonymous
+  `owner_sub` attribution; prompts, model responses, and credentials are excluded.
+- Usage-event rows expire after 90 days. Read via
+  `GET /api/runtimes/{name}/cost` (owner-scoped, 404 cross tenant).
+- The `*-budget` table stores persistent owner/agent/tag limit definitions,
+  current-month aggregate authorization counters, and correlated invocation
+  reservation rows. It stores no prompt, response, token, or downstream credential.
+- Settled reservation rows expire after 90 days. Monthly counters expire after
+  400 days so one full prior-year comparison remains available; definitions do
+  not expire and remain until an authorized delete. A one-hour stale reservation
+  is committed conservatively before receiving its 90-day TTL.
+
+## Trigger idempotency (`*-triggers`)
+
+- Trigger definitions persist until authorized deletion and contain owner,
+  deployment/version target, schedule/pattern, and secret ARN metadata—but never
+  the webhook HMAC value.
+- Authenticated webhook ingress stores the caller-supplied delivery ID, trigger
+  coordinates, request-body SHA-256, `CLAIMING` lease metadata, and terminal
+  `QUEUED` state. Worker
+  delivery rows store the same coordinates plus processing/completion state.
+  Neither marker stores request bodies, signatures, prompts, or agent responses.
+- Both queued ingress and completed worker markers expire after seven days.
+  Trigger deletion purges their shared delivery partition immediately; a live
+  claim prevents deletion until its bounded lease expires.
+
+## JIT permission requests (`*-permission-requests`)
+
+- Stores requester/approver pseudonymous subjects, target role, requested actions
+  and resource ARNs, justification/reason, lifecycle status, timestamps, and an
+  internal short-lived approval lease token/expiry while `APPLYING`.
+- Lease tokens are never returned by the API. The table has no TTL because the
+  request and decision form the persistent escalation history; define an
+  organization retention policy before long-term adoption.
 
 ## Tag policies / profiles (`*-tag-policy`)
 
@@ -29,10 +75,13 @@ Covers the governance data stores added in the enterprise/governance layer.
 
 ## Deletion / right-to-erasure
 
-- A user's rows are keyed by `owner_sub` / `actor_sub`. To erase a user, delete
-  their rows by that key across `*-usage-events` (GSI `owner_sub-*`), `*-audit`
-  (scan by `actor_sub`), and their owned workflows/registry/prompt entries. All
-  are TTL-bounded regardless.
+- User-owned operational rows are keyed by `owner_sub` and can be removed through
+  their resource lifecycle.
+- New production audit events intentionally have no TTL and are append-only to the
+  platform roles. Privacy/legal owners must define a retention and erasure basis
+  for pseudonymous `actor_sub` before adoption; changing retained audit evidence
+  requires a separately authorized administrative process outside this sample.
+- Development audit and usage-event rows remain TTL-bounded.
 
 ## Encryption
 

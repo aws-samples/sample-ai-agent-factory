@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 
 import pytest
 from app.models.deployment_models import (
+    DERIVED_PUBLIC_STATE_FIELDS,
     INTERNAL_ONLY_STATE_FIELDS,
     DeploymentState,
     DeploymentStatusEnum,
@@ -72,6 +73,9 @@ PUBLIC_STATE_FIELDS = frozenset(
         "completed_at",
         "runtime_endpoint",
         "runtime_id",
+        # Derived from the internal friendly name (falling back to AgentCore name/id)
+        # by the shared response serializer; never persisted as a second authority.
+        "runtime_name",
         # Server-authored protocol determines which safe invocation surface the
         # caller must use (HTTP chat, MCP tools, or A2A).
         "runtime_protocol",
@@ -184,7 +188,8 @@ class TestTheServedFieldSetIsPinned:
         not said which side this belongs on".
         """
         declared = set(DeploymentState.model_fields)
-        classified = PUBLIC_STATE_FIELDS | INTERNAL_ONLY_STATE_FIELDS
+        persisted_public = PUBLIC_STATE_FIELDS - DERIVED_PUBLIC_STATE_FIELDS
+        classified = persisted_public | INTERNAL_ONLY_STATE_FIELDS
         unclassified = declared - classified
         assert not unclassified, (
             "new DeploymentState field(s) are being served by default: "
@@ -193,11 +198,15 @@ class TestTheServedFieldSetIsPinned:
         )
         stale = classified - declared
         assert not stale, f"classified but no longer on the model: {sorted(stale)}"
+        assert DERIVED_PUBLIC_STATE_FIELDS == {"runtime_name"}
+        assert not (DERIVED_PUBLIC_STATE_FIELDS & declared)
 
     def test_the_two_sets_do_not_overlap(self):
         """Otherwise a field could be listed as public AND excluded, and the pin below would
         silently stop meaning anything."""
         assert not (PUBLIC_STATE_FIELDS & INTERNAL_ONLY_STATE_FIELDS)
+        assert DERIVED_PUBLIC_STATE_FIELDS <= PUBLIC_STATE_FIELDS
+        assert not (DERIVED_PUBLIC_STATE_FIELDS & INTERNAL_ONLY_STATE_FIELDS)
 
     def test_the_internal_list_is_not_empty(self):
         """Vacuity guard. Every assertion here still passes if ``INTERNAL_ONLY_STATE_FIELDS``
@@ -214,6 +223,12 @@ class TestTheRealRoutesServeOnlyThatSet:
         _, _, many = served
         assert len(many) == 1
         assert set(many[0]) == set(PUBLIC_STATE_FIELDS)
+
+    def test_runtime_name_is_identical_on_status_and_list(self, served):
+        state, one, many = served
+        expected = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
+        assert one["runtime_name"] == expected
+        assert many[0]["runtime_name"] == expected
 
     @pytest.mark.parametrize("route", ["one", "many"])
     def test_no_platform_account_id_anywhere_in_the_body(self, served, route):
