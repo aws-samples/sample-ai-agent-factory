@@ -132,6 +132,7 @@ def _register_live_families() -> None:
     import downloadable_python
     import jit_controls
     import kms_controls
+    import obo_controls
     import regional_core
     import rollback
     import triggers
@@ -185,6 +186,9 @@ def _register_live_families() -> None:
     SCENARIOS["target-cmk-encrypts-batch-evaluation"] = kms_controls.target_cmk_encrypts_batch_evaluation
     SCENARIOS["wrong-account-key-denied"] = kms_controls.wrong_account_key_denied
     SCENARIOS["wrong-region-key-denied"] = kms_controls.wrong_region_key_denied
+    SCENARIOS["workforce-token-exchange-whoami"] = obo_controls.workforce_token_exchange_whoami
+    SCENARIOS["substituted-subject-denied"] = obo_controls.substituted_subject_denied
+    SCENARIOS["direct-runtime-bypass-denied"] = obo_controls.direct_runtime_bypass_denied
     SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
         download_integrity.cfn_download_digest_verified
     )
