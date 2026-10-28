@@ -700,61 +700,92 @@ def list_tools(
 
 
 def direct_allowed(
-    gateway_url: str, token: str, qualified_name: str, arguments: dict[str, Any], expected_kind: str
+    gateway_url: str,
+    token: str,
+    qualified_name: str,
+    arguments: dict[str, Any],
+    expected_kind: str,
+    *,
+    attempts: int = 6,
+    delay: int = 12,
 ) -> dict[str, Any]:
-    """tools/call an allowed tool; assert HTTP 200 + its exact fixture result (kind + marker)."""
-    response = _mcp_post(
-        gateway_url,
-        token,
-        {
-            "jsonrpc": "2.0",
-            "id": f"gg-{arguments['marker']}",
-            "method": "tools/call",
-            "params": {"name": qualified_name, "arguments": arguments},
-        },
-    )
-    if response.status_code != 200:
-        raise ScenarioFailed(f"authorized gateway tool returned {response.status_code}: {response.text[:300]}")
-    objects = [item for value in _mcp_objects(response) for item in _walk_json(value)]
-    matches = [o for o in objects if o.get("kind") == expected_kind and o.get("marker") == arguments["marker"]]
-    if len(matches) != 1:
-        kinds = [o.get("kind") for o in objects if o.get("kind") is not None]
-        marker_seen = any(o.get("marker") == arguments["marker"] for o in objects)
-        raise ScenarioFailed(
-            f"authorized gateway tool did not return its exact fixture result: expected_kind={expected_kind!r} "
-            f"matches={len(matches)} objects={len(objects)} kinds={kinds[:8]} marker_seen={marker_seen} "
-            f"snippet={response.text[:400]!r}"
+    """tools/call an allowed tool; assert HTTP 200 + its exact fixture result (kind + marker).
+
+    The gateway can answer the first post-deploy tool call with a transient ``isError`` ("retry
+    later") while the api_key credential path warms, so poll a bounded number of times."""
+    last = ""
+    for attempt in range(1, attempts + 1):
+        response = _mcp_post(
+            gateway_url,
+            token,
+            {
+                "jsonrpc": "2.0",
+                "id": f"gg-{arguments['marker']}",
+                "method": "tools/call",
+                "params": {"name": qualified_name, "arguments": arguments},
+            },
         )
-    return {"httpStatus": 200, "jsonRpcError": False, "responseKind": expected_kind, "marker": arguments["marker"]}
-
-
-def direct_denied(gateway_url: str, token: str, qualified_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """tools/call a Cedar-denied tool; assert HTTP 200 + the exact JSON-RPC default-deny error."""
-    response = _mcp_post(
-        gateway_url,
-        token,
-        {
-            "jsonrpc": "2.0",
-            "id": f"gg-{arguments['marker']}",
-            "method": "tools/call",
-            "params": {"name": qualified_name, "arguments": arguments},
-        },
+        if response.status_code != 200:
+            raise ScenarioFailed(f"authorized gateway tool returned {response.status_code}: {response.text[:300]}")
+        objects = [item for value in _mcp_objects(response) for item in _walk_json(value)]
+        matches = [o for o in objects if o.get("kind") == expected_kind and o.get("marker") == arguments["marker"]]
+        if len(matches) == 1:
+            return {
+                "httpStatus": 200,
+                "jsonRpcError": False,
+                "responseKind": expected_kind,
+                "marker": arguments["marker"],
+            }
+        last = response.text[:400]
+        if attempt < attempts:
+            time.sleep(delay)
+    raise ScenarioFailed(
+        f"authorized gateway tool did not return its exact fixture result after {attempts} attempts: "
+        f"expected_kind={expected_kind!r} last_snippet={last!r}"
     )
-    if response.status_code != 200:
-        raise ScenarioFailed(f"cedar-denied gateway tool returned HTTP {response.status_code}")
+
+
+def direct_denied(
+    gateway_url: str, token: str, qualified_name: str, arguments: dict[str, Any], *, attempts: int = 6, delay: int = 12
+) -> dict[str, Any]:
+    """tools/call a Cedar-denied tool; assert HTTP 200 + the exact JSON-RPC default-deny error.
+
+    Tolerates the same transient post-deploy ``isError`` by polling until the exact denial appears."""
     exact_message = (
         "Tool Execution Denied: Tool call not allowed due to policy enforcement "
         "[No policy applies to the request (denied by default).]"
     )
-    errors = [
-        o["error"] for value in _mcp_objects(response) for o in _walk_json(value) if isinstance(o.get("error"), dict)
-    ]
-    exact = [
-        e for e in errors if isinstance(e.get("code"), int) and e["code"] < 0 and e.get("message") == exact_message
-    ]
-    if len(exact) != 1:
-        raise ScenarioFailed("cedar denial lacks the exact JSON-RPC default-deny message")
-    return {"httpStatus": 200, "jsonRpcError": True, "message": exact_message}
+    last = ""
+    for attempt in range(1, attempts + 1):
+        response = _mcp_post(
+            gateway_url,
+            token,
+            {
+                "jsonrpc": "2.0",
+                "id": f"gg-{arguments['marker']}",
+                "method": "tools/call",
+                "params": {"name": qualified_name, "arguments": arguments},
+            },
+        )
+        if response.status_code != 200:
+            raise ScenarioFailed(f"cedar-denied gateway tool returned HTTP {response.status_code}")
+        errors = [
+            o["error"]
+            for value in _mcp_objects(response)
+            for o in _walk_json(value)
+            if isinstance(o.get("error"), dict)
+        ]
+        exact = [
+            e for e in errors if isinstance(e.get("code"), int) and e["code"] < 0 and e.get("message") == exact_message
+        ]
+        if len(exact) == 1:
+            return {"httpStatus": 200, "jsonRpcError": True, "message": exact_message}
+        last = response.text[:400]
+        if attempt < attempts:
+            time.sleep(delay)
+    raise ScenarioFailed(
+        f"cedar denial lacks the exact JSON-RPC default-deny message after {attempts} attempts: last_snippet={last!r}"
+    )
 
 
 def runtime_role_denial(boto_session: Any, role_arn: str, gateway_arn: str) -> dict[str, Any]:
