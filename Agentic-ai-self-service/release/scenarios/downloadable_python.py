@@ -113,10 +113,13 @@ def _validate_metadata(record: dict, region: str) -> dict:
     if has_url == has_b64:
         raise ScenarioFailed("export response must carry exactly one of download_url / zip_base64")
     source_key = "download_url" if has_url else "zip_base64"
-    if keys != {"archive_sha256", "archive_bytes", "filename", source_key}:
+    # Exactly the key set the shipped UI parser accepts (pinned by
+    # backend/tests/test_export_download_contract_matches_ui.py).
+    if keys != {"archive_sha256", "archive_bytes", "artifact_manifest_sha256", "filename", source_key}:
         raise ScenarioFailed(f"export response has unexpected keys: {sorted(keys)}")
-    if not isinstance(record["archive_sha256"], str) or not SHA256_HEX.fullmatch(record["archive_sha256"]):
-        raise ScenarioFailed("archive_sha256 is not a lowercase SHA-256 hex digest")
+    for digest_key in ("archive_sha256", "artifact_manifest_sha256"):
+        if not isinstance(record[digest_key], str) or not SHA256_HEX.fullmatch(record[digest_key]):
+            raise ScenarioFailed(f"{digest_key} is not a lowercase SHA-256 hex digest")
     size = record["archive_bytes"]
     if not isinstance(size, int) or isinstance(size, bool) or not 1 <= size <= MAX_ARCHIVE_BYTES:
         raise ScenarioFailed("archive_bytes is not a bounded positive integer")
@@ -252,6 +255,8 @@ def ui_authenticated_python_download_clean_recipient(args: argparse.Namespace, a
                 raise ScenarioFailed("archive lacks a unique root verify-artifact.py / artifact-manifest.json")
             (recipient_root / "verify-artifact.py").write_bytes(zipped.read(verifier))
             manifest_sha256 = hashlib.sha256(zipped.read(manifests[0])).hexdigest()
+            if manifest_sha256 != record["artifact_manifest_sha256"]:
+                raise ScenarioFailed("the archive's artifact-manifest.json does not match artifact_manifest_sha256")
         env = _recipient_env(binding.region)
         extracted = recipient_root / "verified-python"
         _run(

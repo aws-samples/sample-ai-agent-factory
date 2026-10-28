@@ -46,6 +46,7 @@ type ExportReply = { ok: boolean; status: number; body: unknown };
 const VALID_EXPORT_RESPONSE = {
   archive_sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',  // pragma: allowlist secret
   archive_bytes: 4,
+  artifact_manifest_sha256: 'c0535e4be2b79ffd93291305436bf889314e4a3faec05ecffcbb7df31ad9e51a',  // pragma: allowlist secret
   filename: 'artifact.zip',
   zip_base64: 'dGVzdA==',
 };

@@ -5,9 +5,13 @@ import { ARTIFACT_INTEGRITY_ERROR, downloadArtifact } from './downloadArtifact';
 
 const ARCHIVE = new TextEncoder().encode('test');
 const ARCHIVE_SHA256 = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';  // pragma: allowlist secret
+// The manifest digest is what the API ships beside the archive digest; the UI carries it to
+// the recipient, whose shipped verifier re-derives it from the extracted manifest.
+const MANIFEST_SHA256 = 'c0535e4be2b79ffd93291305436bf889314e4a3faec05ecffcbb7df31ad9e51a';  // pragma: allowlist secret
 const INLINE_RESPONSE = {
   archive_sha256: ARCHIVE_SHA256,
   archive_bytes: ARCHIVE.byteLength,
+  artifact_manifest_sha256: MANIFEST_SHA256,
   filename: 'agent-python.zip',
   zip_base64: 'dGVzdA==',
 };
@@ -20,6 +24,7 @@ const PRESIGNED_URL =
 const URL_RESPONSE = {
   archive_sha256: ARCHIVE_SHA256,
   archive_bytes: ARCHIVE.byteLength,
+  artifact_manifest_sha256: MANIFEST_SHA256,
   filename: 'agent-cfn.zip',
   download_url: PRESIGNED_URL,
 };
@@ -128,10 +133,18 @@ describe('downloadArtifact', () => {
     ['empty filename', { ...INLINE_RESPONSE, filename: '' }],
     ['unsafe filename', { ...INLINE_RESPONSE, filename: '../agent.zip' }],
     ['unexpected response field', { ...INLINE_RESPONSE, debug: true }],
+    ['missing manifest digest', {
+      archive_sha256: ARCHIVE_SHA256,
+      archive_bytes: ARCHIVE.byteLength,
+      filename: 'agent-python.zip',
+      zip_base64: 'dGVzdA==',
+    }],
+    ['malformed manifest digest', { ...INLINE_RESPONSE, artifact_manifest_sha256: MANIFEST_SHA256.toUpperCase() }],
     ['both sources', { ...INLINE_RESPONSE, download_url: PRESIGNED_URL }],
     ['neither source', {
       archive_sha256: ARCHIVE_SHA256,
       archive_bytes: ARCHIVE.byteLength,
+      artifact_manifest_sha256: MANIFEST_SHA256,
       filename: 'agent.zip',
     }],
     ['non-S3 URL', { ...URL_RESPONSE, download_url: PRESIGNED_URL.replace('.s3.us-east-1.amazonaws.com', '.example.com') }],

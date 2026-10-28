@@ -27,6 +27,7 @@ import argparse
 from pathlib import Path
 
 from _live import (
+    REQUIRED_USER_GROUPS,
     ScenarioFailed,
     bound_deployment,
     release_region_profile,
@@ -34,6 +35,10 @@ from _live import (
     with_synthetic_user,
     write_json,
 )
+
+# The lifecycle invoke tests and the trigger matrix create an owner-bound invocation budget
+# through /api/cost/budgets, which requires the cost:write scope carried by g-admins-cost.
+CORE_GROUPS = REQUIRED_USER_GROUPS | {"g-admins-cost"}
 
 LIFECYCLE = "tests/integration/test_deployment_lifecycle.py"
 GALLERY = "tests/integration/test_template_deployments.py::test_gallery_template_deploy_invoke_and_verified_cleanup"
@@ -66,7 +71,7 @@ def core_runtime_gateway_identity_policy_evaluation(args: argparse.Namespace, ar
         raise ScenarioFailed(f"{binding.region} is not a production release Region")
     plan = phases_for(str(profile["profile"]))
     records: list[dict] = []
-    with with_synthetic_user(observed, label="core") as user:
+    with with_synthetic_user(observed, label="core", groups=CORE_GROUPS) as user:
         for phase, selector, timeout in plan:
             record = run_integration_phase(
                 phase=phase,
@@ -90,6 +95,7 @@ def core_runtime_gateway_identity_policy_evaluation(args: argparse.Namespace, ar
         },
         "customer_path": observed.cloudfront_url,
         "authentication": "real Cognito USER_SRP_AUTH via the frontend's pinned Amplify",
+        "synthetic_user_groups": sorted(CORE_GROUPS),
         "deployment_binding": comparison,
         "phases": records,
         "phases_planned": [phase for phase, _, _ in plan],

@@ -11,6 +11,8 @@ export const ARTIFACT_INTEGRITY_ERROR =
 type ArtifactMetadata = {
   archiveSha256: string;
   archiveBytes: number;
+  /** SHA-256 of the archive's artifact-manifest.json, the recipient's second anchor. */
+  artifactManifestSha256: string;
   filename: string;
   source: { kind: 'base64'; value: string } | { kind: 's3'; value: URL };
 };
@@ -118,10 +120,18 @@ function parseMetadata(value: unknown): ArtifactMetadata {
   if (hasBase64 === hasUrl) invalidArtifact();
 
   const sourceKey = hasBase64 ? 'zip_base64' : 'download_url';
-  if (!hasExactKeys(record, ['archive_sha256', 'archive_bytes', 'filename', sourceKey])) {
+  // The API binds the response with BOTH anchors: the archive digest, verified here before any
+  // byte is saved, and the manifest digest, which the recipient's shipped verifier re-derives.
+  if (!hasExactKeys(record, ['archive_sha256', 'archive_bytes', 'artifact_manifest_sha256', 'filename', sourceKey])) {
     invalidArtifact();
   }
   if (typeof record.archive_sha256 !== 'string' || !SHA256_HEX_PATTERN.test(record.archive_sha256)) {
+    invalidArtifact();
+  }
+  if (
+    typeof record.artifact_manifest_sha256 !== 'string'
+    || !SHA256_HEX_PATTERN.test(record.artifact_manifest_sha256)
+  ) {
     invalidArtifact();
   }
   if (
@@ -136,6 +146,7 @@ function parseMetadata(value: unknown): ArtifactMetadata {
   return {
     archiveSha256: record.archive_sha256,
     archiveBytes: record.archive_bytes,
+    artifactManifestSha256: record.artifact_manifest_sha256,
     filename: parseFilename(record.filename),
     source: hasBase64
       ? { kind: 'base64', value: parseBase64(record.zip_base64, record.archive_bytes) }
