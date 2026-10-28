@@ -109,7 +109,8 @@ def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "UserPoolId": "eu-west-3_pool",
             "UserPoolClientId": "client",
         },
-        template_sha256=live.canonical_json_sha256(template),
+        template_sha256=live.template_binding_sha256(template),
+        raw_template_sha256=live.canonical_json_sha256(template),
         lambda_code_sha256={
             "WorkflowLambda": _code_sha256(published["1111.zip"]),
             "DeploymentLambda": _code_sha256(published["1111.zip"]),
@@ -225,3 +226,39 @@ def test_redaction_hides_secrets_and_jwts():
     out = live.redact(f"password=hunter2hunter2 token={token}", "hunter2hunter2")
     assert "hunter2hunter2" not in out and token not in out
     assert "[REDACTED]" in out and "[REDACTED_JWT]" in out
+
+
+def test_only_cdk_metadata_telemetry_is_excluded_from_the_binding_digest():
+    base = {
+        "Resources": {
+            "A": {"Type": "AWS::S3::Bucket"},
+            "CDKMetadata": {"Type": "AWS::CDK::Metadata", "Properties": {"Analytics": "v2:x"}},
+        }
+    }
+    other_runtime = {
+        "Resources": {
+            "A": {"Type": "AWS::S3::Bucket"},
+            "CDKMetadata": {"Type": "AWS::CDK::Metadata", "Properties": {"Analytics": "v2:y"}},
+        }
+    }
+    changed_infra = {
+        "Resources": {
+            "A": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "x"}},
+            "CDKMetadata": base["Resources"]["CDKMetadata"],
+        }
+    }
+    assert live.template_binding_sha256(base) == live.template_binding_sha256(other_runtime)
+    assert live.canonical_json_sha256(base) != live.canonical_json_sha256(other_runtime)
+    assert live.template_binding_sha256(base) != live.template_binding_sha256(changed_infra)
+    assert "CDKMetadata" in base["Resources"], "the input is not mutated"
+
+
+def test_directory_and_zip_content_digests_agree_regardless_of_path_component_order(tmp_path: Path):
+    """Path objects sort component-wise ("a/b" before "a-b"); zip member names sort as strings.
+    The two digests must use ONE order or a byte-identical publish fails to bind."""
+    root = tmp_path / "asset"
+    files = {"a/b.txt": b"1", "a-b.txt": b"2", "a.txt": b"3", "a/c/d.txt": b"4", "Z.txt": b"5", "_z/e.txt": b"6"}
+    for name, data in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    assert live._directory_content_sha256(root) == live._zip_content_sha256(_zip_of(files))

@@ -84,6 +84,26 @@ def canonical_json_sha256(document: Any) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def infrastructure_template(template: dict[str, Any]) -> dict[str, Any]:
+    """The template minus ``Resources.CDKMetadata``.
+
+    That resource is CDK's version-reporting telemetry: its ``Analytics`` string encodes the
+    construct inventory AND the synthesizing runtime (jsii / Python version), so two synths of
+    the same commit from different interpreters differ there and nowhere else. It creates no
+    infrastructure, so the binding digest is taken over everything but it; the raw digest is
+    still reported beside it.
+    """
+    stripped = dict(template)
+    resources = dict(template.get("Resources", {}))
+    resources.pop("CDKMetadata", None)
+    stripped["Resources"] = resources
+    return stripped
+
+
+def template_binding_sha256(template: dict[str, Any]) -> str:
+    return canonical_json_sha256(infrastructure_template(template))
+
+
 def redact(text: str, *secrets_to_hide: str) -> str:
     out = text
     for value in secrets_to_hide:
@@ -153,7 +173,8 @@ class ObservedStack:
     stack_id: str
     status: str
     outputs: dict[str, str]
-    template_sha256: str
+    template_sha256: str  # infrastructure digest: everything but the CDKMetadata telemetry resource
+    raw_template_sha256: str = ""
     lambda_code_sha256: dict[str, str] = field(default_factory=dict)  # logical id -> base64 CodeSha256
 
     @property
@@ -180,7 +201,8 @@ def observe_stack(binding: RunBinding, *, with_lambda_hashes: bool = True) -> Ob
         stack_id=stack["StackId"],
         status=status,
         outputs=outputs,
-        template_sha256=canonical_json_sha256(template),
+        template_sha256=template_binding_sha256(template),
+        raw_template_sha256=canonical_json_sha256(template),
     )
     if with_lambda_hashes:
         lam = session.client("lambda")
@@ -204,13 +226,17 @@ def assembly_dir(binding: RunBinding) -> Path:
 def _directory_content_sha256(root: Path) -> str:
     """Same digest prepare_assemblies.py seals: sorted relative path + file bytes, symlinks refused."""
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    entries: list[tuple[str, Path]] = []
+    for path in root.rglob("*"):
         if path.is_symlink():
             raise ScenarioFailed(f"symlink inside a sealed asset: {path.name}")
         if path.is_file():
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            digest.update(len(relative).to_bytes(4, "big") + relative)
-            digest.update(bytes.fromhex(sha256_file(path)))
+            entries.append((path.relative_to(root).as_posix(), path))
+    # Sorted by the relative POSIX string -- the same order the zip-member digest uses.
+    for relative_name, path in sorted(entries):
+        relative = relative_name.encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big") + relative)
+        digest.update(bytes.fromhex(sha256_file(path)))
     return digest.hexdigest()
 
 
@@ -308,7 +334,7 @@ def bind_deployment(binding: RunBinding, observed: ObservedStack) -> dict[str, A
             f"no sealed assembly for {binding.commit[:12]} in {binding.region}; run release/scenarios/prepare_assemblies.py"
         )
     template = json.loads(template_path.read_text(encoding="utf-8"))
-    expected_template_sha256 = canonical_json_sha256(template)
+    expected_template_sha256 = template_binding_sha256(template)
     if expected_template_sha256 != observed.template_sha256:
         problems.append("live template digest differs from the sealed assembly")
     lambda_count = sum(1 for r in template.get("Resources", {}).values() if r.get("Type") == "AWS::Lambda::Function")
@@ -319,6 +345,7 @@ def bind_deployment(binding: RunBinding, observed: ObservedStack) -> dict[str, A
         "candidate_project_tree": binding.project_tree,
         "source_outputs": {"commit": claimed_commit, "project_tree": claimed_tree, "dirty": claimed_dirty},
         "template_sha256": {"live": observed.template_sha256, "assembly": expected_template_sha256},
+        "raw_template_sha256": {"live": observed.raw_template_sha256, "assembly": canonical_json_sha256(template)},
         "lambda_functions_compared": lambda_count,
         "problems": problems,
     }

@@ -57,13 +57,17 @@ def _sha256(path: Path) -> str:
 def directory_content_sha256(root: Path) -> str:
     """Order-independent digest of a directory's regular files: path + bytes, symlinks refused."""
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    entries: list[tuple[str, Path]] = []
+    for path in root.rglob("*"):
         if path.is_symlink():
             raise SystemExit(f"refusing to seal a symlink inside an asset: {path}")
         if path.is_file():
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            digest.update(len(relative).to_bytes(4, "big") + relative)
-            digest.update(bytes.fromhex(_sha256(path)))
+            entries.append((path.relative_to(root).as_posix(), path))
+    # Sorted by the relative POSIX string -- the same order the live zip-member digest uses.
+    for relative_name, path in sorted(entries):
+        relative = relative_name.encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "big") + relative)
+        digest.update(bytes.fromhex(_sha256(path)))
     return digest.hexdigest()
 
 
@@ -169,7 +173,12 @@ def synth(region: str, commit: str, tree: str, *, python: Path, cdk_bin: Path) -
         "region": region,
         "commit": commit,
         "project_tree": tree,
-        "template_sha256": _canonical(template),
+        # Binding digest excludes Resources.CDKMetadata (CDK's version-reporting telemetry, which
+        # encodes the synthesizing runtime); the raw digest is kept beside it.
+        "template_sha256": _canonical(
+            {**template, "Resources": {k: v for k, v in template.get("Resources", {}).items() if k != "CDKMetadata"}}
+        ),
+        "raw_template_sha256": _canonical(template),
         "template_file_sha256": _sha256(template_path),
         "lambda_functions": lambdas,
         "cdk_cli": subprocess.run(
