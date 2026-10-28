@@ -438,6 +438,13 @@ def _gateway_url(http: Any, runtime_name: str, status: dict[str, Any]) -> tuple[
 
 
 def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedStack, artifacts: Path) -> dict[str, Any]:
+    import sys as _sys
+
+    from _live import PROJECT_ROOT as _ROOT
+
+    _backend = str(_ROOT / "backend")
+    if _backend not in _sys.path:
+        _sys.path.insert(0, _backend)
     from tests.integration.conftest import DeploymentCleanupTracker, wait_for_deployment_terminal
 
     region, account_id = binding.region, str(args.account_id)
