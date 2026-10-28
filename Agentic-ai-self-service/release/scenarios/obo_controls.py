@@ -241,7 +241,7 @@ def _create_fixture(session: Any, names: dict[str, str], region: str, account_id
     return url.rstrip("/")
 
 
-def _delete_fixture(session: Any, names: dict[str, str]) -> dict[str, bool]:
+def _delete_fixture(session: Any, names: dict[str, str], *, keep_log_group: bool = False) -> dict[str, bool]:
     from botocore.exceptions import ClientError
 
     iam, logs, ssm, lam = (session.client(s) for s in ("iam", "logs", "ssm", "lambda"))
@@ -259,11 +259,51 @@ def _delete_fixture(session: Any, names: dict[str, str]) -> dict[str, bool]:
     _try("role_policy", lambda: iam.delete_role_policy(RoleName=names["role"], PolicyName=names["role_policy"]))
     _try("role", lambda: iam.delete_role(RoleName=names["role"]))
     _try("parameter", lambda: ssm.delete_parameter(Name=names["parameter"]))
-    _try("log_group", lambda: logs.delete_log_group(logGroupName=names["log_group"]))
+    if not keep_log_group:
+        _try("log_group", lambda: logs.delete_log_group(logGroupName=names["log_group"]))
     return result
 
 
 # --------------------------------------------------------------------------- MCP + facet proofs
+
+
+def _delete_runtime_and_gateway(session: Any, runtime_id: str | None, gateway_name: str | None) -> dict[str, Any]:
+    """Directly delete the OBO runtime and its gateway by id/name — teardown must not rely on the tracker alone."""
+    from botocore.exceptions import ClientError
+
+    control = session.client("bedrock-agentcore-control")
+    result: dict[str, Any] = {}
+    if runtime_id:
+        try:
+            control.delete_agent_runtime(agentRuntimeId=runtime_id)
+            result["runtime_deleted"] = True
+        except ClientError as error:
+            result["runtime_deleted"] = error.response.get("Error", {}).get("Code") in {
+                "ResourceNotFoundException",
+                "404",
+            }
+    if gateway_name:
+        try:
+            gateways = control.list_gateways().get("items", [])
+            for gateway in gateways:
+                if str(gateway.get("name") or "") == gateway_name:
+                    control.delete_gateway(gatewayIdentifier=gateway["gatewayId"])
+                    result["gateway_deleted"] = True
+            result.setdefault("gateway_deleted", True)
+        except ClientError as error:
+            result["gateway_error"] = error.response.get("Error", {}).get("Code")
+    return result
+
+
+def _fixture_log_tail(session: Any, log_group: str) -> list[str]:
+    """The fixture's recent log messages (identifier-only JSON lines), for diagnosing a failed exchange."""
+    from botocore.exceptions import ClientError
+
+    try:
+        events = session.client("logs").filter_log_events(logGroupName=log_group, limit=40).get("events", [])
+    except ClientError:
+        return []
+    return [str(e.get("message", "")).strip()[:200] for e in events][-30:]
 
 
 def _mcp_post(gateway_url: str, token: str, payload: dict[str, Any], timeout: int = 60) -> requests.Response:
@@ -523,6 +563,8 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             if status.get("status") != "succeeded":
                 raise ScenarioFailed(f"OBO deploy ended {status.get('status')}")
             tracker.bind_runtime(record, status["runtime_id"])
+            outcome["runtime_id"] = str(status["runtime_id"])
+            outcome["gateway_name"] = names["runtime_name"]
             runtime_arn, version_id = str(status["runtime_arn"]), str(status["version_id"])
             gateway_url, obo_required = _gateway_url(http, names["runtime_name"], status)
             outcome["gateway_config"] = {
@@ -549,12 +591,19 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
                 raise ScenarioFailed("a secret leaked into the recorded outcome")
         finally:
             cleanup: dict[str, Any] = {}
+            failed = "workforce-token-exchange-whoami" not in outcome or "direct-runtime-bypass-denied" not in outcome
             try:
                 cleanup["deployments"] = tracker.cleanup()
             except Exception as error:  # noqa: BLE001
                 cleanup["deployments_error"] = redact(str(error), *secrets_to_hide)
+            cleanup["runtime_gateway"] = _delete_runtime_and_gateway(
+                session, outcome.get("runtime_id"), outcome.get("gateway_name")
+            )
             if fixture_made:
-                cleanup["fixture"] = _delete_fixture(session, names)
+                # On failure keep the fixture log group and capture its tail for diagnosis.
+                if failed:
+                    outcome["fixture_logs"] = _fixture_log_tail(session, names["log_group"])
+                cleanup["fixture"] = _delete_fixture(session, names, keep_log_group=False)
             outcome["cleanup"] = cleanup
             http.close()
     write_json(artifacts / "journey-outcome.json", outcome)
