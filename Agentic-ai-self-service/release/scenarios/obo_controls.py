@@ -605,6 +605,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
                     outcome["fixture_logs"] = _fixture_log_tail(session, names["log_group"])
                 cleanup["fixture"] = _delete_fixture(session, names, keep_log_group=False)
             outcome["cleanup"] = cleanup
+            write_json(artifacts / "journey-outcome.json", outcome)
             http.close()
     write_json(artifacts / "journey-outcome.json", outcome)
     return outcome
