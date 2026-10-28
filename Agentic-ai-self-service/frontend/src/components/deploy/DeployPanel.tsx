@@ -59,7 +59,7 @@ import { ChatInterface } from './ChatInterface';
 import { McpToolsPanel } from './McpToolsPanel';
 import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 import { runtimeConfigForRequest } from '../../utils/runtimeRequestConfig';
-import { downloadArtifact } from '../../utils/downloadArtifact';
+import { downloadArtifact, type DownloadReceipt } from '../../utils/downloadArtifact';
 
 const PYTHON_EXPORT_GOVERNANCE_MESSAGE =
   'Standalone Python export contains no AWS resources, so tags and tag profiles cannot be applied. Clear the governance settings, or use the CloudFormation export or platform deploy instead.';
@@ -298,6 +298,7 @@ export function DeployPanel({
   // writing it into deploymentStatus hid a live runtime's Chat/Delete, and from idle
   // it hid the very settings to correct and turned the CTA into "Retry Deployment".
   const [exportError, setExportError] = useState<{ kind: 'cfn' | 'python'; message: string } | null>(null);
+  const [downloadReceipts, setDownloadReceipts] = useState<{ cfn: DownloadReceipt | null; python: DownloadReceipt | null }>({ cfn: null, python: null });
   useEffect(() => {
     setExportError(null);
   }, [cfnDataRetentionPolicy, resourceTagState, resourceNamingState]);
@@ -468,7 +469,8 @@ export function DeployPanel({
         throw new Error(await responseDetail(response, `Python export failed (${response.status})`));
       }
       const result = await response.json();
-      await downloadArtifact(result);
+      const receipt = await downloadArtifact(result);
+      setDownloadReceipts((previous) => ({ ...previous, python: receipt }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Python export failed';
       setExportError({ kind: 'python', message });
@@ -527,7 +529,8 @@ export function DeployPanel({
         throw new Error(await responseDetail(response, `Template generation failed (${response.status})`));
       }
       const result = await response.json();
-      await downloadArtifact(result);
+      const receipt = await downloadArtifact(result);
+      setDownloadReceipts((previous) => ({ ...previous, cfn: receipt }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Template generation failed';
       setExportError({ kind: 'cfn', message });
@@ -1165,6 +1168,8 @@ export function DeployPanel({
                 pythonExportBlockedReason={pythonExportBlockedReason}
                 cfnExportError={exportError?.kind === 'cfn' ? exportError.message : null}
                 pythonExportError={exportError?.kind === 'python' ? exportError.message : null}
+                cfnDownloadReceipt={downloadReceipts.cfn}
+                pythonDownloadReceipt={downloadReceipts.python}
               />
             </div>
           )}

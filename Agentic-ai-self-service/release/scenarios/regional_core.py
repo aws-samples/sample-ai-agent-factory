@@ -30,6 +30,7 @@ from _live import (
     REQUIRED_USER_GROUPS,
     ScenarioFailed,
     bound_deployment,
+    family_journey,
     release_region_profile,
     run_integration_phase,
     with_synthetic_user,
@@ -71,20 +72,35 @@ def core_runtime_gateway_identity_policy_evaluation(args: argparse.Namespace, ar
         raise ScenarioFailed(f"{binding.region} is not a production release Region")
     plan = phases_for(str(profile["profile"]))
     records: list[dict] = []
-    with with_synthetic_user(observed, label="core", groups=CORE_GROUPS) as user:
-        for phase, selector, timeout in plan:
-            record = run_integration_phase(
-                phase=phase,
-                selector=selector,
-                observed=observed,
-                user=user,
-                artifact_dir=artifact_dir,
-                timeout=timeout,
-                extra_env={"INTEGRATION_TRIGGERS_TABLE_NAME": "acf-production-triggers"},
-            )
-            records.append(record)
+    # Each phase is its own journey, cached per (commit, Region, stack, template): the broker
+    # caps a credential session at 60 minutes and the full plan can exceed it, so a re-run on
+    # the SAME deployment resumes at the first phase that has not passed instead of redoing
+    # phases that did. A synthetic user is created only when a phase actually has to run.
+    for phase, selector, timeout in plan:
+
+        def run_phase(journey_artifacts: Path, phase=phase, selector=selector, timeout=timeout) -> dict:
+            with with_synthetic_user(observed, label=f"core-{phase}", groups=CORE_GROUPS) as user:
+                record = run_integration_phase(
+                    phase=phase,
+                    selector=selector,
+                    observed=observed,
+                    user=user,
+                    artifact_dir=journey_artifacts,
+                    timeout=timeout,
+                    extra_env={"INTEGRATION_TRIGGERS_TABLE_NAME": "acf-production-triggers"},
+                )
             if record.get("failed"):
-                break
+                raise ScenarioFailed(f"phase {phase} failed (exit {record['exit_status']})")
+            return record
+
+        try:
+            journey = family_journey(
+                binding, observed, family=f"core-{phase}", run=run_phase, artifact_dir=artifact_dir
+            )
+        except ScenarioFailed as exc:
+            records.append({"phase": phase, "selector": selector, "failed": True, "error": str(exc)[:500]})
+            break
+        records.append({**journey["outcome"], "executed_in_this_scenario": journey["executed_in_this_scenario"]})
     report = {
         "scenario": args.scenario_id,
         "region": binding.region,

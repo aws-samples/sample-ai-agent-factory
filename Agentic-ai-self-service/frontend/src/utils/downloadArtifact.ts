@@ -267,7 +267,15 @@ function saveBytes(bytes: Uint8Array<ArrayBuffer>, filename: string): void {
 }
 
 /** Validate, retrieve, hash, and only then offer one export archive to the browser. */
-export async function downloadArtifact(value: unknown): Promise<void> {
+/** What the recipient needs beside the saved file: the anchors the shipped scripts verify against. */
+export interface DownloadReceipt {
+  filename: string;
+  archiveSha256: string;
+  /** The value to export as EXPECTED_ARTIFACT_MANIFEST_SHA256 before running the bundle's scripts. */
+  artifactManifestSha256: string;
+}
+
+export async function downloadArtifact(value: unknown): Promise<DownloadReceipt> {
   try {
     if (!globalThis.crypto?.subtle || typeof globalThis.crypto.subtle.digest !== 'function') invalidArtifact();
     const metadata = parseMetadata(value);
@@ -276,6 +284,11 @@ export async function downloadArtifact(value: unknown): Promise<void> {
       : await fetchS3Bytes(metadata.source.value, metadata.archiveBytes);
     const verified = await verifyBytes(bytes, metadata);
     saveBytes(verified, metadata.filename);
+    return {
+      filename: metadata.filename,
+      archiveSha256: metadata.archiveSha256,
+      artifactManifestSha256: metadata.artifactManifestSha256,
+    };
   } catch {
     throw new Error(ARTIFACT_INTEGRITY_ERROR);
   }

@@ -291,11 +291,37 @@ def ui_authenticated_python_download_clean_recipient(args: argparse.Namespace, a
         )
         report["steps"].append({"step": "verifier", "artifact_root": root.name, "manifest_sha256": manifest_sha256})
 
-        # The bundle's own recipient workflow: install-locked.sh (integrity, lock, venv, pip check).
+        # The bundle's own recipient workflow. Every shipped script runs verify-integrity.py, which
+        # refuses to proceed unless EXPECTED_ARTIFACT_MANIFEST_SHA256 names the manifest digest from
+        # the authenticated response -- first prove that refusal, then supply the digest the way the
+        # generated README (and the UI's download receipt) tells the recipient to.
+        unanchored = subprocess.run(
+            ["bash", "install-locked.sh", ".venv-unanchored"],
+            cwd=root,
+            env={**env, "PYTHON_BIN": str(python313)},
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        refused = unanchored.returncode != 0 and "EXPECTED_ARTIFACT_MANIFEST_SHA256" in (
+            unanchored.stderr + unanchored.stdout
+        )
+        if not refused:
+            raise ScenarioFailed("install-locked.sh ran without the external manifest anchor; it must refuse")
+        if (root / ".venv-unanchored").exists():
+            raise ScenarioFailed("install-locked.sh created an environment before the integrity check")
+        report["steps"].append({"step": "install-refused-without-anchor", "exit": unanchored.returncode})
+        anchored_env = {
+            **env,
+            "PYTHON_BIN": str(python313),
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            "EXPECTED_ARTIFACT_MANIFEST_SHA256": record["artifact_manifest_sha256"],
+        }
         _run(
             ["bash", "install-locked.sh", ".venv"],
             cwd=root,
-            env={**env, "PYTHON_BIN": str(python313), "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
+            env=anchored_env,
             timeout=1500,
             log=log,
             label="install-locked",
