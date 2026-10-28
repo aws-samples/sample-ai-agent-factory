@@ -154,6 +154,57 @@ def _invoke(region: str, runtime_arn: str, expected_marker: str, label: str, art
     raise ScenarioFailed(f"invocation ({label}) did not prove {expected_marker!r}: {last_error}")
 
 
+def _plant_decoys(region: str, bucket: str, stack_name: str) -> dict[str, dict[str, str]]:
+    """Resources adjacent to everything teardown.sh sweeps, owned by 'someone else'.
+
+    Sibling stack prefixes in the SAME bucket (``cfn-assets/<other>/``, ``deployments/<other>/``)
+    and a sibling AgentCore runtime log group. Each decoy's expected content digest is returned
+    so preservation is proven byte for byte, not by existence alone.
+    """
+    import hashlib
+
+    session = boto3_session(region)
+    s3, logs = session.client("s3"), session.client("logs")
+    other = f"{stack_name}-decoy"
+    decoys: dict[str, dict[str, str]] = {}
+    for key in (
+        f"cfn-assets/{other}/agent-code.zip",
+        f"deployments/{other}/abc/code.zip",
+        f"cfn-assets/{stack_name}decoy/x",
+    ):
+        body = f"foreign decoy {key} {uuid.uuid4().hex}".encode()
+        s3.put_object(Bucket=bucket, Key=key, Body=body)
+        decoys[f"s3://{bucket}/{key}"] = {
+            "kind": "s3",
+            "bucket": bucket,
+            "key": key,
+            "sha256": hashlib.sha256(body).hexdigest(),
+        }
+    group = f"/aws/bedrock-agentcore/runtimes/decoy_{uuid.uuid4().hex[:12]}-DEFAULT"
+    logs.create_log_group(logGroupName=group)
+    decoys[group] = {"kind": "log_group", "name": group}
+    return decoys
+
+
+def _verify_decoys(region: str, bucket: str, decoys: dict[str, dict[str, str]]) -> dict[str, bool]:
+    import hashlib
+
+    session = boto3_session(region)
+    s3, logs = session.client("s3"), session.client("logs")
+    preserved: dict[str, bool] = {}
+    for label, decoy in decoys.items():
+        try:
+            if decoy["kind"] == "s3":
+                body = s3.get_object(Bucket=decoy["bucket"], Key=decoy["key"])["Body"].read()
+                preserved[label] = hashlib.sha256(body).hexdigest() == decoy["sha256"]
+            else:
+                groups = logs.describe_log_groups(logGroupNamePrefix=decoy["name"]).get("logGroups", [])
+                preserved[label] = any(g["logGroupName"] == decoy["name"] for g in groups)
+        except Exception:  # noqa: BLE001 -- a missing decoy is exactly the failure being measured
+            preserved[label] = False
+    return preserved
+
+
 def _inventory(region: str, stack_name: str, bucket: str, runtime_id: str | None) -> dict[str, Any]:
     session = boto3_session(region)
     cfn, s3, logs, control = (session.client(n) for n in ("cloudformation", "s3", "logs", "bedrock-agentcore-control"))
@@ -191,6 +242,7 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
     bucket: str | None = None
     stack_name: str | None = None
     runtime_id: str | None = None
+    decoy_log_group: str | None = None
     suffix = uuid.uuid4().hex[:16]
     try:
         # Two exports of the SAME stack (same node id) with different version markers.
@@ -267,6 +319,13 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
         outcome["invoke_after_rollback"] = _invoke(binding.region, runtime_arn, MARKER_ONE, "rollback", artifacts)
         outcome["rollback"] = {"restored_prior_behavior": True, "method": "redeploy exact version-1 bundle"}
 
+        # Foreign decoys: resources that LOOK adjacent to what the teardown sweeps but belong to
+        # someone else -- sibling stack prefixes in the same bucket, a sibling runtime log group.
+        # A teardown that reaches past its own stack would take these with it.
+        decoys = _plant_decoys(binding.region, bucket, stack_name)
+        outcome["decoys"] = {"planted": sorted(decoys)}
+        decoy_log_group = next(name for name, d in decoys.items() if d["kind"] == "log_group")
+
         run_logged(
             ["bash", "teardown.sh", stack_name, binding.region],
             cwd=v1["root"],
@@ -291,8 +350,18 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
         outcome["teardown_zero"] = not residue
         if residue:
             raise ScenarioFailed(f"teardown left residue: {json.dumps(second)[:600]}")
+        preserved = _verify_decoys(binding.region, bucket, decoys)
+        outcome["decoys"]["preserved"] = preserved
+        if not all(preserved.values()):
+            raise ScenarioFailed(f"teardown reached foreign resources: {preserved}")
     finally:
         cleanup: dict[str, Any] = {}
+        if decoy_log_group is not None:
+            try:
+                boto3_session(binding.region).client("logs").delete_log_group(logGroupName=decoy_log_group)
+                cleanup["decoy_log_group_removed"] = True
+            except Exception as exc:  # noqa: BLE001
+                cleanup["decoy_log_group_error"] = redact(f"{type(exc).__name__}: {exc}")
         if bucket is not None:
             try:
                 cleanup["bucket"] = _empty_and_delete_bucket(binding.region, bucket)
@@ -302,7 +371,9 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
         cleanup["recipient_removed"] = not recipient_root.exists()
         outcome["cleanup"] = cleanup
         write_json(artifacts / "journey-outcome.json", outcome)
-    if outcome["cleanup"].get("bucket_error") or not outcome["cleanup"]["recipient_removed"]:
+    if outcome["cleanup"].get("bucket_error") or outcome["cleanup"].get("decoy_log_group_error"):
+        raise ScenarioFailed(f"recipient cleanup incomplete: {outcome['cleanup']}")
+    if not outcome["cleanup"]["recipient_removed"]:
         raise ScenarioFailed(f"recipient cleanup incomplete: {outcome['cleanup']}")
     return outcome
 
@@ -330,6 +401,9 @@ def _scenario(args: argparse.Namespace, artifact_dir: Path, claim: str) -> dict:
         ) is not None
     elif claim == "teardown-zero":
         holds = outcome.get("teardown_zero") is True
+    elif claim == "decoys-preserved":
+        preserved = (outcome.get("decoys") or {}).get("preserved") or {}
+        holds = bool(preserved) and all(preserved.values()) and outcome.get("teardown_zero") is True
     else:
         raise ScenarioFailed(f"unknown claim {claim}")
     archives = outcome.get("archives") or {}
@@ -343,6 +417,7 @@ def _scenario(args: argparse.Namespace, artifact_dir: Path, claim: str) -> dict:
         "stack_name": outcome.get("stack_name"),
         "archives": archives,
         "teardown_inventory": outcome.get("teardown_inventory"),
+        "decoys": outcome.get("decoys"),
     }
     write_json(artifact_dir / "report", report)
     v1 = archives.get("v1") or {}
@@ -369,3 +444,9 @@ def downloaded_cfn_update_rollback_restores_prior_behavior(args: argparse.Namesp
 
 def downloaded_cfn_teardown_direct_service_inventories_zero(args: argparse.Namespace, artifact_dir: Path) -> dict:
     return _scenario(args, artifact_dir, "teardown-zero")
+
+
+def foreign_decoys_preserved(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    """``lifecycle.zero_residual``: the teardown that proved zero residue also left every adjacent
+    foreign resource byte-identical -- it removed exactly its own stack and nothing beside it."""
+    return _scenario(args, artifact_dir, "decoys-preserved")

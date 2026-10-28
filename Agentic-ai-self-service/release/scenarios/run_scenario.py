@@ -128,6 +128,7 @@ def _register_live_families() -> None:
     import downloadable_python
     import regional_core
     import rollback
+    import zero_residue
 
     SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
         regional_core.core_runtime_gateway_identity_policy_evaluation
@@ -144,6 +145,9 @@ def _register_live_families() -> None:
     SCENARIOS["downloaded-cfn-teardown-direct-service-inventories-zero"] = (
         downloadable_cfn.downloaded_cfn_teardown_direct_service_inventories_zero
     )
+    SCENARIOS["foreign-decoys-preserved"] = downloadable_cfn.foreign_decoys_preserved
+    SCENARIOS["direct-service-inventories-zero"] = zero_residue.direct_service_inventories_zero
+    SCENARIOS["aliasless-kms-and-log-groups-zero"] = zero_residue.aliasless_kms_and_log_groups_zero
     SCENARIOS["arbitrary-version-rollback-denied"] = rollback.arbitrary_version_rollback_denied
     SCENARIOS["production-serves-exact-previous-version"] = rollback.production_serves_exact_previous_version
 

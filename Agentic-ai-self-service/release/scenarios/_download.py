@@ -206,6 +206,7 @@ def verify_and_extract(
     ``artifact_manifest_sha256``; the extracted root is verified again from inside it.
     """
     archive = recipient_root / record["filename"]
+    recipient_root.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(data)
     with zipfile.ZipFile(io.BytesIO(data)) as zipped:
         names = zipped.namelist()
