@@ -39,6 +39,7 @@ from _live import (
     BACKEND,
     PROJECT_ROOT,
     REQUIRED_USER_GROUPS,
+    BearerSession,
     ObservedStack,
     RunBinding,
     ScenarioBlocked,
@@ -145,7 +146,6 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
 
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
-    import requests
     from tests.integration.conftest import DeploymentCleanupTracker, RuntimeBudgetTracker, wait_for_deployment_terminal
     from tests.integration.test_trigger_delivery_matrix import _promote_staging_version_for_triggers
     from tests.integration.transaction_search import TransactionSearchLease
@@ -169,15 +169,8 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
     scopeless: SyntheticUser | None = None
     try:
         with with_synthetic_user(observed, label="widget", groups=INVOKE_GROUPS) as user:
-            session = requests.Session()
-            session.headers.update(
-                {
-                    "Authorization": f"Bearer {user.token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                }
-            )
-            session.base_url = base  # type: ignore[attr-defined]
+            session = BearerSession(user, base)
+            session.headers["Content-Type"] = "application/json"
             tracker = DeploymentCleanupTracker(session, logs_client=logs)
             budgets = RuntimeBudgetTracker(session)
             runtime_name = f"it_widget_{uuid.uuid4().hex[:12]}"

@@ -113,9 +113,93 @@ def redact(text: str, *secrets_to_hide: str) -> str:
 
 
 def boto3_session(region: str):
-    import boto3  # local import: the offline dispatcher path must not need boto3
+    """A boto3 session whose credentials are re-resolved from the environment/file every 20 minutes.
 
-    return boto3.Session(region_name=region)
+    The operator's credential broker vends sessions capped at about an hour and re-vends into the
+    same file. Static file credentials would freeze the first vend into the process; this wraps
+    botocore's own resolver in RefreshableCredentials so a long journey picks up the re-vend.
+    Nothing here reads the credentials file itself.
+    """
+    import boto3  # local import: the offline dispatcher path must not need boto3
+    from botocore.credentials import RefreshableCredentials
+    from botocore.session import get_session
+
+    def _resolve() -> dict[str, str]:
+        from datetime import UTC, datetime, timedelta
+
+        resolved = get_session().get_credentials()
+        if resolved is None:
+            raise ScenarioBlocked("no AWS credentials resolve in this process")
+        frozen = resolved.get_frozen_credentials()
+        return {
+            "access_key": frozen.access_key,
+            "secret_key": frozen.secret_key,
+            "token": frozen.token,
+            "expiry_time": (datetime.now(UTC) + timedelta(minutes=35)).isoformat(),
+        }
+
+    credentials = RefreshableCredentials.create_from_metadata(
+        metadata=_resolve(), refresh_using=_resolve, method="release-evidence-file-rereader"
+    )
+    botocore_session = get_session()
+    botocore_session._credentials = credentials  # noqa: SLF001 - botocore offers no public setter
+    return boto3.Session(botocore_session=botocore_session, region_name=region)
+
+
+class BearerSession:
+    """A requests.Session that re-authenticates its synthetic user before the Cognito token lapses.
+
+    Access tokens live one hour (``cognito_auth.py``); a journey that spans that hour would start
+    receiving 401s half way. Every request checks the token age and signs in again past 45 minutes.
+    """
+
+    def __init__(self, user: SyntheticUser, base_url: str, *, max_token_age_seconds: int = 45 * 60):
+        import requests
+
+        self._user = user
+        self._session = requests.Session()
+        self._max_age = max_token_age_seconds
+        self.base_url = base_url
+        self._apply_token()
+
+    def _apply_token(self) -> None:
+        self._session.headers.update(
+            {"Authorization": f"Bearer {self._user.token}", "Accept": "application/json"},
+        )
+
+    def _refresh_if_needed(self) -> None:
+        if time.monotonic() - self._user.authenticated_at > self._max_age:
+            self._user.authenticate()
+            self._apply_token()
+
+    def request(self, method: str, url: str, **kwargs):
+        self._refresh_if_needed()
+        return self._session.request(method, url, **kwargs)
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url: str, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+    @property
+    def headers(self):
+        return self._session.headers
+
+    def close(self) -> None:
+        self._session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 # --------------------------------------------------------------------------- the run
@@ -405,6 +489,7 @@ class SyntheticUser:
     groups: frozenset[str] = REQUIRED_USER_GROUPS
     _password: str = field(default="", repr=False)
     _token: str = field(default="", repr=False)
+    authenticated_at: float = field(default=0.0, repr=False)
     created: bool = False
     deleted: bool = False
 
@@ -473,6 +558,7 @@ class SyntheticUser:
         if set(result.get("groups") or []) != self.groups:
             raise ScenarioFailed(f"access-token groups are {sorted(result.get('groups') or [])}")
         self._token = token
+        self.authenticated_at = time.monotonic()
         return token
 
     @property

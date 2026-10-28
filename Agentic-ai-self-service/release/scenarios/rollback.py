@@ -32,6 +32,7 @@ from typing import Any
 from _live import (
     BACKEND,
     REQUIRED_USER_GROUPS,
+    BearerSession,
     ObservedStack,
     RunBinding,
     ScenarioFailed,
@@ -244,15 +245,8 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
     cleanup_errors: list[str] = []
     try:
         with with_synthetic_user(observed, label="rollback", groups=ROLLBACK_GROUPS) as user:
-            session = requests.Session()
-            session.headers.update(
-                {
-                    "Authorization": f"Bearer {user.token}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                }
-            )
-            session.base_url = base  # type: ignore[attr-defined]
+            session = BearerSession(user, base)
+            session.headers["Content-Type"] = "application/json"
             tracker = DeploymentCleanupTracker(session, logs_client=logs)
             budgets = RuntimeBudgetTracker(session)
             runtime_name = f"it_rollback_{uuid.uuid4().hex[:12]}"
