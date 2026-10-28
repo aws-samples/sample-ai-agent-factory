@@ -130,6 +130,7 @@ def _register_live_families() -> None:
     import download_integrity
     import downloadable_cfn
     import downloadable_python
+    import gateway_governance
     import jit_controls
     import kms_controls
     import obo_controls
@@ -183,6 +184,17 @@ def _register_live_families() -> None:
     SCENARIOS["leased-approval-applies-exact-policy"] = jit_controls.leased_approval_applies_exact_policy
     SCENARIOS["concurrent-rejection-cannot-win"] = jit_controls.concurrent_rejection_cannot_win
     SCENARIOS["gateway-policy-mutation-request-denied"] = jit_controls.gateway_policy_mutation_request_denied
+    SCENARIOS["model-and-tool-content-allowed"] = gateway_governance.model_and_tool_content_allowed
+    SCENARIOS["prompt-attack-blocked"] = gateway_governance.prompt_attack_blocked
+    SCENARIOS["tool-argument-blocked"] = gateway_governance.tool_argument_blocked
+    SCENARIOS["tool-result-blocked"] = gateway_governance.tool_result_blocked
+    SCENARIOS["guardrail-outage-fails-closed"] = gateway_governance.guardrail_outage_fails_closed
+    SCENARIOS["cedar-authorized-tool-call"] = gateway_governance.cedar_authorized_tool_call
+    SCENARIOS["cedar-unauthorized-tool-call-denied"] = gateway_governance.cedar_unauthorized_tool_call_denied
+    SCENARIOS["runtime-role-update-gateway-denied"] = gateway_governance.runtime_role_update_gateway_denied
+    SCENARIOS["connector-tools-list-and-authorized-call"] = gateway_governance.connector_tools_list_and_authorized_call
+    SCENARIOS["connector-cedar-denial"] = gateway_governance.connector_cedar_denial
+    SCENARIOS["connector-tool-guardrail-denial"] = gateway_governance.connector_tool_guardrail_denial
     SCENARIOS["target-cmk-encrypts-batch-evaluation"] = kms_controls.target_cmk_encrypts_batch_evaluation
     SCENARIOS["wrong-account-key-denied"] = kms_controls.wrong_account_key_denied
     SCENARIOS["wrong-region-key-denied"] = kms_controls.wrong_region_key_denied
