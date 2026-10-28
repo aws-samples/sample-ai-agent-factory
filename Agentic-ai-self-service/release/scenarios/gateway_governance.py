@@ -34,6 +34,10 @@ GUARDRAIL_WORD_FILTERS = [
     "ACFPR_CONNECTOR_GUARDRAIL_B43627B",
 ]
 BLOCKED_RESULT_VALUE = "ACFPR_BLOCK_RESULT_B43627B result payload"
+# The runtime deploy path (guardrails_step) only enables the managed Bedrock PROMPT_ATTACK filter
+# when contentFilters is supplied (unlike the downloadable-CFN generator, which always adds it). The
+# prompt-attack-blocked oracle requires an input prompt-attack block, so this is mandatory, not optional.
+GUARDRAIL_CONTENT_FILTERS = {"prompt_attack": "HIGH"}
 # Cedar must FORBID these two probes; every other operation is permitted.
 CEDAR_FORBIDDEN_OPERATIONS = ["policy_denied_probe", "connector_denied_probe"]
 
@@ -257,7 +261,7 @@ def deploy_body(names: dict[str, str], fixture_url: str, secret: str, runtime_co
         "config": runtime_config,
         "connectedTools": ["gateway"],
         "gatewayConfig": {"name": names["runtime_name"]},
-        "guardrailsConfig": {"word_filters": GUARDRAIL_WORD_FILTERS},
+        "guardrailsConfig": {"word_filters": GUARDRAIL_WORD_FILTERS, "contentFilters": GUARDRAIL_CONTENT_FILTERS},
         "policy": cedar_policy_component(),
         "connectors": [
             {
