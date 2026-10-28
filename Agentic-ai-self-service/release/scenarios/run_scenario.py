@@ -156,6 +156,11 @@ def _register_live_families() -> None:
     SCENARIOS["real-browser-cloudfront-widget-flow"] = browser_widget.real_browser_cloudfront_widget_flow
     SCENARIOS["arbitrary-version-rollback-denied"] = rollback.arbitrary_version_rollback_denied
     SCENARIOS["production-serves-exact-previous-version"] = rollback.production_serves_exact_previous_version
+    SCENARIOS["batch-evaluation-pass-and-production-promotion"] = (
+        rollback.batch_evaluation_pass_and_production_promotion
+    )
+    SCENARIOS["forged-or-stale-evidence-denied"] = rollback.forged_or_stale_evidence_denied
+    SCENARIOS["degraded-result-denied"] = rollback.degraded_result_denied
 
 
 _register_live_families()

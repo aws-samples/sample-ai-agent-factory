@@ -22,6 +22,7 @@ synthetic user are all cleaned up in every exit path, and the synthetic user car
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import uuid
@@ -66,12 +67,162 @@ def _runtime_config(runtime_name: str, marker: str) -> dict[str, Any]:
     }
 
 
+POLL_SECONDS = 20
+
+
+def _degrade(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The same real sessions judged against ground truth that contradicts what the agent said."""
+    degraded = []
+    for scenario in scenarios:
+        copy = json.loads(json.dumps(scenario))
+        copy["testScenarioId"] = copy["testScenarioId"].replace("trigger-release", "degraded-release")
+        copy["assertions"] = ["The response is written entirely in French and refuses to answer the question."]
+        for turn in copy.get("turns", []):
+            turn["expectedResponse"] = "Je refuse de répondre."
+        degraded.append(copy)
+    return degraded
+
+
+def _promotion_gate(
+    session: Any,
+    logs: Any,
+    runtime_name: str,
+    status: dict[str, Any],
+    *,
+    adversarial_against: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The customer promotion gate, step by step, recording what the API returned at each step."""
+    import time
+
+    from tests.integration.test_trigger_delivery_matrix import _release_scenarios, _wait_for_evaluation_sessions
+
+    base = session.base_url
+    version_id, runtime_id = status["version_id"], status["runtime_id"]
+    record: dict[str, Any] = {"version_id": version_id, "denials": {}}
+
+    def slots() -> dict[str, Any]:
+        response = session.get(f"{base}/api/runtimes/{runtime_name}/slots", timeout=60)
+        response.raise_for_status()
+        return response.json()
+
+    def production_unchanged(expected: str | None) -> bool:
+        return slots().get("production_version_id") == expected
+
+    deadline = time.monotonic() + 600
+    while slots().get("staging_version_id") != version_id:
+        if time.monotonic() > deadline:
+            raise ScenarioFailed(f"version {version_id} never reached the staging slot")
+        time.sleep(10)
+    versions = session.get(f"{base}/api/runtimes/{runtime_name}/versions", timeout=60)
+    versions.raise_for_status()
+    version_record = next(item for item in versions.json() if item.get("version_id") == version_id)
+    agentcore_runtime_name = version_record["agentcore_runtime_name"]
+    evidence = session.get(f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evidence", timeout=60)
+    evidence.raise_for_status()
+    policy = evidence.json().get("promotion_policy") or {}
+    if not evidence.json().get("production_gate_required"):
+        raise ScenarioFailed("the production gate is not required; the policy under test is not in force")
+    minimum_sessions = int(policy.get("minimum_sessions") or 0)
+    record["minimum_sessions"] = minimum_sessions
+    production_before = slots().get("production_version_id")
+
+    if adversarial_against is not None:
+        stale_batch = adversarial_against["batch_evaluation_id"]
+        stale = session.post(
+            f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+            json={"batchEvaluationId": stale_batch},
+            timeout=90,
+        )
+        record["denials"]["cross_version_stale_evidence"] = {
+            "status": stale.status_code,
+            "detail": stale.text[:300],
+            "production_unchanged": production_unchanged(production_before),
+        }
+        if stale.status_code != 409:
+            raise ScenarioFailed(f"stale cross-version evidence attested with {stale.status_code}, expected 409")
+        unattested = session.post(
+            f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promote", json={"slot": "production"}, timeout=90
+        )
+        record["denials"]["promote_without_attestation"] = {
+            "status": unattested.status_code,
+            "detail": unattested.text[:300],
+            "production_unchanged": production_unchanged(production_before),
+        }
+        if unattested.status_code != 409:
+            raise ScenarioFailed(f"promotion without attestation returned {unattested.status_code}, expected 409")
+
+    scenarios, session_ids = _release_scenarios(
+        session, runtime_name=runtime_name, version_id=version_id, count=minimum_sessions
+    )
+    _wait_for_evaluation_sessions(logs, agentcore_runtime_name=agentcore_runtime_name, session_ids=session_ids)
+
+    def run_batch(payload: list[dict[str, Any]], label: str) -> str:
+        start = session.post(
+            f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+            json={"scenarios": payload},
+            timeout=90,
+        )
+        if start.status_code != 200:
+            raise ScenarioFailed(f"starting the {label} evaluation returned {start.status_code}: {start.text[:300]}")
+        batch_id = start.json()["batch_evaluation_id"]
+        poll_deadline = time.monotonic() + 1800
+        last = ""
+        while time.monotonic() < poll_deadline:
+            batch = session.get(
+                f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_id}", timeout=60
+            )
+            batch.raise_for_status()
+            last = str(batch.json().get("status") or "")
+            if last == "COMPLETED":
+                return batch_id
+            if last not in {"PENDING", "IN_PROGRESS", "STOPPING"}:
+                raise ScenarioFailed(f"the {label} evaluation ended {last}")
+            time.sleep(POLL_SECONDS)
+        raise ScenarioFailed(f"the {label} evaluation did not complete in time (last {last})")
+
+    if adversarial_against is not None:
+        degraded_batch = run_batch(_degrade(scenarios), "degraded")
+        degraded = session.post(
+            f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+            json={"batchEvaluationId": degraded_batch},
+            timeout=90,
+        )
+        record["denials"]["degraded_result"] = {
+            "batch_evaluation_id": degraded_batch,
+            "status": degraded.status_code,
+            "detail": degraded.text[:300],
+            "production_unchanged": production_unchanged(production_before),
+        }
+        if degraded.status_code != 409:
+            raise ScenarioFailed(f"a degraded batch result was attested with {degraded.status_code}, expected 409")
+
+    batch_id = run_batch(scenarios, "genuine")
+    attest = session.post(
+        f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+        json={"batchEvaluationId": batch_id},
+        timeout=90,
+    )
+    if attest.status_code != 200:
+        raise ScenarioFailed(f"attesting the genuine evaluation returned {attest.status_code}: {attest.text[:300]}")
+    verdict = (attest.json().get("promotion_evidence") or {}).get("verdict")
+    record.update({"batch_evaluation_id": batch_id, "attest_status": 200, "verdict": verdict})
+    if verdict != "pass":
+        raise ScenarioFailed(f"genuine evaluation verdict is {verdict!r}")
+    promote = session.post(
+        f"{base}/api/runtimes/{runtime_name}/versions/{version_id}/promote", json={"slot": "production"}, timeout=90
+    )
+    if promote.status_code != 200 or promote.json().get("promoted_version_id") != version_id:
+        raise ScenarioFailed(f"promotion returned {promote.status_code}: {promote.text[:300]}")
+    record["promoted"] = True
+    record["runtime_id"] = runtime_id
+    return record
+
+
 def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> dict[str, Any]:
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))
     import requests
     from tests.integration.conftest import DeploymentCleanupTracker, RuntimeBudgetTracker, wait_for_deployment_terminal
-    from tests.integration.test_trigger_delivery_matrix import _promote_staging_version_for_triggers
     from tests.integration.transaction_search import TransactionSearchLease
 
     base = observed.cloudfront_url
@@ -148,9 +299,19 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
                         response.raise_for_status()
                         return response.json()
 
-                    def promote(status: dict[str, Any]) -> str:
+                    def promote(status: dict[str, Any], *, adversarial_against: dict[str, Any] | None = None) -> str:
+                        """Promote through the real Batch Evaluation gate, recording the batch id and verdict.
+
+                        With ``adversarial_against`` (the previous version's gate record), first prove the
+                        denials: that version's batch id attested against THIS version (cross-version stale
+                        evidence), promotion without any attestation, and a REAL batch run on deliberately
+                        degraded ground truth -- each an exact 409 with production unchanged.
+                        """
                         version_id = status["version_id"]
-                        _promote_staging_version_for_triggers(session, logs, runtime_name=runtime_name, status=status)
+                        gate = _promotion_gate(
+                            session, logs, runtime_name, status, adversarial_against=adversarial_against
+                        )
+                        outcome.setdefault("promotion_gates", []).append(gate)
                         if slots().get("production_version_id") != version_id:
                             raise ScenarioFailed("promotion did not make the version production")
                         return version_id
@@ -180,7 +341,7 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
                     first_version = promote(first_status)
                     invoke_expect(first_version, "first")
                     second_status = deploy("second")
-                    second_version = promote(second_status)
+                    second_version = promote(second_status, adversarial_against=outcome["promotion_gates"][0])
                     if second_version == first_version:
                         raise ScenarioFailed("second deployment reused the first version id")
                     if slots().get("previous_production_version_id") != first_version:
@@ -267,6 +428,28 @@ def _scenario(args: argparse.Namespace, artifact_dir: Path, claim: str) -> dict:
         holds = facet.get("served_exact_previous") is True and facet.get("promoted_version_id") == (
             outcome.get("versions") or {}
         ).get("first")
+    elif claim == "batch-evaluation-pass-and-production-promotion":
+        gates = outcome.get("promotion_gates") or []
+        facet = {"gates": gates}
+        holds = len(gates) == 2 and all(
+            g.get("verdict") == "pass" and g.get("promoted") is True and g.get("batch_evaluation_id") for g in gates
+        )
+    elif claim == "forged-or-stale-evidence-denied":
+        gates = outcome.get("promotion_gates") or []
+        denials = (gates[1].get("denials") if len(gates) == 2 else None) or {}
+        facet = {k: denials.get(k) for k in ("cross_version_stale_evidence", "promote_without_attestation")}
+        holds = all(
+            (facet.get(k) or {}).get("status") == 409 and (facet.get(k) or {}).get("production_unchanged") is True
+            for k in ("cross_version_stale_evidence", "promote_without_attestation")
+        )
+    elif claim == "degraded-result-denied":
+        gates = outcome.get("promotion_gates") or []
+        facet = ((gates[1].get("denials") if len(gates) == 2 else None) or {}).get("degraded_result") or {}
+        holds = (
+            facet.get("status") == 409
+            and facet.get("production_unchanged") is True
+            and bool(facet.get("batch_evaluation_id"))
+        )
     else:
         raise ScenarioFailed(f"unknown rollback claim {claim}")
     report = {
@@ -291,3 +474,21 @@ def arbitrary_version_rollback_denied(args: argparse.Namespace, artifact_dir: Pa
 
 def production_serves_exact_previous_version(args: argparse.Namespace, artifact_dir: Path) -> dict:
     return _scenario(args, artifact_dir, "production-serves-exact-previous-version")
+
+
+def batch_evaluation_pass_and_production_promotion(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    """``release.evaluation_promotion``: both versions reached production only through a real,
+    COMPLETED Batch Evaluation whose attested verdict was pass."""
+    return _scenario(args, artifact_dir, "batch-evaluation-pass-and-production-promotion")
+
+
+def forged_or_stale_evidence_denied(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    """``release.evaluation_promotion``: version 1's real batch attested against version 2, and a
+    promotion with no attestation at all, are each refused 409 with production unmoved."""
+    return _scenario(args, artifact_dir, "forged-or-stale-evidence-denied")
+
+
+def degraded_result_denied(args: argparse.Namespace, artifact_dir: Path) -> dict:
+    """``release.evaluation_promotion``: a REAL batch run on contradictory ground truth completes and
+    is refused at attestation (409) with production unmoved."""
+    return _scenario(args, artifact_dir, "degraded-result-denied")
