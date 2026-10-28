@@ -149,10 +149,22 @@ def _openapi(url: str) -> str:
 
 def _runtime_config(runtime_name: str) -> dict[str, Any]:
     return {
-        "runtimeName": runtime_name,
-        "template": "strands-gateway-agent",
-        "systemPrompt": "You are an OBO certification agent. When asked, call the whoami tool exactly once.",
-        "modelId": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "name": runtime_name,
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {"modelId": "us.anthropic.claude-sonnet-5"},
+        "systemPrompt": (
+            "You are an identity certification agent. For every user request, call exactly the "
+            "available whoami tool once with no arguments, then return only its principal field. "
+            "Never infer or invent an identity."
+        ),
+        "deploymentType": "direct_code_deploy",
+        "pythonRuntime": "PYTHON_3_13",
+        "protocol": "HTTP",
+        "idleTimeout": 300,
+        "maxLifetime": 3600,
+        "enableOtel": False,
+        "multiAgentPattern": "none",
     }
 
 
