@@ -801,40 +801,64 @@ def direct_denied(
 
 
 def runtime_role_denial(boto_session: Any, role_arn: str, gateway_arn: str) -> dict[str, Any]:
-    """Prove the runtime role cannot mutate the gateway/policy plane: explicitDeny for every
-    forbidden action by simulation, corroborated by the actual NeverMutateGatewayOrPolicyControlPlane
-    explicit-deny statement on the role (read-only; zero mutations)."""
+    """Prove the runtime role cannot mutate the gateway/policy control plane (read-only; zero mutations).
+
+    Authoritative proof is the role's own NeverMutateGatewayOrPolicyControlPlane statement: it must
+    Deny every forbidden action on Resource="*". A simulation cross-check then confirms no forbidden
+    action is allowed and that the gateway-resource mutations resolve to explicitDeny against the
+    gateway ARN. (The IAM simulator returns implicitDeny for policy/policy-engine actions simulated
+    against a *gateway* ARN even though the Resource="*" Deny covers them, so the statement read — not
+    a blanket simulate — is the source of truth.)"""
     iam = boto_session.client("iam")
-    actions = sorted(FORBIDDEN_RUNTIME_CONTROL_ACTIONS)
-    results = (
-        iam.simulate_principal_policy(PolicySourceArn=role_arn, ActionNames=actions, ResourceArns=[gateway_arn]).get(
-            "EvaluationResults"
-        )
-        or []
-    )
-    decisions = {str(r.get("EvalActionName")): str(r.get("EvalDecision")) for r in results if isinstance(r, dict)}
-    if set(decisions) != set(FORBIDDEN_RUNTIME_CONTROL_ACTIONS) or set(decisions.values()) != {"explicitDeny"}:
-        raise ScenarioFailed(f"runtime role simulation is not explicitDeny for every forbidden action: {decisions}")
     role_name = role_arn.rsplit("/", 1)[-1]
-    sid_found = False
+    statement = None
     for policy_name in iam.list_role_policies(RoleName=role_name).get("PolicyNames", []):
         document = iam.get_role_policy(RoleName=role_name, PolicyName=policy_name).get("PolicyDocument") or {}
         statements = document.get("Statement") if isinstance(document, dict) else None
-        for statement in statements if isinstance(statements, list) else []:
-            if (
-                isinstance(statement, dict)
-                and statement.get("Sid") == "NeverMutateGatewayOrPolicyControlPlane"
-                and statement.get("Effect") == "Deny"
-            ):
-                sid_found = True
-    if not sid_found:
-        raise ScenarioFailed("runtime role lacks the NeverMutateGatewayOrPolicyControlPlane explicit-deny statement")
+        for candidate in statements if isinstance(statements, list) else []:
+            if isinstance(candidate, dict) and candidate.get("Sid") == "NeverMutateGatewayOrPolicyControlPlane":
+                statement = candidate
+    if not statement or statement.get("Effect") != "Deny":
+        raise ScenarioFailed("runtime role lacks the NeverMutateGatewayOrPolicyControlPlane explicit Deny statement")
+    raw_actions = statement.get("Action")
+    actions = {raw_actions} if isinstance(raw_actions, str) else set(raw_actions or [])
+    raw_resources = statement.get("Resource")
+    resources = {raw_resources} if isinstance(raw_resources, str) else set(raw_resources or [])
+    missing = FORBIDDEN_RUNTIME_CONTROL_ACTIONS - actions
+    if missing:
+        raise ScenarioFailed(f"NeverMutate statement omits forbidden actions: {sorted(missing)}")
+    if "*" not in resources:
+        raise ScenarioFailed(f"NeverMutate statement is resource-scoped rather than Resource='*': {sorted(resources)}")
+    results = (
+        iam.simulate_principal_policy(
+            PolicySourceArn=role_arn, ActionNames=sorted(FORBIDDEN_RUNTIME_CONTROL_ACTIONS), ResourceArns=[gateway_arn]
+        ).get("EvaluationResults")
+        or []
+    )
+    decisions = {str(r.get("EvalActionName")): str(r.get("EvalDecision")) for r in results if isinstance(r, dict)}
+    allowed = sorted(a for a, d in decisions.items() if d not in ("explicitDeny", "implicitDeny"))
+    if allowed:
+        raise ScenarioFailed(f"runtime role allows forbidden control-plane actions: {allowed}")
+    gateway_mutations = {
+        "bedrock-agentcore:CreateGatewayTarget",
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:DeleteGateway",
+        "bedrock-agentcore:UpdateGatewayTarget",
+        "bedrock-agentcore:DeleteGatewayTarget",
+        "bedrock-agentcore:SynchronizeGatewayTargets",
+    }
+    not_explicit = sorted(a for a in gateway_mutations if decisions.get(a) != "explicitDeny")
+    if not_explicit:
+        raise ScenarioFailed(f"gateway-mutation actions are not explicitDeny against the gateway ARN: {not_explicit}")
     return {
         "roleArn": role_arn,
         "explicitDenyStatement": "NeverMutateGatewayOrPolicyControlPlane",
+        "statementCoversAllForbidden": True,
+        "statementResource": "*",
         "forbiddenActionCount": len(FORBIDDEN_RUNTIME_CONTROL_ACTIONS),
         "simulationDecision": "explicitDeny",
         "allForbiddenActionsCovered": True,
+        "forbiddenActionsAllowed": 0,
         "awsMutations": 0,
     }
 
