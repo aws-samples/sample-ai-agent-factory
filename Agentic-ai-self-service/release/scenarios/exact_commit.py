@@ -99,13 +99,28 @@ def _verify(run: dict[str, Any], recorder: ModuleType) -> dict[str, Any]:
     for key in RUNNER_KEYS:
         _check(checks, f"runner.{key}", expected_runner.get(key), runner.get(key))
 
+    mismatches = [item["check"] for item in checks if not item["match"]]
     return {
         "scenario": SCENARIO_ID,
         "run_id": run.get("run_id"),
         "commit": current.get("commit"),
         "branch": current.get("branch"),
         "checks": checks,
-        "passed": bool(checks) and all(item["match"] for item in checks),
+        # Contract shape pinned by backend/tests/test_release_evidence_recorder.py: the list of
+        # mismatching checks (empty on success) and the identity actually observed in this tree.
+        "mismatches": mismatches,
+        "observed": {
+            "commit": current.get("commit"),
+            "project_tree": current.get("project_tree"),
+            "root_workflow_blob": current.get("root_workflow_blob"),
+            "clean": current.get("clean"),
+        },
+        "expected": {
+            "commit": expected_source.get("commit"),
+            "project_tree": expected_source.get("project_tree"),
+            "root_workflow_blob": expected_source.get("root_workflow_blob"),
+        },
+        "passed": bool(checks) and not mismatches,
         "environment": {"python": runner.get("python"), "platform": runner.get("platform")},
     }
 
