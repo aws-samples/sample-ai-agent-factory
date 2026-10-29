@@ -948,9 +948,15 @@ def invoke(payload, context=None):
         "WORKFORCE_TOKEN_HEADER",
         "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
     )
+    # HTTP header names are case-insensitive and the Runtime forwards custom headers with
+    # their wire casing (HTTP/2 lowercases; HTTP/1.1 may canonicalise, e.g. "...-Agentcore-..."),
+    # so resolve by lowercased key instead of two fixed spellings. Found live: the delegated
+    # invoke raised "requires one authenticated workforce JWT" although the header was signed,
+    # sent and allowlisted.
+    _lowered_headers = {{str(k).lower(): v for k, v in dict(request_headers).items()}}
     subject_token = str(
         request_headers.get(workforce_token_header)
-        or request_headers.get(workforce_token_header.lower())
+        or _lowered_headers.get(workforce_token_header.lower())
         or ""
     ).strip()
     obo_client = None
@@ -2402,9 +2408,15 @@ def invoke(payload, context=None):
         "WORKFORCE_TOKEN_HEADER",
         "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
     )
+    # HTTP header names are case-insensitive and the Runtime forwards custom headers with
+    # their wire casing (HTTP/2 lowercases; HTTP/1.1 may canonicalise, e.g. "...-Agentcore-..."),
+    # so resolve by lowercased key instead of two fixed spellings. Found live: the delegated
+    # invoke raised "requires one authenticated workforce JWT" although the header was signed,
+    # sent and allowlisted.
+    _lowered_headers = {{str(k).lower(): v for k, v in dict(request_headers).items()}}
     subject_token = str(
         request_headers.get(workforce_token_header)
-        or request_headers.get(workforce_token_header.lower())
+        or _lowered_headers.get(workforce_token_header.lower())
         or ""
     ).strip()
     obo_client = None

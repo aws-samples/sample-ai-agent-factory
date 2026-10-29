@@ -459,3 +459,53 @@ def test_generated_agent_treats_a_none_request_headers_context_as_no_headers():
     assert broken != snippet
     with pytest.raises(AttributeError):
         exec(broken, {"context": SimpleNamespace(request_headers=None), "globals": lambda: {}})  # noqa: S102
+
+
+@pytest.mark.parametrize(
+    "wire_name",
+    [
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
+        "x-amzn-bedrock-agentcore-runtime-custom-workforce-token",
+        "X-Amzn-Bedrock-Agentcore-Runtime-Custom-Workforce-Token",
+        "X-AMZN-BEDROCK-AGENTCORE-RUNTIME-CUSTOM-WORKFORCE-TOKEN",
+    ],
+)
+def test_generated_agent_resolves_the_workforce_header_regardless_of_wire_casing(wire_name):
+    """Found live (OBO journey on the deployed stack): the backend signed and sent the exact
+    allowlisted header and the Runtime forwarded it, yet the generated agent raised
+    "OBO invocation requires one authenticated workforce JWT". The pinned bedrock-agentcore
+    SDK forwards custom headers with their WIRE casing (HTTP/2 lowercases, HTTP/1.1 may
+    canonicalise), and the agent only tried two fixed spellings. Header names are
+    case-insensitive; the generated code must resolve by lowercased key."""
+    from types import SimpleNamespace
+
+    from app.services import code_generator
+
+    code = code_generator._generate_strands_gateway(
+        "Use the connector.", "us.anthropic.claude-sonnet-5", {}, region="us-east-1"
+    )
+    snippet = _generated_header_resolution(code)
+    namespace = {"context": SimpleNamespace(request_headers={wire_name: "tok"}), "globals": lambda: {}}
+    exec(snippet, namespace)  # noqa: S102 -- executing the project's own generated code under test
+    assert namespace["subject_token"] == "tok", wire_name
+    # Negative: an unrelated custom header never becomes the subject token.
+    namespace = {
+        "context": SimpleNamespace(request_headers={"X-Amzn-Bedrock-AgentCore-Runtime-Custom-Other": "tok"}),
+        "globals": lambda: {},
+    }
+    exec(snippet, namespace)  # noqa: S102
+    assert namespace["subject_token"] == ""
+    # Mutation: the former two-spelling lookup misses the canonicalised casing.
+    broken = snippet.replace(
+        "or _lowered_headers.get(workforce_token_header.lower())",
+        "or request_headers.get(workforce_token_header.lower())",
+    )
+    assert broken != snippet
+    namespace = {
+        "context": SimpleNamespace(
+            request_headers={"X-Amzn-Bedrock-Agentcore-Runtime-Custom-Workforce-Token": "tok"}
+        ),
+        "globals": lambda: {},
+    }
+    exec(broken, namespace)  # noqa: S102
+    assert namespace["subject_token"] == ""
