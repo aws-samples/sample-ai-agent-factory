@@ -322,6 +322,24 @@ def _fixture_log_tail(session: Any, log_group: str) -> list[str]:
     return [str(e.get("message", "")).strip()[:200] for e in events][-30:]
 
 
+def _runtime_log_tail(session: Any, runtime_id: str, *secrets_to_hide: str) -> list[str]:
+    """The test Runtime's recent log lines (bounded, redacted): a 500 from the Runtime is only
+    explained by the generated agent's own traceback, and the tracker deletes these groups."""
+    from botocore.exceptions import ClientError
+
+    logs = session.client("logs")
+    prefix = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-"
+    lines: list[str] = []
+    try:
+        groups = logs.describe_log_groups(logGroupNamePrefix=prefix).get("logGroups", [])
+        for group in groups[:3]:
+            events = logs.filter_log_events(logGroupName=str(group["logGroupName"]), limit=60).get("events", [])
+            lines.extend(redact(str(e.get("message", "")).strip()[:400], *secrets_to_hide) for e in events)
+    except ClientError:
+        return lines[-40:]
+    return lines[-40:]
+
+
 def _mcp_post(gateway_url: str, token: str, payload: dict[str, Any], timeout: int = 60) -> requests.Response:
     return requests.post(
         gateway_url,
@@ -651,6 +669,10 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
         finally:
             cleanup: dict[str, Any] = {}
             failed = "workforce-token-exchange-whoami" not in outcome or "direct-runtime-bypass-denied" not in outcome
+            if failed and outcome.get("runtime_id"):
+                # Before the tracker deletes the Runtime (and its log group): the agent's own error.
+                time.sleep(20)  # let CloudWatch ingest the Runtime's request logs before capture
+                outcome["runtime_logs"] = _runtime_log_tail(session, str(outcome["runtime_id"]), *secrets_to_hide)
             try:
                 budgets.cleanup()
                 cleanup["budget"] = "deleted"
