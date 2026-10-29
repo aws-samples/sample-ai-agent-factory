@@ -280,6 +280,43 @@ def _delete_fixture(session: Any, names: dict[str, str], *, keep_log_group: bool
 # --------------------------------------------------------------------------- MCP + facet proofs
 
 
+def _runtime_config_snapshot(session: Any, runtime_id: str | None) -> dict[str, Any]:
+    """The live Runtime's header-forwarding config and its endpoints' served versions.
+
+    Ground truth for an OBO 500: the allowlisted custom header only reaches the agent when
+    ``requestHeaderConfiguration`` is bound to the VERSION the invoked endpoint serves. The
+    tracker deletes the Runtime, so capture it (no secrets — only config shapes and ids) on
+    failure before teardown."""
+    from botocore.exceptions import ClientError
+
+    snap: dict[str, Any] = {}
+    if not runtime_id:
+        return snap
+    control = session.client("bedrock-agentcore-control")
+    try:
+        rt = control.get_agent_runtime(agentRuntimeId=runtime_id)
+        snap["requestHeaderConfiguration"] = rt.get("requestHeaderConfiguration")
+        snap["authorizer"] = sorted((rt.get("authorizerConfiguration") or {}).keys())
+        snap["protocol"] = (rt.get("protocolConfiguration") or {}).get("serverProtocol")
+        snap["runtime_version"] = rt.get("agentRuntimeVersion")
+    except ClientError as error:
+        snap["runtime_error"] = error.response.get("Error", {}).get("Code")
+    try:
+        eps = control.list_agent_runtime_endpoints(agentRuntimeId=runtime_id).get("runtimeEndpoints", [])
+        snap["endpoints"] = [
+            {
+                "name": e.get("name"),
+                "status": e.get("status"),
+                "liveVersion": e.get("liveVersion"),
+                "targetVersion": e.get("targetVersion"),
+            }
+            for e in eps
+        ]
+    except ClientError as error:
+        snap["endpoints_error"] = error.response.get("Error", {}).get("Code")
+    return snap
+
+
 def _delete_runtime_and_gateway(session: Any, runtime_id: str | None, gateway_name: str | None) -> dict[str, Any]:
     """Directly delete the OBO runtime and its gateway by id/name — teardown must not rely on the tracker alone."""
     from botocore.exceptions import ClientError
@@ -334,7 +371,7 @@ def _runtime_log_tail(session: Any, runtime_id: str, *secrets_to_hide: str) -> l
         groups = logs.describe_log_groups(logGroupNamePrefix=prefix).get("logGroups", [])
         for group in groups[:3]:
             events = logs.filter_log_events(logGroupName=str(group["logGroupName"]), limit=60).get("events", [])
-            lines.extend(redact(str(e.get("message", "")).strip()[:400], *secrets_to_hide) for e in events)
+            lines.extend(redact(str(e.get("message", "")).strip()[:2000], *secrets_to_hide) for e in events)
     except ClientError:
         return lines[-40:]
     return lines[-40:]
@@ -673,6 +710,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
                 # Before the tracker deletes the Runtime (and its log group): the agent's own error.
                 time.sleep(20)  # let CloudWatch ingest the Runtime's request logs before capture
                 outcome["runtime_logs"] = _runtime_log_tail(session, str(outcome["runtime_id"]), *secrets_to_hide)
+                outcome["runtime_config"] = _runtime_config_snapshot(session, str(outcome["runtime_id"]))
             try:
                 budgets.cleanup()
                 cleanup["budget"] = "deleted"

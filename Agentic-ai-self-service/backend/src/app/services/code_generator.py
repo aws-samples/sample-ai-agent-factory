@@ -3697,12 +3697,23 @@ def _inject_otel(code: str) -> str:
     if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
         wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
+# The wrapper MUST advertise (payload, context=None). The bedrock-agentcore SDK decides
+# whether to hand the handler the RequestContext by inspecting the REGISTERED handler's
+# signature -- it forwards context only when the second parameter is named "context"
+# (BedrockAgentCoreApp._takes_context). A (*args, **kwargs) wrapper fails that check, so the
+# SDK called invoke with the payload alone and context was None: an OBO runtime then saw no
+# forwarded workforce-token header and raised "requires one authenticated workforce JWT" on
+# the instrumented (staging / production-gate) path. Forward context to the inner invoke only
+# when the inner itself takes it, mirroring the SDK's own rule so non-context agents are intact.
+import inspect as _otel_inspect
 _otel_inner_invoke = invoke
-def _otel_invoke_wrap(*args, **kwargs):
+_otel_inner_params = list(_otel_inspect.signature(_otel_inner_invoke).parameters.keys())
+_otel_inner_takes_context = len(_otel_inner_params) >= 2 and _otel_inner_params[1] == "context"
+def _otel_invoke_wrap(payload, context=None):
     try:
-        return _otel_invoke_with_evaluation_span(
-            _otel_inner_invoke, *args, **kwargs
-        )
+        if _otel_inner_takes_context:
+            return _otel_invoke_with_evaluation_span(_otel_inner_invoke, payload, context)
+        return _otel_invoke_with_evaluation_span(_otel_inner_invoke, payload)
     finally:
         _otel_force_flush()
 invoke = app.entrypoint(_otel_invoke_wrap)

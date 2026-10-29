@@ -550,3 +550,88 @@ def test_generated_agent_falls_back_to_the_documented_request_headers():
     # The failure names the headers it saw (names only, never values) so a live refusal is diagnosable.
     assert "forwarded custom header names" in code and "request header names" in code
     assert "_seen_custom" in code and "_seen_raw" in code
+
+
+def test_otel_entrypoint_wrapper_forwards_request_context():
+    """Found live (OBO journey, candidate a6f806a, acf-production us-east-1): on the
+    instrumented staging / production-gate path the agent raised "OBO invocation requires one
+    authenticated workforce JWT" with BOTH header sources empty (forwarded custom header
+    names: []; request header names: []) -- i.e. context was None. The injected OTEL span
+    wrapper was ``def _otel_invoke_wrap(*args, **kwargs)``; the bedrock-agentcore SDK forwards
+    the RequestContext only when the REGISTERED handler's second parameter is named "context"
+    (BedrockAgentCoreApp._takes_context), so a varargs wrapper never received it. The wrapper
+    must advertise ``(payload, context=None)`` and forward context to a context-taking inner,
+    while leaving context-less (non-gateway) agents intact."""
+    import inspect
+
+    from app.services import code_generator
+
+    base = (
+        "app = BedrockAgentCoreApp()\n"
+        "@app.entrypoint\n"
+        "def invoke(payload, context=None):\n"
+        "    return {'ctx': context, 'payload': payload}\n"
+    )
+    injected = code_generator._inject_otel(base)
+    assert "def _otel_invoke_wrap(payload, context=None):" in injected
+    assert "def _otel_invoke_wrap(*args" not in injected
+
+    # Exec just the appended wrapper block with stubs -- no agent-framework import needed.
+    start = injected.index("import inspect as _otel_inspect")
+    end = injected.index("invoke = app.entrypoint(_otel_invoke_wrap)") + len(
+        "invoke = app.entrypoint(_otel_invoke_wrap)"
+    )
+    block = injected[start:end]
+
+    class _App:
+        def __init__(self):
+            self.handler = None
+
+        def entrypoint(self, func):
+            self.handler = func
+            return func
+
+    def _span(invoke_fn, *args, **kwargs):
+        return invoke_fn(*args, **kwargs)
+
+    # Context-taking inner (gateway / OBO agent): context must reach it.
+    ns = {
+        "invoke": (lambda payload, context=None: {"ctx": context, "payload": payload}),
+        "app": _App(),
+        "_otel_invoke_with_evaluation_span": _span,
+        "_otel_force_flush": (lambda: None),
+    }
+    exec(block, ns)  # noqa: S102 -- executing the project's own generated wrapper under test
+    handler = ns["app"].handler
+    params = list(inspect.signature(handler).parameters.keys())
+    assert len(params) >= 2 and params[1] == "context", params  # SDK _takes_context -> True
+    sentinel = object()
+    assert handler("p", sentinel)["ctx"] is sentinel  # RequestContext forwarded to the inner
+
+    # Context-less inner (non-gateway agent): the wrapper must not break it.
+    ns2 = {
+        "invoke": (lambda payload: {"payload": payload}),
+        "app": _App(),
+        "_otel_invoke_with_evaluation_span": _span,
+        "_otel_force_flush": (lambda: None),
+    }
+    exec(block, ns2)  # noqa: S102
+    assert ns2["app"].handler("p", sentinel)["payload"] == "p"
+
+    # Mutation: the former varargs wrapper fails the SDK's second-parameter-named-context rule.
+    broken = block.replace("def _otel_invoke_wrap(payload, context=None):", "def _otel_invoke_wrap(*args, **kwargs):")
+    broken = broken.replace(
+        "        if _otel_inner_takes_context:\n"
+        "            return _otel_invoke_with_evaluation_span(_otel_inner_invoke, payload, context)\n"
+        "        return _otel_invoke_with_evaluation_span(_otel_inner_invoke, payload)\n",
+        "        return _otel_invoke_with_evaluation_span(_otel_inner_invoke, *args, **kwargs)\n",
+    )
+    ns3 = {
+        "invoke": (lambda payload, context=None: {"ctx": context}),
+        "app": _App(),
+        "_otel_invoke_with_evaluation_span": _span,
+        "_otel_force_flush": (lambda: None),
+    }
+    exec(broken, ns3)  # noqa: S102
+    bparams = list(inspect.signature(ns3["app"].handler).parameters.keys())
+    assert not (len(bparams) >= 2 and bparams[1] == "context")  # SDK would NOT forward context
