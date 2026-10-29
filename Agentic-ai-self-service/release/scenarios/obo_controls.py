@@ -518,85 +518,54 @@ def _direct_runtime_bypass(region: str, runtime_arn: str, owner_token: str) -> d
     }
 
 
-def _mediated_runtime(http: Any, runtime_id: str, claims: dict[str, Any]) -> dict[str, Any]:
-    # Drive the mediated OBO invoke through the product's async test-runtime path, NOT the
-    # staging-slot invoke. The slot invoke on a production-gate staging slot redacts the
-    # assistant output to "[Assistant output redacted.]" (promotion-gate evaluation capture) and
-    # surfaces no tool receipts under a guardrail — so the owner principal never appears in the
-    # response and the whoami receipt is invisible. test-runtime-async returns the UNREDACTED
-    # response plus toolReceipts and identityEvidence, and carries OBO (handle_test_runtime
-    # extracts the owner bearer and injects the workforce token). This mirrors the audited
-    # runner and the six gateway-governance scenarios (RELEASE_READINESS_STATUS.md b4a5856); the
-    # owner's workforce bearer rides http's Authorization header, validated against the caller.
-    session_id = f"obo-{uuid.uuid4()}"
-    prompt = "Please use the whoami tool and reply with the principal it returns."
-    start = http.post(
-        f"{http.base_url}/api/test-runtime-async",
-        json={"input": prompt, "runtimeId": runtime_id, "sessionId": session_id},
-        timeout=60,
+def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dict[str, Any]) -> dict[str, Any]:
+    response = http.post(
+        f"{http.base_url}/api/runtimes/{runtime_name}/slots/staging/invoke",
+        json={
+            # Customer-style wording: an instruction-shaped prompt ("Call X exactly once, return
+            # only Y") measurably suppressed tool use in the gateway-governance journey.
+            "input": "Please use the whoami tool and reply with the principal it returns.",
+            "sessionId": f"obo-{uuid.uuid4()}",
+        },
+        timeout=180,
     )
-    if start.status_code != 202:
-        raise ScenarioFailed(f"mediated async start returned {start.status_code}: {start.text[:300]}")
-    test_id = (start.json() or {}).get("testId")
-    if not isinstance(test_id, str) or not test_id:
-        raise ScenarioFailed("mediated async start returned no testId")
-    poll_url = f"{http.base_url}/api/test-runtime-async/{test_id}"
-    deadline = time.monotonic() + 300
-    body: dict[str, Any] | None = None
-    try:
-        while time.monotonic() < deadline:
-            polled = http.get(poll_url, timeout=30)
-            polled.raise_for_status()
-            candidate = polled.json()
-            if not isinstance(candidate, dict):
-                raise ScenarioFailed("mediated async poll returned a non-object")
-            state = candidate.get("status")
-            if state == "completed":
-                body = candidate
-                break
-            if state != "running":
-                raise ScenarioFailed(f"mediated async poll returned invalid state: {str(candidate)[:200]}")
-            time.sleep(3)
-        if body is None:
-            raise ScenarioFailed("mediated async invocation exceeded the poll deadline")
-    finally:
-        try:
-            http.delete(poll_url, timeout=30)
-        except Exception:  # noqa: BLE001
-            pass
-    evidence = body.get("identityEvidence") or body.get("identity_evidence") or {}
-    all_receipts = [r for r in (body.get("toolReceipts") or body.get("tool_receipts") or []) if isinstance(r, dict)]
+    if response.status_code != 200:
+        raise ScenarioFailed(f"mediated runtime invoke returned {response.status_code}: {response.text[:300]}")
+    body = response.json()
+    evidence = body.get("identityEvidence") or {}
+    all_receipts = [r for r in (body.get("toolReceipts") or []) if isinstance(r, dict)]
     receipts = [
         r
         for r in all_receipts
         if (r.get("name") == "whoami" or str(r.get("name") or "").endswith("whoami")) and r.get("status") == "success"
     ]
-    response_text = str(body.get("response") or "")
     ok = (
         body.get("success") is True
+        and body.get("slot") == "staging"
+        and body.get("versionId") == version_id
         and evidence.get("subject") == claims["sub"]
         and evidence.get("issuer") == claims["iss"]
         and evidence.get("gateway_exchange") == "ON_BEHALF_OF_TOKEN_EXCHANGE"
         and len(receipts) == 1
-        and str(claims["sub"]) in response_text
+        and str(claims["sub"]) in str(body.get("response") or "")
     )
     if not ok:
         diagnostics = {
             "keys": sorted(str(k) for k in body.keys()),
             "success": body.get("success"),
+            "slot": body.get("slot"),
+            "versionMatches": body.get("versionId") == version_id,
             "toolReceipts": [{"name": str(r.get("name")), "status": str(r.get("status"))} for r in all_receipts][:6],
             "identityEvidenceKeys": sorted(str(k) for k in evidence.keys()),
             "subjectMatches": evidence.get("subject") == claims["sub"],
-            "issuerMatches": evidence.get("issuer") == claims["iss"],
-            "gatewayExchange": evidence.get("gateway_exchange"),
-            "subjectInResponse": str(claims["sub"]) in response_text,
             "error": str(body.get("error") or "")[:200],
-            "response": response_text[:300],
+            "response": str(body.get("response") or "")[:300],
         }
         raise ScenarioFailed("mediated runtime OBO evidence incomplete: " + json.dumps(diagnostics, default=str)[:1200])
     return {
         "status": 200,
-        "path": "test-runtime-async",
+        "slot": "staging",
+        "versionId": version_id,
         "identityEvidence": evidence,
         "whoamiReceipt": receipts[0],
         "responseContainsExactPrincipal": True,
@@ -710,7 +679,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
                 "gateway_result_keys": sorted(str(k) for k in gateway_result.keys()),
                 "gateway_result_obo_required": gateway_result.get("obo_required"),
             }
-            runtime_arn = str(status["runtime_arn"])
+            runtime_arn, version_id = str(status["runtime_arn"]), str(status["version_id"])
             gateway_url, obo_required = _gateway_url(http, names["runtime_name"], status)
             outcome["gateway_config"] = {
                 "obo_required": obo_required,
@@ -726,7 +695,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
                 owner_claims["iss"],
                 owner_claims["client_id"],
             )
-            mediated = _mediated_runtime(http, str(outcome["runtime_id"]), owner_claims)
+            mediated = _mediated_runtime(http, names["runtime_name"], version_id, owner_claims)
             outcome["workforce-token-exchange-whoami"] = {"directGatewayWhoami": direct, "mediatedRuntime": mediated}
             outcome["substituted-subject-denied"] = _substituted_denial(gateway_url, attacker.token)
             outcome["direct-runtime-bypass-denied"] = _direct_runtime_bypass(region, runtime_arn, owner.token)
