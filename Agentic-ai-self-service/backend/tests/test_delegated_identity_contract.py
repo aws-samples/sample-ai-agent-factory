@@ -457,7 +457,9 @@ def test_generated_agent_treats_a_none_request_headers_context_as_no_headers():
         'request_headers = getattr(context, "request_headers", {}) if context is not None else {}',
     )
     assert broken != snippet
-    with pytest.raises(AttributeError):
+    # The former form fails on request_headers=None: AttributeError at `.get` before the
+    # case-insensitive resolution existed, TypeError at `dict(None)` since it does.
+    with pytest.raises((AttributeError, TypeError)):
         exec(broken, {"context": SimpleNamespace(request_headers=None), "globals": lambda: {}})  # noqa: S102
 
 
@@ -502,9 +504,7 @@ def test_generated_agent_resolves_the_workforce_header_regardless_of_wire_casing
     )
     assert broken != snippet
     namespace = {
-        "context": SimpleNamespace(
-            request_headers={"X-Amzn-Bedrock-Agentcore-Runtime-Custom-Workforce-Token": "tok"}
-        ),
+        "context": SimpleNamespace(request_headers={"X-Amzn-Bedrock-Agentcore-Runtime-Custom-Workforce-Token": "tok"}),
         "globals": lambda: {},
     }
     exec(broken, namespace)  # noqa: S102
