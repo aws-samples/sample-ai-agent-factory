@@ -362,6 +362,23 @@ def _mcp_objects(response: requests.Response) -> list[dict[str, Any]]:
     return objects
 
 
+def _mcp_payloads(response: requests.Response) -> list[dict[str, Any]]:
+    """Every JSON object in an MCP response, including objects the Gateway renders as
+    the ``text`` of a content item: an OpenAPI target's JSON body arrives as
+    ``{"type": "text", "text": "{...}"}``, so the body must be parsed, not just walked."""
+    out: list[dict[str, Any]] = []
+    for value in _mcp_objects(response):
+        for obj in _walk(value):
+            out.append(obj)
+            text = obj.get("text") if obj.get("type") == "text" else None
+            if isinstance(text, str) and text.lstrip().startswith("{"):
+                try:
+                    out.extend(_walk(json.loads(text)))
+                except ValueError:
+                    continue
+    return out
+
+
 def _wait_tools(gateway_url: str, token: str) -> str:
     deadline = time.monotonic() + 300
     last = ""
@@ -390,8 +407,7 @@ def _call_whoami(
         raise ScenarioFailed(f"owner whoami returned {response.status_code}: {response.text[:300]}")
     identities = [
         obj
-        for value in _mcp_objects(response)
-        for obj in _walk(value)
+        for obj in _mcp_payloads(response)
         if obj.get("principal") == expected_sub
         and obj.get("sub") == expected_sub
         and obj.get("issuer") == issuer
