@@ -166,7 +166,11 @@ def _promotion_gate(
         if start.status_code != 200:
             raise ScenarioFailed(f"starting the {label} evaluation returned {start.status_code}: {start.text[:300]}")
         batch_id = start.json()["batch_evaluation_id"]
-        poll_deadline = time.monotonic() + 1800
+        # Real AgentCore batch evaluations in acf-production run longer than the original 30 min
+        # ceiling (measured 2026-10-29: the degraded eval was still IN_PROGRESS at 1800s). Raise to
+        # 60 min so a legitimately-slow terminal state is observed; a still-IN_PROGRESS eval at 3600s
+        # indicates a genuine service stall, not a too-short harness budget.
+        poll_deadline = time.monotonic() + 3600
         last = ""
         while time.monotonic() < poll_deadline:
             batch = session.get(
