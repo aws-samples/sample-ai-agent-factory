@@ -6,9 +6,13 @@ behind a Function URL, then deploys, through the product ``/api/deploy``, an OBO
 fixture. With two distinct valid workforce users it proves:
 
 * **workforce-token-exchange-whoami** — the owner's workforce JWT reaches the gateway token exchange
-  and downstream ``whoami`` both directly (MCP ``tools/call`` → 200, principal/issuer/client_id match)
-  and through the product's staging-slot runtime path (``identityEvidence`` shows
-  ``ON_BEHALF_OF_TOKEN_EXCHANGE`` for the owner subject and a successful whoami tool receipt).
+  and downstream ``whoami`` directly (MCP ``tools/call`` → 200, principal/issuer/client_id match: the
+  forgery-resistant tool receipt), AND the product's mediated runtime path proves delegated identity
+  (``identityEvidence`` shows ``ON_BEHALF_OF_TOKEN_EXCHANGE`` for the owner subject and issuer). The
+  mediated receipt / unredacted response is intentionally NOT asserted: on a production-gated
+  environment only the production slot returns them, reachable solely through the full promotion gate
+  (real AgentCore Batch Evaluation → attest → promote), which ``rollback.py`` and ``browser_widget.py``
+  exercise as their own first-class concern. OBO proves delegation, not the promotion gate.
 * **substituted-subject-denied** — a second valid workforce user's token is refused by the gateway
   custom-claim authorization rule (403 insufficient_scope — the live behaviour; the stale audited
   constant said 401), with a ``Bearer`` challenge and the bearer never echoed.
@@ -539,6 +543,16 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
         for r in all_receipts
         if (r.get("name") == "whoami" or str(r.get("name") or "").endswith("whoami")) and r.get("status") == "success"
     ]
+    # Option 1 acceptance bar (Omar, 2026-10-29): the mediated runtime path proves DELEGATED IDENTITY
+    # via identityEvidence (the runtime received the owner's workforce JWT and the gateway performed an
+    # ON_BEHALF_OF token exchange for that subject/issuer). The forgery-resistant whoami tool RECEIPT is
+    # asserted on the direct gateway path (_call_whoami -> MCP tools/call -> 200, principal matches).
+    # The mediated receipt + unredacted response are intentionally NOT asserted here: on a production-
+    # gated environment only the production slot returns them, and the production slot is reachable only
+    # through the full promotion gate (real AgentCore Batch Evaluation -> attest -> promote). The staging
+    # slot redacts output and drops receipts under evaluation-capture BY DESIGN. That gate is a first-
+    # class concern exercised by rollback.py and browser_widget.py; requiring it here would test the
+    # promotion gate, not OBO delegation.
     ok = (
         body.get("success") is True
         and body.get("slot") == "staging"
@@ -546,8 +560,6 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
         and evidence.get("subject") == claims["sub"]
         and evidence.get("issuer") == claims["iss"]
         and evidence.get("gateway_exchange") == "ON_BEHALF_OF_TOKEN_EXCHANGE"
-        and len(receipts) == 1
-        and str(claims["sub"]) in str(body.get("response") or "")
     )
     if not ok:
         diagnostics = {
@@ -567,8 +579,10 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
         "slot": "staging",
         "versionId": version_id,
         "identityEvidence": evidence,
-        "whoamiReceipt": receipts[0],
-        "responseContainsExactPrincipal": True,
+        # Staging under evaluation-capture may emit no receipt; the asserted whoami receipt lives on the
+        # direct gateway path. Surface it when present as extra evidence, but never require it here.
+        "whoamiReceipt": receipts[0] if receipts else None,
+        "delegatedIdentityProven": True,
     }
 
 
@@ -752,7 +766,7 @@ def _scenario(args: argparse.Namespace, artifact_dir: Path, claim: str) -> dict:
     if claim == "workforce-token-exchange-whoami":
         holds = (facet.get("directGatewayWhoami") or {}).get("status") == 200 and (
             facet.get("mediatedRuntime") or {}
-        ).get("responseContainsExactPrincipal") is True
+        ).get("delegatedIdentityProven") is True
     elif claim == "substituted-subject-denied":
         holds = facet.get("status") == SUBSTITUTED_GATEWAY_DENIAL_STATUS and facet.get("bearerEchoed") is False
     elif claim == "direct-runtime-bypass-denied":
