@@ -529,7 +529,7 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
     _backend = str(_ROOT / "backend")
     if _backend not in _sys.path:
         _sys.path.insert(0, _backend)
-    from tests.integration.conftest import DeploymentCleanupTracker, wait_for_deployment_terminal
+    from tests.integration.conftest import DeploymentCleanupTracker, RuntimeBudgetTracker, wait_for_deployment_terminal
 
     region, account_id = binding.region, str(args.account_id)
     token = uuid.uuid4().hex[:12]
@@ -561,6 +561,11 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             raise ScenarioFailed("owner and attacker resolved to the same subject")
         http = BearerSession(owner, observed.cloudfront_url)
         tracker = DeploymentCleanupTracker(http, logs_client=session.client("logs"))
+        # Production refuses a staging invoke with HTTP 429 unless an owner-bound agent budget
+        # covers the Runtime; the owner session is the invoker, so authorize it here and delete
+        # it in cleanup (same pattern as gateway_governance / rollback).
+        budgets = RuntimeBudgetTracker(http)
+        budgets.authorize(names["runtime_name"])
         record = None
         try:
             fixture_url = _create_fixture(session, names, region, account_id, client_secret)
@@ -625,6 +630,11 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
         finally:
             cleanup: dict[str, Any] = {}
             failed = "workforce-token-exchange-whoami" not in outcome or "direct-runtime-bypass-denied" not in outcome
+            try:
+                budgets.cleanup()
+                cleanup["budget"] = "deleted"
+            except Exception as error:  # noqa: BLE001
+                cleanup["budget_error"] = redact(str(error), *secrets_to_hide)
             try:
                 if record is not None:
                     tracker.cleanup(record)
