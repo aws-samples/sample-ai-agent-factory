@@ -545,7 +545,12 @@ def _dispatch(
 
 def test_the_real_dispatcher_blocks_unimplemented_scenarios_and_passes_exact_commit(evidence_project: dict, tmp_path):
     run_dir = _start(evidence_project, "dispatcher")
-    blocked = _dispatch(evidence_project, run_dir, "prompt-attack-blocked", tmp_path / "a", "--region", "eu-west-1")
+    # Every contract scenario now has a reviewed implementation, so the fail-closed path is
+    # probed with an id that has none by construction: the dispatcher must record blocked
+    # (never a pass) and say so, rather than guessing at an implementation.
+    blocked = _dispatch(
+        evidence_project, run_dir, "scenario-with-no-reviewed-implementation", tmp_path / "a", "--region", "eu-west-1"
+    )
     assert blocked.returncode == release_evidence.BLOCKED_EXIT_STATUS
     assert "no reviewed implementation" in blocked.stderr
     passed = _dispatch(evidence_project, run_dir, "source-commit-tree-and-contract-digests-match", tmp_path / "b")
