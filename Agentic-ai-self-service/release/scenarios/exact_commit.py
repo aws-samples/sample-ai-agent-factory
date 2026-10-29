@@ -131,6 +131,5 @@ def source_commit_tree_and_contract_digests_match(args: argparse.Namespace, arti
     report = _verify(run, recorder)
     write_json(artifact_dir / "report", report)
     if not report["passed"]:
-        failed = [item["check"] for item in report["checks"] if not item["match"]]
-        raise ScenarioFailed(f"exact-commit evidence does not match the repository: {failed}")
+        raise ScenarioFailed(f"exact-commit mismatch against the repository: {report['mismatches']}")
     return report
