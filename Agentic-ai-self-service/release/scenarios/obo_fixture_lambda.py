@@ -30,6 +30,7 @@ WORKFORCE_CLIENT_ID = os.environ["WORKFORCE_CLIENT_ID"]
 WORKFORCE_REGION = os.environ["WORKFORCE_REGION"]
 TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
 _SECRET: str | None = None
 
 
@@ -169,7 +170,11 @@ def _token_exchange(event: dict[str, Any]) -> dict[str, Any]:
         return _oauth_error(400, "invalid_request")
     if form.get("grant_type") != [TOKEN_EXCHANGE_GRANT]:
         return _oauth_error(400, "unsupported_grant_type")
-    if form.get("subject_token_type") not in (None, [ACCESS_TOKEN_TYPE]):
+    # RFC 8693 §3: the subject token may be presented as an access token or as a JWT. AgentCore
+    # Identity's documented TOKEN_EXCHANGE default is ``urn:ietf:params:oauth:token-type:jwt``
+    # (a Cognito access token *is* a JWT); any other type is still rejected, and the token is
+    # still validated against Cognito below regardless of the declared type.
+    if form.get("subject_token_type") not in (None, [ACCESS_TOKEN_TYPE], [JWT_TOKEN_TYPE]):
         return _oauth_error(400, "invalid_request")
     subject_tokens = form.get("subject_token") or []
     if len(subject_tokens) != 1:
