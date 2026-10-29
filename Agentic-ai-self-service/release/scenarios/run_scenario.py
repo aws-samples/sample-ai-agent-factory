@@ -126,6 +126,7 @@ def _register_live_families() -> None:
     """Live families import boto3 and the frontend toolchain; load them only when dispatching."""
     import audit_controls
     import browser_widget
+    import clean_clone
     import cost_controls
     import download_integrity
     import downloadable_cfn
@@ -207,6 +208,10 @@ def _register_live_families() -> None:
         exact_commit.source_commit_tree_and_contract_digests_match
     )
     SCENARIOS["deployed-cloudfront-ui-authenticated-cfn-python-downloads-verified"] = ui_downloads.ui_downloads_verified
+    SCENARIOS["independent-detached-clone-full-gates"] = clean_clone.independent_detached_clone_full_gates
+    SCENARIOS["downloadable-assets-independent-detached-clean-clone"] = (
+        clean_clone.downloadable_assets_independent_detached_clean_clone
+    )
     SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
         download_integrity.cfn_download_digest_verified
     )
