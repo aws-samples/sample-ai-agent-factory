@@ -142,6 +142,42 @@ def _safe_subject_hash(subject: str) -> str:
     return hashlib.sha256(subject.encode()).hexdigest()[:16]
 
 
+def _log_subject_rejection(token: str, error: Exception) -> None:
+    """Live-gate diagnostic for a refused subject token: the validation error plus claim *metadata*.
+
+    Never logs the token or any claim value that could identify the user: only match booleans
+    against the fixture's expected issuer/client, the token type and scope, the expiry delta, the
+    claim key names, and the hashed subject.
+    """
+    meta: dict[str, Any] = {
+        "event": "subject_rejected",
+        "reason": f"{type(error).__name__}: {str(error)[:140]}",
+        "segments": len(token.split(".")),
+    }
+    try:
+        claims = _decode_claims(token)
+    except Exception:  # noqa: BLE001
+        claims = {}
+    expiry = claims.get("exp")
+    subject = claims.get("sub")
+    meta.update(
+        {
+            "iss_match": claims.get("iss") == WORKFORCE_ISSUER,
+            "client_match": claims.get("client_id") == WORKFORCE_CLIENT_ID,
+            "token_use": str(claims.get("token_use") or "")[:16],
+            "scope": str(claims.get("scope") or "")[:160],
+            "exp_delta_s": (
+                int(float(expiry) - time.time())
+                if isinstance(expiry, (int, float)) and not isinstance(expiry, bool)
+                else None
+            ),
+            "subject_hash": _safe_subject_hash(subject) if isinstance(subject, str) and subject else None,
+            "claim_keys": sorted(str(key) for key in claims)[:24],
+        }
+    )
+    print(json.dumps(meta))
+
+
 def _discovery(event: dict[str, Any]) -> dict[str, Any]:
     base = _base_url(event)
     return _json_response(
@@ -181,7 +217,8 @@ def _token_exchange(event: dict[str, Any]) -> dict[str, Any]:
         return _oauth_error(400, "invalid_request")
     try:
         claims, _user = _validate_user_token(subject_tokens[0])
-    except Exception:
+    except Exception as error:  # noqa: BLE001
+        _log_subject_rejection(subject_tokens[0], error)
         return _oauth_error(401, "invalid_grant")
     subject = str(claims["sub"])
     print(json.dumps({"event": "token_exchange", "subjectHash": _safe_subject_hash(subject)}))
