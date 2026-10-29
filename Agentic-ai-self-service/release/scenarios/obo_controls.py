@@ -467,7 +467,9 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
     response = http.post(
         f"{http.base_url}/api/runtimes/{runtime_name}/slots/staging/invoke",
         json={
-            "input": "Call the whoami tool exactly once now and return only its principal field.",
+            # Customer-style wording: an instruction-shaped prompt ("Call X exactly once, return
+            # only Y") measurably suppressed tool use in the gateway-governance journey.
+            "input": "Please use the whoami tool and reply with the principal it returns.",
             "sessionId": f"obo-{uuid.uuid4()}",
         },
         timeout=180,
@@ -476,12 +478,11 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
         raise ScenarioFailed(f"mediated runtime invoke returned {response.status_code}: {response.text[:300]}")
     body = response.json()
     evidence = body.get("identityEvidence") or {}
+    all_receipts = [r for r in (body.get("toolReceipts") or []) if isinstance(r, dict)]
     receipts = [
         r
-        for r in (body.get("toolReceipts") or [])
-        if isinstance(r, dict)
-        and (r.get("name") == "whoami" or str(r.get("name") or "").endswith("whoami"))
-        and r.get("status") == "success"
+        for r in all_receipts
+        if (r.get("name") == "whoami" or str(r.get("name") or "").endswith("whoami")) and r.get("status") == "success"
     ]
     ok = (
         body.get("success") is True
@@ -494,7 +495,18 @@ def _mediated_runtime(http: Any, runtime_name: str, version_id: str, claims: dic
         and str(claims["sub"]) in str(body.get("response") or "")
     )
     if not ok:
-        raise ScenarioFailed(f"mediated runtime OBO evidence incomplete: evidence={evidence} receipts={len(receipts)}")
+        diagnostics = {
+            "keys": sorted(str(k) for k in body.keys()),
+            "success": body.get("success"),
+            "slot": body.get("slot"),
+            "versionMatches": body.get("versionId") == version_id,
+            "toolReceipts": [{"name": str(r.get("name")), "status": str(r.get("status"))} for r in all_receipts][:6],
+            "identityEvidenceKeys": sorted(str(k) for k in evidence.keys()),
+            "subjectMatches": evidence.get("subject") == claims["sub"],
+            "error": str(body.get("error") or "")[:200],
+            "response": str(body.get("response") or "")[:300],
+        }
+        raise ScenarioFailed("mediated runtime OBO evidence incomplete: " + json.dumps(diagnostics, default=str)[:1200])
     return {
         "status": 200,
         "slot": "staging",
@@ -603,6 +615,15 @@ def _journey(args: argparse.Namespace, binding: RunBinding, observed: ObservedSt
             tracker.bind_runtime(record, status["runtime_id"])
             outcome["runtime_id"] = str(status["runtime_id"])
             outcome["gateway_name"] = names["runtime_name"]
+            # The slot invoke delegates only when the stored deployment carries
+            # gateway_result.obo_required == True (delegated_identity.deployment_requires_obo);
+            # record what the deployment payload actually says so a missing marker is evidence.
+            gateway_result = status.get("gateway_result") if isinstance(status.get("gateway_result"), dict) else {}
+            outcome["deployment_obo_marker"] = {
+                "status_keys": sorted(str(k) for k in status.keys()),
+                "gateway_result_keys": sorted(str(k) for k in gateway_result.keys()),
+                "gateway_result_obo_required": gateway_result.get("obo_required"),
+            }
             runtime_arn, version_id = str(status["runtime_arn"]), str(status["version_id"])
             gateway_url, obo_required = _gateway_url(http, names["runtime_name"], status)
             outcome["gateway_config"] = {
