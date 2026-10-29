@@ -52,7 +52,7 @@ async function main() {
   const packageJson = requireText(input, "frontendPackageJson");
   const requireFromFrontend = createRequire(packageJson);
   const { Amplify } = requireFromFrontend("aws-amplify");
-  const { fetchAuthSession, signIn, signOut } = requireFromFrontend("aws-amplify/auth");
+  const { fetchAuthSession, signIn } = requireFromFrontend("aws-amplify/auth");
   const { cognitoUserPoolsTokenProvider } = requireFromFrontend("aws-amplify/auth/cognito");
   const amplifyVersion = requireFromFrontend("aws-amplify/package.json").version;
   const authVersion = requireFromFrontend("@aws-amplify/auth/package.json").version;
@@ -111,11 +111,12 @@ async function main() {
       }),
     );
   } finally {
-    try {
-      await signOut();
-    } finally {
-      await storage.clear();
-    }
+    // Deliberately no signOut(): Amplify's signOut() calls Cognito RevokeToken, which
+    // revokes the access token this process just emitted for every Cognito token-bearing
+    // API (GetUser included), so an on-behalf-of resource server validating the forwarded
+    // subject token rejects it as revoked. The token exists only in this process's memory
+    // store; deleting the synthetic user at teardown is what revokes it.
+    await storage.clear();
   }
 }
 
