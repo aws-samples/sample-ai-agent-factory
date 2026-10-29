@@ -93,7 +93,9 @@ def _verify_saved(kind: str, saved: dict[str, Any], *, region: str, log: Path) -
     receipt_archive = saved.get("receiptArchiveSha256")
     receipt_manifest = saved.get("receiptManifestSha256")
     if digest != saved.get("sha256") or digest != receipt_archive:
-        raise ScenarioFailed(f"{kind}: saved bytes {digest[:12]} disagree with the UI receipt {str(receipt_archive)[:12]}")
+        raise ScenarioFailed(
+            f"{kind}: saved bytes {digest[:12]} disagree with the UI receipt {str(receipt_archive)[:12]}"
+        )
     if not isinstance(receipt_manifest, str) or len(receipt_manifest) != 64:
         raise ScenarioFailed(f"{kind}: the UI rendered no EXPECTED_ARTIFACT_MANIFEST_SHA256 receipt")
     recipient = Path(tempfile.mkdtemp(prefix=f"acfpr-ui-{kind}-"))
@@ -147,24 +149,23 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
         for kind in ("cfn", "python"):
             saved = result.get(kind)
             if not isinstance(saved, dict):
-                raise ScenarioFailed(f"{kind}: the UI produced no download ({json.dumps(outcome['blocked_reasons'])[:300]})")
+                raise ScenarioFailed(
+                    f"{kind}: the UI produced no download ({json.dumps(outcome['blocked_reasons'])[:300]})"
+                )
             outcome[f"{kind}_download"] = _verify_saved(kind, saved, region=binding.region, log=log)
     write_json(artifacts / "journey-outcome.json", outcome)
     return outcome
 
 
 def _claim_holds(outcome: dict[str, Any]) -> bool:
-    return (
-        outcome.get("signed_in_through_ui") is True
-        and all(
-            (outcome.get(f"{kind}_download") or {}).get("verified") is True
-            and (outcome.get(f"{kind}_download") or {}).get("archive_sha256")
-            == (outcome.get(f"{kind}_download") or {}).get("receipt_archive_sha256")
-            and (outcome.get(f"{kind}_download") or {}).get("artifact_manifest_sha256")
-            == (outcome.get(f"{kind}_download") or {}).get("receipt_manifest_sha256")
-            and (outcome.get("export_calls") or {}).get(kind) == [200]
-            for kind in ("cfn", "python")
-        )
+    return outcome.get("signed_in_through_ui") is True and all(
+        (outcome.get(f"{kind}_download") or {}).get("verified") is True
+        and (outcome.get(f"{kind}_download") or {}).get("archive_sha256")
+        == (outcome.get(f"{kind}_download") or {}).get("receipt_archive_sha256")
+        and (outcome.get(f"{kind}_download") or {}).get("artifact_manifest_sha256")
+        == (outcome.get(f"{kind}_download") or {}).get("receipt_manifest_sha256")
+        and (outcome.get("export_calls") or {}).get(kind) == [200]
+        for kind in ("cfn", "python")
     )
 
 
