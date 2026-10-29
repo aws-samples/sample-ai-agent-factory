@@ -954,9 +954,16 @@ def invoke(payload, context=None):
     # invoke raised "requires one authenticated workforce JWT" although the header was signed,
     # sent and allowlisted.
     _lowered_headers = {{str(k).lower(): v for k, v in dict(request_headers).items()}}
+    # The SDK's request_headers carries only Authorization and the custom-prefixed headers it
+    # recognised; the documented way to read any allowlisted header is the underlying request's
+    # (case-insensitive) headers, so consult them before concluding the token is absent.
+    _raw_request = getattr(context, "request", None) if context is not None else None
+    _raw_headers = getattr(_raw_request, "headers", None)
+    _raw_token = _raw_headers.get(workforce_token_header) if hasattr(_raw_headers, "get") else None
     subject_token = str(
         request_headers.get(workforce_token_header)
         or _lowered_headers.get(workforce_token_header.lower())
+        or _raw_token
         or ""
     ).strip()
     obo_client = None
@@ -968,7 +975,14 @@ def invoke(payload, context=None):
                 or any(ch.isspace() for ch in subject_token)
                 or subject_token.count(".") != 2
             ):
-                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+                _seen_custom = sorted(str(k) for k in dict(request_headers).keys())
+                _seen_raw = sorted(
+                    {{str(k) for k in (_raw_headers.keys() if hasattr(_raw_headers, "keys") else [])}}
+                )
+                raise RuntimeError(
+                    "OBO invocation requires one authenticated workforce JWT"
+                    f" (forwarded custom header names: {{_seen_custom}}; request header names: {{_seen_raw}})"
+                )
             try:
                 _segment = subject_token.split(".")[1]
                 _segment += "=" * (-len(_segment) % 4)
@@ -2414,9 +2428,16 @@ def invoke(payload, context=None):
     # invoke raised "requires one authenticated workforce JWT" although the header was signed,
     # sent and allowlisted.
     _lowered_headers = {{str(k).lower(): v for k, v in dict(request_headers).items()}}
+    # The SDK's request_headers carries only Authorization and the custom-prefixed headers it
+    # recognised; the documented way to read any allowlisted header is the underlying request's
+    # (case-insensitive) headers, so consult them before concluding the token is absent.
+    _raw_request = getattr(context, "request", None) if context is not None else None
+    _raw_headers = getattr(_raw_request, "headers", None)
+    _raw_token = _raw_headers.get(workforce_token_header) if hasattr(_raw_headers, "get") else None
     subject_token = str(
         request_headers.get(workforce_token_header)
         or _lowered_headers.get(workforce_token_header.lower())
+        or _raw_token
         or ""
     ).strip()
     obo_client = None
@@ -2428,7 +2449,14 @@ def invoke(payload, context=None):
                 or any(ch.isspace() for ch in subject_token)
                 or subject_token.count(".") != 2
             ):
-                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+                _seen_custom = sorted(str(k) for k in dict(request_headers).keys())
+                _seen_raw = sorted(
+                    {{str(k) for k in (_raw_headers.keys() if hasattr(_raw_headers, "keys") else [])}}
+                )
+                raise RuntimeError(
+                    "OBO invocation requires one authenticated workforce JWT"
+                    f" (forwarded custom header names: {{_seen_custom}}; request header names: {{_seen_raw}})"
+                )
             try:
                 _segment = subject_token.split(".")[1]
                 _segment += "=" * (-len(_segment) % 4)

@@ -509,3 +509,44 @@ def test_generated_agent_resolves_the_workforce_header_regardless_of_wire_casing
     }
     exec(broken, namespace)  # noqa: S102
     assert namespace["subject_token"] == ""
+
+
+def test_generated_agent_falls_back_to_the_documented_request_headers():
+    """Found live (OBO journey on candidate 9e34c65): with the header signed, sent and allowlisted,
+    the agent still raised "requires one authenticated workforce JWT" -- the SDK's request_headers
+    did not carry it. The Runtime documentation names ``context.request.headers`` (the underlying
+    request, case-insensitive) as the way to read any allowlisted header, so the generated code
+    must consult it before concluding the token is absent."""
+    from types import SimpleNamespace
+
+    from app.services import code_generator
+    from starlette.datastructures import Headers
+
+    code = code_generator._generate_strands_gateway(
+        "Use the connector.", "us.anthropic.claude-sonnet-5", {}, region="us-east-1"
+    )
+    snippet = _generated_header_resolution(code)
+    raw = Headers({"x-amzn-bedrock-agentcore-runtime-custom-workforce-token": "tok", "host": "runtime"})
+    for sdk_headers in (None, {}, {"X-Amzn-Bedrock-AgentCore-Runtime-Custom-Other": "x"}):
+        context = SimpleNamespace(request_headers=sdk_headers, request=SimpleNamespace(headers=raw))
+        namespace = {"context": context, "globals": lambda: {}}
+        exec(snippet, namespace)  # noqa: S102 -- executing the project's own generated code under test
+        assert namespace["subject_token"] == "tok", sdk_headers
+    # Negative: an unrelated raw header never becomes the subject token, and a request without
+    # headers (or without a request object at all) still resolves to no token.
+    for request in (SimpleNamespace(headers=Headers({"x-api-key": "k"})), SimpleNamespace(), None):
+        namespace = {"context": SimpleNamespace(request_headers=None, request=request), "globals": lambda: {}}
+        exec(snippet, namespace)  # noqa: S102
+        assert namespace["subject_token"] == ""
+    # Mutation: without the fallback the documented source is ignored.
+    broken = snippet.replace("    or _raw_token\n", "")
+    assert broken != snippet
+    namespace = {
+        "context": SimpleNamespace(request_headers=None, request=SimpleNamespace(headers=raw)),
+        "globals": lambda: {},
+    }
+    exec(broken, namespace)  # noqa: S102
+    assert namespace["subject_token"] == ""
+    # The failure names the headers it saw (names only, never values) so a live refusal is diagnosable.
+    assert "forwarded custom header names" in code and "request header names" in code
+    assert "_seen_custom" in code and "_seen_raw" in code
