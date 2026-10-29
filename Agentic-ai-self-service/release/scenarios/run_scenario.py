@@ -130,6 +130,7 @@ def _register_live_families() -> None:
     import download_integrity
     import downloadable_cfn
     import downloadable_python
+    import exact_commit
     import gateway_governance
     import jit_controls
     import kms_controls
@@ -201,6 +202,9 @@ def _register_live_families() -> None:
     SCENARIOS["workforce-token-exchange-whoami"] = obo_controls.workforce_token_exchange_whoami
     SCENARIOS["substituted-subject-denied"] = obo_controls.substituted_subject_denied
     SCENARIOS["direct-runtime-bypass-denied"] = obo_controls.direct_runtime_bypass_denied
+    SCENARIOS["source-commit-tree-and-contract-digests-match"] = (
+        exact_commit.source_commit_tree_and_contract_digests_match
+    )
     SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
         download_integrity.cfn_download_digest_verified
     )
