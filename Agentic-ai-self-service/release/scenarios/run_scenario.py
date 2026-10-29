@@ -138,6 +138,7 @@ def _register_live_families() -> None:
     import regional_core
     import rollback
     import triggers
+    import ui_downloads
     import zero_residue
 
     SCENARIOS["core-runtime-gateway-identity-policy-evaluation"] = (
@@ -204,6 +205,9 @@ def _register_live_families() -> None:
     SCENARIOS["direct-runtime-bypass-denied"] = obo_controls.direct_runtime_bypass_denied
     SCENARIOS["source-commit-tree-and-contract-digests-match"] = (
         exact_commit.source_commit_tree_and_contract_digests_match
+    )
+    SCENARIOS["deployed-cloudfront-ui-authenticated-cfn-python-downloads-verified"] = (
+        ui_downloads.ui_downloads_verified
     )
     SCENARIOS["deployed-api-authenticated-cfn-download-archive-digest-manifest-verified"] = (
         download_integrity.cfn_download_digest_verified

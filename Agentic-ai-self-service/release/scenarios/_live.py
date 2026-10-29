@@ -567,6 +567,11 @@ class SyntheticUser:
     def token(self) -> str:
         return self._token
 
+    @property
+    def password(self) -> str:
+        """For drivers that sign in through the deployed UI form; always redacted via secrets()."""
+        return self._password
+
     def secrets(self) -> tuple[str, ...]:
         return (self._password, self._token, self.username)
 
