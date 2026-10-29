@@ -215,17 +215,39 @@ def _whoami(event: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _route(event: dict[str, Any], method: str, path: str) -> dict[str, Any]:
+    if method == "GET" and path == "/.well-known/openid-configuration":
+        return _discovery(event)
+    if method == "POST" and path == "/oauth2/token":
+        return _token_exchange(event)
+    if method == "GET" and path == "/whoami":
+        return _whoami(event)
+    return _oauth_error(404, "not_found")
+
+
+def _log_rejection(method: str, path: str, response: dict[str, Any]) -> None:
+    """Live-gate diagnostic: route, status and OAuth error code only -- never tokens, headers or bodies."""
+    status = int(response.get("statusCode") or 0)
+    if status == 200:
+        return
+    try:
+        error = str((json.loads(str(response.get("body") or "{}")) or {}).get("error") or "")
+    except (ValueError, AttributeError):
+        error = ""
+    print(
+        json.dumps(
+            {"event": "rejected", "method": method[:8], "path": path[:64], "status": status, "error": error[:64]}
+        )
+    )
+
+
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     request = (event.get("requestContext") or {}).get("http") or {}
     method = str(request.get("method") or "").upper()
     path = str(event.get("rawPath") or "/")
     try:
-        if method == "GET" and path == "/.well-known/openid-configuration":
-            return _discovery(event)
-        if method == "POST" and path == "/oauth2/token":
-            return _token_exchange(event)
-        if method == "GET" and path == "/whoami":
-            return _whoami(event)
+        response = _route(event, method, path)
     except Exception:
-        return _oauth_error(503, "temporarily_unavailable")
-    return _oauth_error(404, "not_found")
+        response = _oauth_error(503, "temporarily_unavailable")
+    _log_rejection(method, path, response)
+    return response
