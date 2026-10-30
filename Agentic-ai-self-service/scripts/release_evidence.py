@@ -868,8 +868,18 @@ def _verify_required_tools(required: dict[str, str], tools: dict[str, dict[str, 
             raise EvidenceError(f"Required tool {tool_name} must report version {expected}; got {reported!r}")
         versions[tool_name] = reported
         if record is None:
-            sha256, size = _secure_artifact_digest(Path(executable).resolve())
-            tools[placeholder] = {"path": str(Path(executable).resolve()), "sha256": sha256, "bytes": size}
+            resolved = Path(executable).resolve()
+            sha256, size = _secure_artifact_digest(resolved)
+            # Mirror _resolve_tools: a valid tool identity records the path AS INVOKED plus the
+            # resolved real binary. Omitting real_path made every PATH-resolved tool (cfn-lint,
+            # checkov, shellcheck, terraform) fail _valid_tool_record, which invalidated the
+            # whole export-gate receipt even though its commands passed.
+            tools[placeholder] = {
+                "path": str(executable),
+                "real_path": str(resolved),
+                "sha256": sha256,
+                "bytes": size,
+            }
     return versions
 
 
