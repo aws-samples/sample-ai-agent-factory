@@ -76,9 +76,29 @@ async function main() {
 
     const first = await page.evaluate(async () => {
       const el = document.getElementById("chat");
-      const r = await el.sendMessage("What is 2 plus 2? Answer in one short sentence.");
-      return { response: r.response, sessionId: r.sessionId, versionId: r.versionId };
+      try {
+        const r = await el.sendMessage("What is 2 plus 2? Answer in one short sentence.");
+        return { ok: true, response: r.response, sessionId: r.sessionId, versionId: r.versionId };
+      } catch (error) {
+        return {
+          ok: false,
+          errStatus: error.status ?? null,
+          errCode: error.code ?? null,
+          errName: error.name ?? null,
+          errMessage: String(error.message || error).slice(0, 400),
+          errBody: error.body ? String(error.body).slice(0, 400) : null,
+        };
+      }
     });
+    if (!first.ok) {
+      const invokeReqs = result.requests.filter((r) => r.isInvoke);
+      throw new Error(
+        "widget production-alias invoke failed: status=" + first.errStatus + " code=" + first.errCode +
+        " name=" + first.errName + " msg=" + first.errMessage + " body=" + first.errBody +
+        " invokeRequestCount=" + invokeReqs.length +
+        " lastInvoke=" + JSON.stringify(invokeReqs[invokeReqs.length - 1] || null).slice(0, 300),
+      );
+    }
     const second = await page.evaluate(async () => {
       const el = document.getElementById("chat");
       const r = await el.sendMessage("Now add 3 to that result and give only the number.");

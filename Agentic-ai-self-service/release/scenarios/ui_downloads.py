@@ -134,6 +134,12 @@ def _journey(binding: RunBinding, observed: ObservedStack, artifacts: Path) -> d
             "password": user.password,
             "downloadDir": str(downloads),
             "playwrightModule": str(playwright_module),
+            # Pin a template whose canvas is valid as seeded: the customer-support blueprint ships
+            # its gateway PRE-WIRED to four tool-node targets (get_order / get_customer / list_orders
+            # / process_refund), so the deploy canvas validates and the CFN/Python exports are
+            # enabled. The default first gallery card (web-search-agent) ships a gateway with NO
+            # connected tool nodes, so the product correctly blocks its download (invalid canvas).
+            "templateName": "Customer Support Agent (Blueprint)",
         }
         result = _run_driver(brief, artifacts, secrets)
         outcome["signed_in_through_ui"] = result.get("signedIn") is True

@@ -73,7 +73,9 @@ def _runtime_config(runtime_name: str) -> dict[str, Any]:
         "framework": "strands_agents",
         "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": (
-            "Answer ordinary factual questions concisely in one or two sentences. "
+            "You are a knowledgeable, helpful assistant. Answer the user's question directly, "
+            "accurately, and completely, in a clear well-structured explanation of two to four "
+            "sentences that fully resolves what they asked. "
             f"Always end every answer with this exact fixed closing marker, verbatim: {INERT_MARKER} "
             "Do not call external tools."
         ),
