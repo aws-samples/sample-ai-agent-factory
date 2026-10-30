@@ -867,19 +867,12 @@ def _verify_required_tools(required: dict[str, str], tools: dict[str, dict[str, 
         if not re.search(rf"(?<![0-9.]){re.escape(expected)}(?![0-9.])", reported):
             raise EvidenceError(f"Required tool {tool_name} must report version {expected}; got {reported!r}")
         versions[tool_name] = reported
-        if record is None:
-            resolved = Path(executable).resolve()
-            sha256, size = _secure_artifact_digest(resolved)
-            # Mirror _resolve_tools: a valid tool identity records the path AS INVOKED plus the
-            # resolved real binary. Omitting real_path made every PATH-resolved tool (cfn-lint,
-            # checkov, shellcheck, terraform) fail _valid_tool_record, which invalidated the
-            # whole export-gate receipt even though its commands passed.
-            tools[placeholder] = {
-                "path": str(executable),
-                "real_path": str(resolved),
-                "sha256": sha256,
-                "bytes": size,
-            }
+        # A required tool that is NOT a command placeholder (for export-gate: cfn-lint, checkov,
+        # terraform, shellcheck) is version-pinned here and recorded in tool_versions ONLY. It must
+        # not be inserted into `tools`: that map is validated against _TOOL_PLACEHOLDERS (see the
+        # event-load check), so any non-placeholder name there makes the whole receipt read as
+        # 'invalid tool identities'. Placeholder required tools (e.g. actionlint) are already in
+        # `tools` via _resolve_tools and keep their digest; only their version is verified above.
     return versions
 
 
