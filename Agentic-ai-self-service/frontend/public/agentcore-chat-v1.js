@@ -84,7 +84,7 @@ export class AgentCoreClientError extends Error {
 }
 
 export class AgentCoreClient {
-  constructor({ baseUrl, tokenProvider, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ baseUrl, tokenProvider, fetchImpl = globalThis.fetch?.bind(globalThis) } = {}) {
     this.baseUrl = canonicalBaseUrl(baseUrl);
     if (typeof tokenProvider !== 'function') {
       throw new TypeError('tokenProvider must be a function returning a short-lived access token');
@@ -192,7 +192,7 @@ export class AgentCoreChatElement extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this._tokenProvider = null;
-    this._fetchImpl = globalThis.fetch;
+    this._fetchImpl = globalThis.fetch?.bind(globalThis);
     this._sessionId = null;
     this._messages = [];
     this._busy = false;
