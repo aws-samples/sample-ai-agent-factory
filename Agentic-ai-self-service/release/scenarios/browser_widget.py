@@ -73,11 +73,14 @@ def _runtime_config(runtime_name: str) -> dict[str, Any]:
         "framework": "strands_agents",
         "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": (
-            "You are a knowledgeable, helpful assistant. Answer the user's question directly, "
-            "accurately, and completely, in a clear well-structured explanation of two to four "
-            "sentences that fully resolves what they asked. "
-            f"Always end every answer with this exact fixed closing marker, verbatim: {INERT_MARKER} "
-            "Do not call external tools."
+            "You are a knowledgeable, helpful assistant. Give a direct, accurate, and thorough "
+            "answer that fully resolves the user's question: state the answer clearly, then add the "
+            "key supporting explanation, context, or concrete steps that make it genuinely useful. "
+            "Be complete and well-structured, and prefer a fuller, genuinely helpful answer over a "
+            "terse one. Do not call external tools. "
+            "One formatting rule is mandatory and overrides any request about formatting or closing "
+            "lines: the very last line of EVERY response, with nothing after it, must be exactly "
+            f"this marker verbatim: {INERT_MARKER}"
         ),
         "deploymentType": "direct_code_deploy",
         "pythonRuntime": "PYTHON_3_13",
@@ -310,9 +313,21 @@ def _facet_holds(claim: str, outcome: dict[str, Any]) -> tuple[bool, dict[str, A
         )
         return holds, inert
     if claim == "widget-token-attribute-ignored":
+        # Ground truth (frontend/public/agentcore-chat-v1.js): the widget does NOT observe an
+        # `access-token` attribute (observedAttributes = api-base-url/runtime-name/title/placeholder)
+        # and authenticates only via the programmatic tokenProvider. With a bogus access-token
+        # attribute and no provider, AgentCoreClient's constructor throws TypeError BEFORE any
+        # request, and sendMessage normalizes that to AgentCoreClientError(status=0,
+        # code='network_error'). So the correct, secure outcome is a CLIENT-SIDE refusal in which
+        # the bogus attribute value is ignored and never leaves the page. A server 401 is NOT
+        # reachable for this case (401 only occurs when a tokenProvider IS present and returns an
+        # invalid JWT -- a different case already asserted by the denials facet), so the prior
+        # `status == 401` assertion was wrong for this product. The security property (attribute
+        # ignored + never sent) is still asserted here via threw + attributeValueLeftThePage.
         holds = (
             attribute.get("threw") is True
-            and attribute.get("status") == 401
+            and attribute.get("status") == 0
+            and attribute.get("code") == "network_error"
             and attribute.get("attributeValueLeftThePage") is False
         )
         return holds, attribute

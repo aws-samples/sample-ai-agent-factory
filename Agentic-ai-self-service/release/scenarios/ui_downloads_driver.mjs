@@ -84,8 +84,13 @@ async function captureDownload(page, button, downloadDir, label, secrets) {
   let archiveReceipt = null;
   let manifestReceipt = null;
   let text = "";
+  // Read the receipt from THIS artifact's own DownloadIntegrity block
+  // (data-testid="<label>-download-integrity"), not the whole panel: after the CFN download the
+  // panel already shows CFN's receipt, so scanning panelText for the first "archive SHA-256" would
+  // return CFN's digest and wrongly compare it against the Python bytes.
+  const integrity = page.locator(`[data-testid="${label}-download-integrity"]`);
   while (Date.now() < deadline && (!archiveReceipt || !manifestReceipt)) {
-    text = await panelText(page);
+    text = (await integrity.count()) ? await integrity.first().innerText() : "";
     archiveReceipt = archiveReceipt || digestAfter(text, "archive SHA-256");
     manifestReceipt = manifestReceipt || digestAfter(text, "EXPECTED_ARTIFACT_MANIFEST_SHA256=");
     if (!archiveReceipt || !manifestReceipt) await new Promise((resolve) => setTimeout(resolve, 1000));

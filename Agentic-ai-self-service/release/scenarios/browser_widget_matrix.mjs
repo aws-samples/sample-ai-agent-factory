@@ -115,14 +115,29 @@ async function main() {
     };
 
     // Facet: HTML/script-shaped model output renders as inert text.
+    // Invoke on a FRESH element doing its FIRST turn with a benign question. The runtime's
+    // prompt_attack:HIGH guardrail evaluates the accumulated multi-turn history, so a later turn on
+    // the shared element (which carries the prior Q&A plus the HTML marker as history) trips the
+    // filter and the backend returns Strands' "[Assistant output redacted.]", redacting the very
+    // HTML this facet must render. A fresh first turn (no history) reliably returns the unredacted
+    // marker -- the systemPrompt appends it to every answer -- so the inert-rendering property is
+    // actually exercised. (RELEASE_READINESS_STATUS.md: the response TEXT is guardrail/path-dependent;
+    // here we make the ONE turn that must carry HTML a clean first turn rather than weaken any check.)
     const inert = await page.evaluate(async (marker) => {
-      const el = document.getElementById("chat");
-      const r = await el.sendMessage("Please end your answer with your fixed closing marker.");
+      const src = document.getElementById("chat");
+      const el = document.createElement("agentcore-chat");
+      el.id = "chat-inert";
+      el.setAttribute("api-base-url", src.getAttribute("api-base-url"));
+      el.setAttribute("runtime-name", src.getAttribute("runtime-name"));
+      document.body.append(el);
+      el.tokenProvider = src.tokenProvider;
+      const r = await el.sendMessage("What is 2 plus 2? Answer in one short sentence.");
       const log = el.shadowRoot.querySelector('[role="log"]');
       const nodes = [...log.querySelectorAll("*")];
       const last = nodes.filter((n) => n.textContent && n.textContent.includes(marker.slice(0, 8)));
       return {
         responseIncludesMarker: r.response.includes(marker),
+        responseExcerpt: r.response.slice(0, 300),
         logTextIncludesMarker: log.textContent.includes(marker),
         elementTagsInLog: nodes.map((n) => n.tagName.toLowerCase()),
         markerElementChildren: last.map((n) => n.children.length),
@@ -132,7 +147,8 @@ async function main() {
     }, brief.inertMarker);
     result.facets.inertRendering = inert;
 
-    // Facet: an access-token attribute is ignored -- no provider means 401 and the attribute value never leaves the page.
+    // Facet: an access-token attribute is ignored -- the widget has no provider, so it refuses
+    // client-side (AgentCoreClientError status 0 / network_error) and the attribute never leaves the page.
     const attributeProbe = await page.evaluate(async (token) => {
       const el = document.createElement("agentcore-chat");
       el.id = "chat-attr";
