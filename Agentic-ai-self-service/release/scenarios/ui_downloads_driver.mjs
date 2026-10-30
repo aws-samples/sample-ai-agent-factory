@@ -176,41 +176,11 @@ async function main() {
     await deploy.first().click();
     await page.locator('[aria-labelledby="deploy-panel-title"]').first().waitFor({ state: "visible", timeout: 30_000 });
 
-    // 3b. Supply every required resource tag. Required tags render a "*" marker
-    // (span.text-amber-700) inside their <label>, with the value <input> nested in the same label;
-    // filling any non-empty value resolves missingRequired (presence, not a specific value). Capture
-    // diagnostics of all labeled inputs so a miss explains itself in the thrown error.
-    const tagValue = String(brief.tagValue || "acf-release-cert");
-    // Resource-tag inputs render only AFTER the async tag-governance fetch (/api/settings/tags)
-    // resolves, which happens after the panel opens — filling immediately finds none. Wait for the
-    // tag-policy labels (their key contains ':', e.g. platform:application) to render, then fill each.
-    let filledTags = 0;
-    const tagLabels = page.locator("label").filter({ hasText: /[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+/ });
-    try {
-      await tagLabels.first().waitFor({ state: "visible", timeout: 60_000 });
-    } catch {
-      /* no org tag policies configured in this environment; leave filledTags = 0 */
-    }
-    const tagCount = await tagLabels.count();
-    for (let i = 0; i < tagCount; i += 1) {
-      const inp = tagLabels.nth(i).locator('input[type="text"]');
-      if (await inp.count()) {
-        await inp.first().fill(tagValue);
-        filledTags += 1;
-      }
-    }
-    result.requiredTagsFilled = filledTags;
-    result.tagDiagnostics = [];
-    const labeledInputs = page.locator("label:has(input)");
-    const li = await labeledInputs.count();
-    for (let i = 0; i < Math.min(li, 30); i += 1) {
-      const inp = labeledInputs.nth(i).locator("input").first();
-      result.tagDiagnostics.push({
-        lab: (await labeledInputs.nth(i).innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 50),
-        ph: await inp.getAttribute("placeholder").catch(() => null),
-        val: await inp.inputValue().catch(() => ""),
-      });
-    }
+    // Resource tags are intentionally NOT filled. The product blocks a standalone Python export
+    // whenever any resource tag or naming profile is set (DeployPanel pythonExportBlockedReason —
+    // a standalone Python agent cannot honour CloudFormation resource tags), and the CloudFormation
+    // download does not require tags (canDownloadCfn has no tag check). Filling tags would disable
+    // the "Export as Python" control, which this scenario must exercise.
 
     // 4. Both download controls, each gated by the panel's own governance checks.
     const cfnButton = page.getByRole("button", { name: /Download CloudFormation Template/ });
@@ -218,8 +188,7 @@ async function main() {
       const cfnTitle = (await cfnButton.first().getAttribute("title").catch(() => "")) || "";
       result.blockedReasons.cfn = redact(cfnTitle, secrets).slice(0, 400);
       throw new Error(
-        "the CloudFormation download control never enabled: TITLE=[" + redact(cfnTitle, secrets) +
-        "] filled=" + result.requiredTagsFilled + " diag=" + JSON.stringify(result.tagDiagnostics).slice(0, 700),
+        "the CloudFormation download control never enabled: TITLE=[" + redact(cfnTitle, secrets) + "]",
       );
     }
     result.cfn = await captureDownload(page, cfnButton, downloadDir, "cfn", secrets);

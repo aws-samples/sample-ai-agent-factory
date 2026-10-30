@@ -843,8 +843,13 @@ def _tool_version_line(executable: str, cwd: Path) -> str:
     except (OSError, subprocess.SubprocessError) as exc:
         raise EvidenceError(f"Could not read the version of {executable}") from exc
     text = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    return first[:200]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # Prefer the first line carrying a version-like token (major.minor[.patch]). Some tools print a
+    # banner on line 1 and the version on a later line (e.g. shellcheck: "ShellCheck - shell script
+    # analysis tool" then "version: 0.11.0"); taking only line 1 would miss the pinned version. Fall
+    # back to the first non-empty line when no version-like token is present.
+    version_line = next((ln for ln in lines if re.search(r"\d+\.\d+", ln)), "")
+    return (version_line or (lines[0] if lines else ""))[:200]
 
 
 def _verify_required_tools(required: dict[str, str], tools: dict[str, dict[str, Any]], cwd: Path) -> dict[str, str]:
