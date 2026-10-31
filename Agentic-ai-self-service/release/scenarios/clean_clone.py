@@ -13,7 +13,11 @@ Implements release/README.md "Independent clean-clone verification" as two scena
   all selected Regions) must be **byte-identical** to the primary run's artifacts.
 * **downloadable-assets-independent-detached-clean-clone** — the same detached clone, lock-only
   backend environment, re-running the ``export-gate`` suite (the downloadable-assets offline
-  evidence) plus the ``backend-package`` rebuild identity.
+  evidence) plus the ``backend-package`` **wheel** rebuild identity. This environment installs
+  only the committed locks and does not run the bundle rebuild scripts, so the bundle-free wheel
+  (``packages = ["src/app"]``) is the lock-only-reproducible artifact compared here; the full
+  wheel+sdist byte-identity (``agentcore-deps/*.zip`` included) is proven by the full-gates
+  scenario above, which does rebuild the bundles.
 
 Both are offline (no account, no Region). The report lists the clone identity, each step's exit
 status, each suite's recorder outcome and every artifact digest comparison; any mismatch, failed
@@ -115,6 +119,34 @@ def _primary_artifacts(run_dir: Path, suite_id: str, marker: str) -> Path:
     if not candidates:
         raise ScenarioBlocked(f"the primary run has no {suite_id} artifacts ({marker}) yet; run that suite first")
     return sorted(candidates, key=lambda p: len(str(p)))[0].parent
+
+
+def _suite_environment(suite: dict[str, Any], tools: dict[str, str], workspace: Path) -> dict[str, str]:
+    """Environment for one clone suite: PATH-class basics plus the offline values each suite's
+    ``required_environment`` needs. The recorder strips the clean_clone scenario's own environment
+    (it is offline), so the suites that declare required_environment -- frontend (VITE_*), export-gate
+    (CI), strict-synth (CDK_PYTHON/CDK_HOME/TMPDIR) -- must be given the same offline fixtures the
+    primary cert uses, with CDK paths pointed at the clone.
+    """
+    env = {**os.environ}
+    cdk_home = workspace / "cdk-home"
+    tmpdir = workspace / "tmp"
+    cdk_home.mkdir(exist_ok=True)
+    tmpdir.mkdir(exist_ok=True)
+    offline_values = {
+        "CI": "true",
+        "VITE_API_BASE_URL": "https://frontend.example.invalid",
+        "VITE_AWS_REGION": "us-east-1",
+        "VITE_COGNITO_USER_POOL_ID": "us-east-1_CiFixture",
+        "VITE_COGNITO_CLIENT_ID": "ci-fixture-client",
+        "CDK_PYTHON": tools.get("infra_python", ""),
+        "CDK_HOME": str(cdk_home),
+        "TMPDIR": str(tmpdir),
+    }
+    for name in suite.get("required_environment") or []:
+        if offline_values.get(name):
+            env[name] = offline_values[name]
+    return env
 
 
 def _which(name: str) -> str:
@@ -260,7 +292,11 @@ def _recorder_run(
         for name in sorted(wanted):
             cmd += ["--tool", f"{name}={tools[name]}"]
         results[suite["id"]] = _run(
-            cmd, cwd=project, log=log, timeout=int(suite.get("timeout_seconds") or STEP_TIMEOUT) + 300
+            cmd,
+            cwd=project,
+            log=log,
+            env=_suite_environment(suite, tools, out_root.parent),
+            timeout=int(suite.get("timeout_seconds") or STEP_TIMEOUT) + 300,
         )
     status = subprocess.run(
         [python, "-I", RECORDER, "status", "--run-dir", str(run_dir)],
@@ -320,13 +356,25 @@ def _journey(args: argparse.Namespace, artifacts: Path, *, full: bool) -> dict[s
         recorded = _recorder_run(project, suites, environment["tools"], workspace / "evidence", log)
         outcome["recorder"] = recorded
         clone_run = Path(recorded["run_dir"])
+        # Full-gates rebuilds the AgentCore bundles (install-agentcore-deps.sh runs in
+        # _environments), so the clone's sdist carries agentcore-deps/*.zip and wheel+sdist are
+        # both compared byte-for-byte. The downloadable scenario installs a lock-only backend
+        # environment and deliberately does NOT build the bundles, so its sdist would omit them
+        # and could never match the primary's bundle-inclusive sdist. There the wheel
+        # (packages=["src/app"], bundle-free) is the lock-only-reproducible artifact and is what
+        # the identity check covers; the wheel+sdist byte-identity (bundles included) is proven by
+        # the full-gates scenario.
+        pkg_patterns = ("*.whl", "*.tar.gz") if full else ("*.whl",)
+        pkg_label = (
+            "backend-package (wheel + sdist)" if full else "backend-package (wheel; lock-only env builds no bundles)"
+        )
         comparisons = [
             _compare(
-                "backend-package (wheel + sdist)",
-                _digest_tree(primary_dist / "backend-dist", ("*.whl", "*.tar.gz")),
+                pkg_label,
+                _digest_tree(primary_dist / "backend-dist", pkg_patterns),
                 _digest_tree(
                     _primary_artifacts(clone_run, "backend-package", "backend-dist") / "backend-dist",
-                    ("*.whl", "*.tar.gz"),
+                    pkg_patterns,
                 ),
             )
         ]
