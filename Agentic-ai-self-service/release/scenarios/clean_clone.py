@@ -93,8 +93,25 @@ def _digest_tree(root: Path, patterns: tuple[str, ...]) -> dict[str, str]:
 
 
 def _primary_artifacts(run_dir: Path, suite_id: str, marker: str) -> Path:
-    """The primary run's artifact root for ``suite_id`` (identified by a file/dir it must contain)."""
-    candidates = [p for p in run_dir.rglob(marker) if suite_id in str(p.relative_to(run_dir))]
+    """The primary run's artifact root for ``suite_id`` (identified by a file/dir it must contain).
+
+    Artifact directories are named by event id (``event-<uuid>``), not by suite id, so the suite is
+    resolved from the recorded events (each carries its ``suite_id`` and ``status``) and the marker
+    is then located under that suite's passing event(s).
+    """
+    event_ids = []
+    for event_file in sorted((run_dir / "events").glob("event-*.json")):
+        try:
+            event = json.loads(event_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            event.get("suite_id") == suite_id
+            and event.get("status") == "pass"
+            and isinstance(event.get("event_id"), str)
+        ):
+            event_ids.append(event["event_id"])
+    candidates = [p for eid in event_ids for p in (run_dir / "artifacts" / eid).rglob(marker)]
     if not candidates:
         raise ScenarioBlocked(f"the primary run has no {suite_id} artifacts ({marker}) yet; run that suite first")
     return sorted(candidates, key=lambda p: len(str(p)))[0].parent
@@ -108,11 +125,14 @@ def _which(name: str) -> str:
 
 
 def _suite_placeholders(suite: dict[str, Any]) -> set[str]:
+    # Only the command's tool placeholders are passed as --tool. required_tools that are NOT command
+    # placeholders (detect-secrets-hook, cfn-lint, checkov, terraform, shellcheck) are version-pinned
+    # by the recorder from PATH (shutil.which) and MUST NOT be passed as --tool -- the recorder's
+    # tool map is validated against its _TOOL_PLACEHOLDERS and rejects any other name.
     names: set[str] = set()
     for command in suite.get("commands") or []:
         for token in command:
             names.update(PLACEHOLDER.findall(str(token)))
-    names.update(str(k) for k in (suite.get("required_tools") or {}).keys())
     return names - RECORDER_PLACEHOLDERS
 
 

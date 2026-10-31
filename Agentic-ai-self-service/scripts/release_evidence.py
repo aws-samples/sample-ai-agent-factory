@@ -83,7 +83,12 @@ _LIVE_PASSTHROUGH_ENVIRONMENT = (
     "AWS_STS_REGIONAL_ENDPOINTS",
 )
 _MAX_ARTIFACT_FILES = 20_000
-_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
+# Total bytes of one suite/scenario artifact tree. strict-synth archives one cdk.out per release
+# Region, each embedding the real Lambda/AgentCore bundles (~200 MiB), so a seven-Region tree is
+# ~1.5 GiB of legitimate evidence. The cap is a runaway backstop, not a reason to synth against
+# empty bundles -- empty bundles break the infra ephemeral-storage-fit tests and the clean-clone
+# byte-identical synth comparison. The per-file cap in _secure_artifact_digest stays at 1 GiB.
+_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_JUNIT_BYTES = 64 * 1024 * 1024
 _PROVENANCE_LABEL = "provenance"
 _PROVENANCE_REQUIRED_KEYS = frozenset({"account_id", "region", "stack_id", "deployed_commit", "deployed_project_tree"})
@@ -1053,7 +1058,9 @@ def _artifact_tree(root: Path, label: str) -> dict[str, Any]:
         sha256, size = _secure_artifact_digest(path)
         total += size
         if total > _MAX_ARTIFACT_BYTES:
-            raise EvidenceError(f"Artifact tree {label} exceeds the 1 GiB bound")
+            raise EvidenceError(
+                f"Artifact tree {label} exceeds the {_MAX_ARTIFACT_BYTES // (1024 * 1024 * 1024)} GiB bound"
+            )
         rows.append({"path": path.relative_to(root).as_posix(), "sha256": sha256, "bytes": size})
     return {"label": label, "type": "tree", "sha256": _digest(rows), "bytes": total, "files": len(rows)}
 
