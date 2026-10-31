@@ -206,6 +206,15 @@ def _environments(project: Path, *, full: bool, log: Path) -> dict[str, Any]:
         steps["infra venv"] = _run(
             ["python3", "-m", "venv", str(project / "infra" / ".venv")], cwd=project / "infra", log=log
         )
+        # Install the clone's infra env from the committed requirements. A hashed lock pins
+        # hermetically with --require-hashes. Otherwise the requirements are a top-level pin list
+        # (aws-cdk-lib/constructs/cdk-nag ==) whose transitive deps (jsii, publication, typeguard,
+        # ...) must still be resolved -- NOT --no-deps, which leaves `import aws_cdk`, and therefore
+        # `cdk synth`, broken in the clone. The strict-synth template/manifest output is a function
+        # of the exact-pinned CDK libraries, not of the resolved transitive plumbing, so it stays
+        # byte-identical to the primary.
+        infra_requirements = project / "infra" / "requirements.txt"
+        infra_pip_flags = ["--require-hashes"] if _hashed(infra_requirements) else []
         steps["infra pip (locks)"] = _run(
             [
                 str(infra_python),
@@ -213,7 +222,7 @@ def _environments(project: Path, *, full: bool, log: Path) -> dict[str, Any]:
                 "pip",
                 "install",
                 "--quiet",
-                "--require-hashes" if _hashed(project / "infra" / "requirements.txt") else "--no-deps",
+                *infra_pip_flags,
                 "-r",
                 "requirements.txt",
                 "-r",
