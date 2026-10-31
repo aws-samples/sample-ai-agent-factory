@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import re
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -1121,28 +1122,39 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
         },
     )
     captured: dict[str, Any] = {"post_count": 0}
+    # Faithfully simulate the server's atomic, idempotent webhook ingestion so the contract holds
+    # under the helper's concurrent "enqueue-once under contention" probe: the FIRST delivery of a
+    # given id is fresh, identical replays are duplicates, and the same id with a different payload
+    # conflicts. A lock makes the check-and-record atomic across _fire_signed_webhook's eight
+    # parallel posts, exactly as the production conditional write does.
+    seen_payloads: dict[str, bytes] = {}
+    lock = threading.Lock()
 
     def post(url: str, *, data: bytes, headers: dict[str, str], timeout: int):
-        captured["post_count"] += 1
-        captured.update(
-            {
-                "url": url,
-                "data": data,
-                "headers": headers,
-                "timeout": timeout,
-            }
-        )
-        if captured["post_count"] == 3:
-            return _response(
-                409,
-                detail="Webhook delivery ID was already used for a different payload",
-            )
+        delivery_id = headers["X-AgentCore-Delivery-Id"]
+        with lock:
+            captured["post_count"] += 1
+            # Capture the first post only; the signature / no-bearer-token assertions below are
+            # about the initial signed delivery, not the later concurrent ones.
+            if captured["post_count"] == 1:
+                captured.update({"url": url, "data": data, "headers": headers, "timeout": timeout})
+            first_payload = seen_payloads.get(delivery_id)
+            if first_payload is None:
+                seen_payloads[delivery_id] = data
+                is_duplicate = False
+            elif first_payload == data:
+                is_duplicate = True
+            else:
+                return _response(
+                    409,
+                    detail="Webhook delivery ID was already used for a different payload",
+                )
         return _response(
             202,
             accepted=True,
-            duplicate=captured["post_count"] > 1,
+            duplicate=is_duplicate,
             trigger_id="trigger-2",
-            delivery_id=headers["X-AgentCore-Delivery-Id"],
+            delivery_id=delivery_id,
         )
 
     monkeypatch.setattr(trigger_matrix.requests, "post", post)
@@ -1166,7 +1178,8 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
     )
     assert headers["X-AgentCore-Signature"] == expected
     assert "Authorization" not in headers
-    assert captured["post_count"] == 3
+    # 3 sequential posts (fresh, replay, conflict) + 8 concurrent enqueue-once posts.
+    assert captured["post_count"] == 11
     assert captured["url"] == ("https://product.example.test/hooks/orders_agent/trigger-2")
 
 
