@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -132,6 +133,15 @@ _CRON_RE = re.compile(
 
 # Cap the serialized event pattern so a tenant can't store an oversized blob.
 _MAX_PATTERN_BYTES = 4096
+
+# Enqueue-once under contention: when a concurrent signed delivery of the SAME id and body finds
+# another request mid-claim (CLAIMING, not yet QUEUED), wait briefly for that claimant to reach a
+# durable QUEUED state (then this request is the idempotent duplicate) or for its lease to lapse
+# (then this request takes the claim over) instead of rejecting an identical payload as a conflict.
+# The budget (attempts x interval) stays well under a webhook sender's request timeout; only after
+# it is spent do we return 409 Retry-After. A genuinely different body is still an immediate 409.
+WEBHOOK_INGRESS_BUSY_MAX_ATTEMPTS = 48
+WEBHOOK_INGRESS_BUSY_RETRY_SECONDS = 0.25
 
 
 def _validate_runtime_name(name: str) -> str:
@@ -896,48 +906,58 @@ async def receive_webhook(
                 detail="Webhook audit evidence is unavailable; delivery was not queued",
             ) from exc
 
-    try:
-        ingress_claim = store.acquire_webhook_ingress(
-            trigger=trigger,
-            delivery_id=delivery_id,
-            payload_sha256=hashlib.sha256(body).hexdigest(),
-            lease_seconds=WEBHOOK_INGRESS_LEASE_SECONDS,
-            retention_seconds=TRIGGER_DELIVERY_RETENTION_SECONDS,
-        )
-    except TriggerDeliveryInactive:
-        _record_webhook_outcome_best_effort(
-            trigger,
-            runtime_name=runtime_name,
-            trigger_id=trigger_id,
-            status_code=401,
-            correlation_id=correlation_id,
-        )
-        raise HTTPException(status_code=401, detail="Webhook authentication failed") from None
-    except WebhookIngressConflict:
-        _record_webhook_outcome_best_effort(
-            trigger,
-            runtime_name=runtime_name,
-            trigger_id=trigger_id,
-            status_code=409,
-            correlation_id=correlation_id,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail="Webhook delivery ID was already used for a different payload",
-        ) from None
-    except WebhookIngressBusy:
-        _record_webhook_outcome_best_effort(
-            trigger,
-            runtime_name=runtime_name,
-            trigger_id=trigger_id,
-            status_code=409,
-            correlation_id=correlation_id,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail="Webhook delivery is already being accepted; retry shortly",
-            headers={"Retry-After": "1"},
-        ) from None
+    ingress_busy_attempts = 0
+    while True:
+        try:
+            ingress_claim = store.acquire_webhook_ingress(
+                trigger=trigger,
+                delivery_id=delivery_id,
+                payload_sha256=hashlib.sha256(body).hexdigest(),
+                lease_seconds=WEBHOOK_INGRESS_LEASE_SECONDS,
+                retention_seconds=TRIGGER_DELIVERY_RETENTION_SECONDS,
+            )
+            break
+        except TriggerDeliveryInactive:
+            _record_webhook_outcome_best_effort(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                status_code=401,
+                correlation_id=correlation_id,
+            )
+            raise HTTPException(status_code=401, detail="Webhook authentication failed") from None
+        except WebhookIngressConflict:
+            _record_webhook_outcome_best_effort(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                status_code=409,
+                correlation_id=correlation_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Webhook delivery ID was already used for a different payload",
+            ) from None
+        except WebhookIngressBusy:
+            # Same id and body as an in-flight claim: this is the idempotent duplicate, not a
+            # conflict. Wait for the claimant to durably reach QUEUED (acquire then returns None
+            # and we record the duplicate below) or for its lease to lapse (acquire then takes the
+            # claim over). Only once the bounded budget is spent do we ask the sender to retry.
+            ingress_busy_attempts += 1
+            if ingress_busy_attempts >= WEBHOOK_INGRESS_BUSY_MAX_ATTEMPTS:
+                _record_webhook_outcome_best_effort(
+                    trigger,
+                    runtime_name=runtime_name,
+                    trigger_id=trigger_id,
+                    status_code=409,
+                    correlation_id=correlation_id,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="Webhook delivery is already being accepted; retry shortly",
+                    headers={"Retry-After": "1"},
+                ) from None
+            time.sleep(WEBHOOK_INGRESS_BUSY_RETRY_SECONDS)
 
     if ingress_claim is None:
         _record_webhook_outcome_best_effort(

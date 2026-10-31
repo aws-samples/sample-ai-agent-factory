@@ -148,8 +148,55 @@ def test_known_enqueue_failure_releases_ingress_for_retry(monkeypatch):
 
 
 @mock_aws
-def test_concurrent_ingress_returns_retryable_conflict(monkeypatch):
+def test_concurrent_identical_ingress_resolves_to_duplicate(monkeypatch):
+    # Enqueue-once under contention: a concurrent delivery of the SAME id and body, arriving while
+    # another request already holds the claim, must resolve to the idempotent duplicate (202) once
+    # that claimant durably reaches QUEUED -- never a 409 conflict.
     monkeypatch.setenv("ENVIRONMENT", "dev")
+    store = _store()
+    trigger = store.get(RUNTIME_NAME, TRIGGER_ID, consistent=True)
+    assert trigger is not None
+    claim = store.acquire_webhook_ingress(
+        trigger=trigger,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",  # pragma: allowlist secret
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=100,
+    )
+    assert claim is not None
+    # The in-flight claimant durably enqueues and marks the delivery QUEUED.
+    store.complete_webhook_ingress(claim, retention_seconds=86_400, now=100)
+    enqueue = MagicMock()
+    patches = _route_patches(store, enqueue)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patch(
+            "app.services.trigger_store.time.time",
+            return_value=101,
+        ),
+    ):
+        response = _client().post(
+            f"/hooks/{RUNTIME_NAME}/{TRIGGER_ID}",
+            content=b"{}",
+            headers=_headers(),
+        )
+
+    assert response.status_code == 202
+    assert response.json()["duplicate"] is True
+    enqueue.assert_not_called()
+
+
+@mock_aws
+def test_concurrent_ingress_returns_retryable_conflict_only_after_budget(monkeypatch):
+    # When the in-flight claimant never reaches QUEUED and its lease has not lapsed, the bounded
+    # wait is spent and only then do we return 409 Retry-After so the sender retries.
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.setattr("app.routers.triggers.WEBHOOK_INGRESS_BUSY_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr("app.routers.triggers.WEBHOOK_INGRESS_BUSY_RETRY_SECONDS", 0)
     store = _store()
     trigger = store.get(RUNTIME_NAME, TRIGGER_ID, consistent=True)
     assert trigger is not None

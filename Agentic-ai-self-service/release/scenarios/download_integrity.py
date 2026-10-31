@@ -24,10 +24,15 @@ No CloudFormation deployment occurs; this is deliberately the light, deploy-free
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -253,8 +258,104 @@ def python_download_digest_verified(args, artifact_dir):
     return _scenario(args, artifact_dir, "deployed-api-authenticated-python-download-archive-digest-manifest-verified")
 
 
+def _offline_export_client() -> Any:
+    """In-process ``deployment_app`` with an injected authenticated event -- the exact mechanism the
+    export-gate contract test (``test_downloadable_asset_contract.py``) uses. No network and no AWS:
+    the environment is pinned before the app imports so a stray boto client cannot reach a real
+    account, and the export is a pure function of the committed source.
+    """
+    os.environ.setdefault("PROJECT_NAME", "exact-commit")
+    os.environ.setdefault("ENVIRONMENT", "local")
+    os.environ.setdefault("AWS_REGION", "us-east-1")
+    os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
+    os.environ["AWS_CONFIG_FILE"] = os.devnull
+    os.environ["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        os.environ.pop(name, None)
+    import app.deployment_handler as handler
+    from fastapi.testclient import TestClient
+
+    event = {
+        "requestContext": {
+            "authorizer": {"jwt": {"claims": {"sub": "exact-commit-owner", "cognito:groups": ["g-users-default"]}}}
+        }
+    }
+
+    async def _inject(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            scope = {**scope, "aws.event": event}
+        await handler.deployment_app(scope, receive, send)
+
+    return TestClient(_inject, raise_server_exceptions=False)
+
+
+def _verify_exported_archive(response: Any, artifact_type: str) -> dict[str, Any]:
+    """Prove one export archive is self-verifying from its own bytes: the response
+    ``archive_sha256``/``archive_bytes`` match the archive, it carries exactly one
+    ``artifact-manifest.json`` whose digest matches ``artifact_manifest_sha256``, and the shipped
+    verifier accepts it. Returns the digest facet the claim reads.
+    """
+    from app.services.downloadable_artifact import verify_artifact_zip
+
+    if response.status_code != 200:
+        raise ScenarioFailed(f"{artifact_type} export returned {response.status_code}: {response.text[:300]}")
+    payload = response.json()
+    archive = base64.b64decode(payload["zip_base64"], validate=True)
+    if payload.get("archive_sha256") != hashlib.sha256(archive).hexdigest():
+        raise ScenarioFailed(f"{artifact_type} archive_sha256 disagrees with the archive bytes")
+    if payload.get("archive_bytes") != len(archive):
+        raise ScenarioFailed(f"{artifact_type} archive_bytes disagrees with the archive length")
+    with zipfile.ZipFile(io.BytesIO(archive)) as artifact:
+        manifests = [name for name in artifact.namelist() if name.endswith("/artifact-manifest.json")]
+        if len(manifests) != 1:
+            raise ScenarioFailed(f"{artifact_type} archive must carry exactly one artifact-manifest.json")
+        if payload.get("artifact_manifest_sha256") != hashlib.sha256(artifact.read(manifests[0])).hexdigest():
+            raise ScenarioFailed(f"{artifact_type} artifact_manifest_sha256 disagrees with the manifest member")
+    verify_artifact_zip(archive, expected_artifact_type=artifact_type)
+    return {
+        "archive_sha256": payload["archive_sha256"],
+        "artifact_manifest_sha256": payload["artifact_manifest_sha256"],
+        "verified": True,
+    }
+
+
 def source_contract_and_archive_digests_match(args, artifact_dir):
-    return _scenario(args, artifact_dir, "downloadable-assets-source-contract-and-archive-digests-match")
+    """exact_commit (OFFLINE, deploy-free): the downloadable CloudFormation and Python archives the
+    committed source generates are self-verifying -- each export response's digests match the archive
+    bytes and its single ``artifact-manifest.json``, and the shipped verifier accepts the archive.
+
+    This is the ``exact_commit`` facet of ``delivery.downloadable_assets``: it binds the archives to
+    the exact commit by REGENERATING them in process from source (via the same request body the live
+    download journey sends), not by downloading from a deployed API. No AWS and no provenance; the
+    deployed-API counterpart is proved separately by the live_positive download scenarios.
+    """
+    client = _offline_export_client()
+    outcome: dict[str, Any] = {}
+    for route, artifact_type in (("/api/generate-cfn-template", "cfn"), ("/api/export-python", "python")):
+        body = template_request_body(GALLERY_TEMPLATE, suffix="exact-commit")
+        if artifact_type == "cfn":
+            body["dataRetentionPolicy"] = "Delete"
+        outcome[f"{artifact_type}_digest"] = _verify_exported_archive(client.post(route, json=body), artifact_type)
+    claim = "downloadable-assets-source-contract-and-archive-digests-match"
+    holds = _CLAIMS[claim](outcome)
+    report = {
+        "scenario": args.scenario_id,
+        "claim": claim,
+        "claim_holds": holds,
+        "mode": "offline-in-process-generation",
+        "facet": {key: outcome.get(key) for key in ("cfn_digest", "python_digest")},
+    }
+    write_json(artifact_dir / "report", report)
+    if not holds:
+        raise ScenarioFailed(f"{claim}: {json.dumps(outcome)[:300]}")
+    return report
 
 
 def tampered_archive_rejected(args, artifact_dir):
