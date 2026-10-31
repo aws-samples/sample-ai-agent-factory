@@ -83,12 +83,14 @@ _LIVE_PASSTHROUGH_ENVIRONMENT = (
     "AWS_STS_REGIONAL_ENDPOINTS",
 )
 _MAX_ARTIFACT_FILES = 20_000
-# Total bytes of one suite/scenario artifact tree. strict-synth archives one cdk.out per release
-# Region, each embedding the real Lambda/AgentCore bundles (~200 MiB), so a seven-Region tree is
-# ~1.5 GiB of legitimate evidence. The cap is a runaway backstop, not a reason to synth against
-# empty bundles -- empty bundles break the infra ephemeral-storage-fit tests and the clean-clone
-# byte-identical synth comparison. The per-file cap in _secure_artifact_digest stays at 1 GiB.
-_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
+# cdk asset STAGING (asset.<hash> directories/zips in a synthesized cloud assembly) is bulk that a
+# seven-Region strict-synth duplicates into ~1.5 GiB and tens of thousands of files. It is not
+# evidence in itself: each asset's identity is the hash recorded in <stack>.assets.json, which IS
+# archived. _artifact_tree skips it so synth evidence stays the templates and asset manifests --
+# under the bounds above, with the real bundles present (synthing against emptied bundles instead
+# breaks the infra ephemeral-storage-fit tests and the clean-clone byte-identical synth comparison).
+_CDK_ASSET_STAGING = re.compile(r"^asset\.[0-9a-f]{16,}")
 _MAX_JUNIT_BYTES = 64 * 1024 * 1024
 _PROVENANCE_LABEL = "provenance"
 _PROVENANCE_REQUIRED_KEYS = frozenset({"account_id", "region", "stack_id", "deployed_commit", "deployed_project_tree"})
@@ -1052,6 +1054,9 @@ def _artifact_tree(root: Path, label: str) -> dict[str, Any]:
         if path.is_symlink():
             raise EvidenceError(f"Artifact tree {label} contains a symlink: {path.name}")
         if not path.is_file():
+            continue
+        if any(_CDK_ASSET_STAGING.match(part) for part in path.relative_to(root).parts):
+            # cdk asset staging is represented by its hash in <stack>.assets.json, not archived in bulk.
             continue
         if len(rows) >= _MAX_ARTIFACT_FILES:
             raise EvidenceError(f"Artifact tree {label} exceeds {_MAX_ARTIFACT_FILES} files")
