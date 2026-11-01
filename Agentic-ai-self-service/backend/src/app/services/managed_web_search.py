@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.services.region_capabilities import MANAGED_WEB_SEARCH_SUPPORTED_REGIONS
+from app.services.region_capabilities import (
+    MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
+    feature_unavailable_message,
+)
 
 MANAGED_WEB_SEARCH_CONNECTOR_ID = "web-search"
 MANAGED_WEB_SEARCH_CONNECTOR_VERSION = "1.2.0"
@@ -53,8 +56,7 @@ def require_managed_web_search_region(region: str) -> None:
     """Fail before an AWS side effect when Web Search is unavailable."""
 
     if region not in MANAGED_WEB_SEARCH_SUPPORTED_REGIONS:
-        supported = ", ".join(sorted(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS))
-        raise ValueError(f"AgentCore Web Search is not available in {region!r}; supported Regions: {supported}.")
+        raise ValueError(feature_unavailable_message("managed_web_search", region))
 
 
 def managed_web_search_resource_arn(region: str) -> str:
