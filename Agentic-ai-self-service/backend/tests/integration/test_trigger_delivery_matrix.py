@@ -961,8 +961,17 @@ def _evaluation_settle_seconds() -> int:
     return seconds
 
 
-def _filtered_log_messages(logs_client: Any, filter_pattern: str) -> list[str]:
-    """Read every bounded page for one exact span correlation key."""
+def _filtered_log_messages(logs_client: Any, filter_pattern: str, *, start_time_ms: int | None = None) -> list[str]:
+    """Read every bounded page for one exact span correlation key.
+
+    ``start_time_ms`` scopes the scan to the evaluation's own time window. Without it,
+    ``filter_log_events`` scans the whole ``aws/spans`` group from its oldest event and pages
+    on *events scanned* (not matched), so a single triggers-phase run -- whose trigger-delivery
+    invocations emit thousands of spans before the evaluation even starts -- blows past any small
+    page cap before the sparse per-session matches are reached. Anchoring ``startTime`` just before
+    the evaluation sessions begin excludes the delivery spans and everything older, so the scan
+    covers only the evaluation window; the bound then only guards genuine per-evaluation volume.
+    """
 
     messages: list[str] = []
     request: dict[str, Any] = {
@@ -970,8 +979,10 @@ def _filtered_log_messages(logs_client: Any, filter_pattern: str) -> list[str]:
         "filterPattern": filter_pattern,
         "limit": 100,
     }
+    if start_time_ms is not None:
+        request["startTime"] = start_time_ms
     seen_tokens: set[str] = set()
-    for _page in range(20):
+    for _page in range(50):
         response = logs_client.filter_log_events(**request)
         messages.extend(str(event.get("message") or "") for event in response.get("events", []))
         token = response.get("nextToken")
@@ -979,7 +990,7 @@ def _filtered_log_messages(logs_client: Any, filter_pattern: str) -> list[str]:
             return messages
         seen_tokens.add(token)
         request["nextToken"] = token
-    raise AssertionError(f"Span query exceeded 20 pages for filter {filter_pattern!r}; refusing partial evidence")
+    raise AssertionError(f"Span query exceeded 50 pages for filter {filter_pattern!r}; refusing partial evidence")
 
 
 def _is_evaluation_span(
@@ -1029,6 +1040,7 @@ def _wait_for_evaluation_sessions(
     *,
     agentcore_runtime_name: str,
     session_ids: list[str],
+    evaluation_window_start_ms: int | None = None,
 ) -> None:
     """Wait until every staging session has an exact AgentCore evaluation span."""
 
@@ -1045,6 +1057,7 @@ def _wait_for_evaluation_sessions(
                 messages = _filtered_log_messages(
                     logs_client,
                     f'"{session_id}"',
+                    start_time_ms=evaluation_window_start_ms,
                 )
             except ClientError as exc:
                 if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
@@ -1160,6 +1173,11 @@ def _promote_staging_version_for_triggers(
         policy = evidence.get("promotion_policy") or {}
         minimum_sessions = int(policy.get("minimum_sessions") or 0)
         assert minimum_sessions >= 1, policy
+        # Anchor the span scan just before the evaluation sessions begin (60s back for clock skew
+        # between this host and CloudWatch), so _filtered_log_messages scans only the evaluation
+        # window instead of the whole aws/spans group (which also holds this phase's much larger
+        # volume of trigger-delivery spans emitted earlier).
+        evaluation_window_start_ms = int(time.time() * 1000) - 60_000
         scenarios, session_ids = _release_scenarios(
             api_session,
             runtime_name=runtime_name,
@@ -1170,6 +1188,7 @@ def _promote_staging_version_for_triggers(
             logs_client,
             agentcore_runtime_name=agentcore_runtime_name,
             session_ids=session_ids,
+            evaluation_window_start_ms=evaluation_window_start_ms,
         )
         start = api_session.post(
             f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
