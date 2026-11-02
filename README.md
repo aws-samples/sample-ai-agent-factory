@@ -69,7 +69,7 @@ Multi-module workshop composing AgentCore with an LLM Gateway (LiteLLM), MCP Gat
 
 ### Self-Service — Build Agents Fast
 
-Visual workflow builder for AgentCore: drag-and-drop canvas, template gallery, CloudFormation export, versioning with batch-evaluation-gated production promotion and emergency rollback, Cedar policy, and cost analytics.
+Visual workflow builder for AgentCore: drag-and-drop canvas, template gallery, CloudFormation and Python export, versioning with batch-evaluation-gated production promotion and emergency rollback, Cedar policy, and cost analytics. Releases ship with [exact-commit, receipt-backed evidence](Agentic-ai-self-service/README.md#exact-commit-release-evidence): offline gates plus live scenarios run against a deployment bound to the exact commit, across seven selected candidate Regions.
 
 **Prerequisites:** AWS CLI v2, Node.js 20+, Python 3.12+. See README for supported regions.
 

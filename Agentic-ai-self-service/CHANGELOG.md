@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — a reduced Region's Web Search refusal names the release Regions, not the AWS list
+
+- `managed_web_search.require_managed_web_search_region` built its own refusal from
+  `MANAGED_WEB_SEARCH_SUPPORTED_REGIONS`, so a deploy in Frankfurt, London or Paris was
+  told Web Search is available in Regions outside the seven-Region envelope (`ap-northeast-1`,
+  `ap-southeast-2`) — Regions `deploy.sh`, the CDK app and the deploy API all refuse. It now
+  raises the shared `region_capabilities.feature_unavailable_message("managed_web_search", …)`,
+  the one message every other reduced-Region refusal already uses: the Region by display name,
+  and only the release Regions where the feature is certified. Found live by the seven-Region
+  certification at the first reduced-feature Region; the release scenario
+  `test_reduced_region_features.py::test_web_search_template_is_refused_before_persistence_where_the_matrix_says_so`
+  pins the shared wording and passed in all three reduced Regions after the change.
+- The OBO certification fixture (`release/scenarios/obo_fixture_lambda.py`, deployed only by the
+  `identity.delegated_obo` live scenario) logs a rejection from the literal OAuth error code at
+  the point the error is built instead of reading it back out of the response object. The
+  logged value was already one of seven constants; the read-back was what CodeQL
+  (`py/clear-text-logging-sensitive-data`) flagged. Behaviour is unchanged: one line per
+  rejection, silence on 200, never a token, header or body.
+
 ### Fixed — `deploy.sh` builds the frontend on a machine that has never seen the lock
 
 - `build_frontend` installed the frontend with `npm ci --offline`. On a machine whose npm
