@@ -20,8 +20,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { getApiClient, getErrorMessage } from '../../services/api';
+import { awsAgentRegistryUnavailableReason } from '../../utils/awsRegion';
 
 export function AwsRegistryPanel() {
+  const regionUnavailableReason = awsAgentRegistryUnavailableReason();
+  const regionSupported = regionUnavailableReason === null;
   const [enabled, setEnabled] = useState(false);
   const [available, setAvailable] = useState(false);
   const [sdkSupported, setSdkSupported] = useState(true);
@@ -37,6 +40,7 @@ export function AwsRegistryPanel() {
   const [error, setError] = useState<string | null>(null);
 
   const loadConfig = useCallback(async () => {
+    if (!regionSupported) return;
     try {
       const cfg = await getApiClient().getAwsRegistryConfig();
       setEnabled(cfg.enabled);
@@ -50,7 +54,7 @@ export function AwsRegistryPanel() {
     } catch {
       /* feature optional — leave disabled */
     }
-  }, []);
+  }, [regionSupported]);
 
   useEffect(() => { void loadConfig(); }, [loadConfig]);
 
@@ -85,16 +89,23 @@ export function AwsRegistryPanel() {
         <span className="text-sm font-medium">AWS Agent Registry</span>
         <span className={
           enabled && available ? 'text-xs text-green-500'
-          : enabled || !sdkSupported ? 'text-xs text-amber-500' : 'text-xs text-gray-600'
+          : !regionSupported || enabled || !sdkSupported ? 'text-xs text-amber-500' : 'text-xs text-gray-600'
         }>
           {enabled && available ? 'Connected'
+            : !regionSupported ? 'Unavailable in this Region'
             : !sdkSupported ? 'SDK out of date'
             : enabled && status ? `Configured (${status})`
             : enabled ? 'Configured (unreachable)' : 'Not configured'}
         </span>
       </div>
 
-      {!sdkSupported && (
+      {!regionSupported && (
+        <div role="status" className="text-[11px] text-amber-500/90">
+          {regionUnavailableReason}
+        </div>
+      )}
+
+      {regionSupported && !sdkSupported && (
         <div className="text-[11px] text-amber-500/90">
           This deployment's AWS SDK predates the GA Agent Registry API. Redeploy the
           backend with boto3 &ge; 1.43.66 to enable federation.
@@ -117,10 +128,11 @@ export function AwsRegistryPanel() {
             placeholder="AWS Agent Registry registryId"
             aria-label="AWS Agent Registry ID"
             value={input}
+            disabled={!regionSupported}
             onChange={(e) => setInput(e.target.value)}
           />
           <button
-            type="button" disabled={busy || !sdkSupported || !input.trim()} onClick={() => void enable()}
+            type="button" disabled={busy || !regionSupported || !sdkSupported || !input.trim()} onClick={() => void enable()}
             className="text-xs px-3 py-1 rounded bg-cyan-600 text-white disabled:opacity-50"
           >
             Enable
@@ -135,11 +147,12 @@ export function AwsRegistryPanel() {
               placeholder="Search registered agents…"
               aria-label="Search registered agents"
               value={query}
+              disabled={!regionSupported}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') void search(); }}
             />
             <button
-              type="button" disabled={busy || !query.trim()} onClick={() => void search()}
+              type="button" disabled={busy || !regionSupported || !query.trim()} onClick={() => void search()}
               className="text-xs px-3 py-1 rounded border border-white/10 disabled:opacity-50"
             >
               Search

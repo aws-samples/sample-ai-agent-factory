@@ -14,6 +14,7 @@ import {
   type AgentVersionSummary,
   type RuntimeSlotsSummary,
 } from '../../services/api';
+import { PromotionEvaluationPanel } from './PromotionEvaluationPanel';
 
 interface VersionsListProps {
   runtimeName: string | null;
@@ -27,6 +28,7 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null); // version_id being promoted
+  const [evaluatingVersion, setEvaluatingVersion] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!runtimeName) {
@@ -200,6 +202,11 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
                       staging
                     </span>
                   )}
+                  {v.promotion_evidence?.verdict === 'pass' && (
+                    <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-medium">
+                      evaluated
+                    </span>
+                  )}
                 </div>
                 <div className="text-[11px] text-gray-500">
                   {new Date(v.created_at).toLocaleString()}
@@ -211,14 +218,27 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
                 )}
                 {v.status === 'succeeded' && !isProduction && (
                   <div className="flex gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => void handlePromote(v.version_id, 'production')}
-                      disabled={acting !== null}
-                      className="text-[11px] px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
-                    >
-                      {acting === v.version_id ? 'Promoting…' : 'Promote to prod'}
-                    </button>
+                    {v.production_gate_required && !v.promotion_evidence ? (
+                      <button
+                        type="button"
+                        onClick={() => setEvaluatingVersion(
+                          evaluatingVersion === v.version_id ? null : v.version_id,
+                        )}
+                        disabled={acting !== null}
+                        className="text-[11px] px-2 py-0.5 rounded bg-blue-700 text-white hover:bg-blue-800 disabled:opacity-40"
+                      >
+                        {evaluatingVersion === v.version_id ? 'Hide evaluation' : 'Evaluate for prod'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handlePromote(v.version_id, 'production')}
+                        disabled={acting !== null}
+                        className="text-[11px] px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
+                      >
+                        {acting === v.version_id ? 'Promoting…' : 'Promote to prod'}
+                      </button>
+                    )}
                     {!isStaging && (
                       <button
                         type="button"
@@ -230,6 +250,15 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
                       </button>
                     )}
                   </div>
+                )}
+                {evaluatingVersion === v.version_id && v.production_gate_required && (
+                  <PromotionEvaluationPanel
+                    runtimeName={runtimeName}
+                    versionId={v.version_id}
+                    policy={v.promotion_policy}
+                    evidence={v.promotion_evidence}
+                    onEvidenceRecorded={reload}
+                  />
                 )}
               </li>
             );

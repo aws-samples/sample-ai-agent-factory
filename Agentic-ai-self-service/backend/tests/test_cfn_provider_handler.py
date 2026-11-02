@@ -1523,6 +1523,7 @@ class TestDispatch:
                 "Custom::OAuth2CredentialProvider",
                 "Custom::AgentCorePolicy",
                 "Custom::RuntimeLogGroup",
+                "Custom::ManagedWebSearchTarget",
             }
         )
 

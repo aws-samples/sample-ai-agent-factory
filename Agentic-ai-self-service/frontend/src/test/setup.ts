@@ -1,4 +1,4 @@
-import '@testing-library/jest-dom'
+import '@testing-library/jest-dom/vitest'
 
 // jsdom doesn't implement scrollIntoView; components with autoscroll (chat,
 // AI generator panels) call it in effects. Stub it so those render in tests.

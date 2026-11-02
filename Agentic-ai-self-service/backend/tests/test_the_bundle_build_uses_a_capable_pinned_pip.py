@@ -134,7 +134,7 @@ def test_the_exported_pins_are_exactly_the_platforms_pins():
     """One list, mirrored. The generator cannot read the file: the Lambda asset excludes it."""
     exported = _pins(DEPENDENCY_BUNDLE_CONSTRAINTS)
     platform = _pins(CONSTRAINTS_FILE.read_text().splitlines())
-    assert len(platform) >= 12, "the constraint file was emptied; this comparison would be vacuous"
+    assert len(platform) >= 100, "the complete bundle lock was truncated; this comparison would be vacuous"
     assert exported == platform
 
 
@@ -251,6 +251,7 @@ def _sandbox(tmp_path: Path, *, pip3: str | None, venvs: dict[str, tuple[str, bo
                     f"""\
                     #!/bin/sh
                     echo "$*" >> "{log}/{candidate}.calls"
+                    if [ "$1" = "-I" ] && [ "$2" = "verify-integrity.py" ]; then exit 0; fi
                     if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
                         mkdir -p "$3/bin" && cp "{template}" "$3/bin/python" && exit 0
                     fi
@@ -261,7 +262,7 @@ def _sandbox(tmp_path: Path, *, pip3: str | None, venvs: dict[str, tuple[str, bo
         else:
             _write(
                 fakebin / candidate,
-                f'#!/bin/sh\necho "$*" >> "{log}/{candidate}.calls"\necho "No module named venv" >&2\nexit 1\n',
+                f'#!/bin/sh\necho "$*" >> "{log}/{candidate}.calls"\nif [ "$1" = "-I" ] && [ "$2" = "verify-integrity.py" ]; then exit 0; fi\necho "No module named venv" >&2\nexit 1\n',
             )
     _write(
         fakebin / "zip",
@@ -300,7 +301,8 @@ def test_a_recent_pip3_is_used_as_is(tmp_path, version):
     assert result.returncode == 0, result.stderr
     assert _calls(log, "pip3.installs") == ["install"]
     assert _pins((log / "pip3.constraints").read_text().splitlines()) == _pins(DEPENDENCY_BUNDLE_CONSTRAINTS)
-    assert not any((log / f"{candidate}.calls").exists() for candidate in CANDIDATES)
+    assert _calls(log, "python3.calls") == ["-I verify-integrity.py"]
+    assert not any((log / f"{candidate}.calls").exists() for candidate in CANDIDATES if candidate != "python3")
     assert (tmp_path / "out.zip").exists()
 
 

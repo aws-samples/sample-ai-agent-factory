@@ -48,6 +48,7 @@ PREPARED: dict = {
     "friendly_runtime_name": "my-agent",
     "agentcore_runtime_name": "my-agent_a1b2c3d4",
     "deployment_slot": "production",
+    "production_gate_required": False,
     "owner_sub": "7478e488-7081-7081-aaaa-bbbbbbbbbbbb",
     "deployment_mode": "runtime",
 }
@@ -431,12 +432,24 @@ def test_an_unknown_top_level_field_is_refused():
         "agentcore_runtime_name",
         "deployment_mode",
         "deployment_slot",
+        "production_gate_required",
     ],
 )
 def test_a_missing_server_authored_field_is_refused(key):
     """Each is assigned unconditionally by the producer, so absence means a forged payload."""
     payload = {k: v for k, v in PREPARED.items() if k != key}
     assert "missing_server_field" in _v(payload).codes()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false", "true", {}, []])
+def test_production_gate_required_must_be_a_boolean(value):
+    verdict = _v(_prepared(production_gate_required=value))
+    assert "missing_server_field" in verdict.codes()
+
+
+def test_both_production_gate_boolean_values_are_accepted():
+    assert _v(_prepared(production_gate_required=False)).is_valid
+    assert _v(_prepared(production_gate_required=True)).is_valid
 
 
 def test_an_empty_owner_sub_is_refused_because_it_means_an_ownerless_deployment():

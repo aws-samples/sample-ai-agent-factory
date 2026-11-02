@@ -2,6 +2,8 @@
  * DeployActions - action buttons for deploy/download/export/publish.
  */
 
+import type { DownloadReceipt } from '../../utils/downloadArtifact';
+
 interface DeployActionsProps {
   canDeploy: boolean;
   canDownloadCfn: boolean;
@@ -25,6 +27,38 @@ interface DeployActionsProps {
   /** The last failure of each export, shown beside its own button. */
   cfnExportError?: string | null;
   pythonExportError?: string | null;
+  /** The last verified download of each kind: the anchors the bundle's own scripts verify against. */
+  cfnDownloadReceipt?: DownloadReceipt | null;
+  pythonDownloadReceipt?: DownloadReceipt | null;
+}
+
+/**
+ * The recipient cannot run the bundle without the manifest digest: every shipped script calls
+ * `verify-integrity.py`, which requires EXPECTED_ARTIFACT_MANIFEST_SHA256 from the authenticated
+ * response -- a value only this browser has seen. Show it, and the archive digest, verbatim.
+ */
+function DownloadIntegrity({ receipt, kind }: { receipt: DownloadReceipt; kind: 'cfn' | 'python' }) {
+  const exportLine = `export EXPECTED_ARTIFACT_MANIFEST_SHA256=${receipt.artifactManifestSha256}`;
+  const copy = (value: string) => {
+    void navigator.clipboard?.writeText(value);
+  };
+  return (
+    <div role="status" data-testid={`${kind}-download-integrity`} className="text-xs text-[#5f6b7a] space-y-1 break-all">
+      <p>
+        Saved <span className="font-mono">{receipt.filename}</span>, verified in this browser against the
+        API&apos;s archive digest before it was written.
+      </p>
+      <p>
+        archive SHA-256 <span className="font-mono">{receipt.archiveSha256}</span>{' '}
+        <button type="button" className="underline" onClick={() => copy(receipt.archiveSha256)}>copy</button>
+      </p>
+      <p>
+        Before running any script in the bundle, set the manifest digest it verifies against:
+        <span className="font-mono block">{exportLine}</span>
+        <button type="button" className="underline" onClick={() => copy(exportLine)}>copy export line</button>
+      </p>
+    </div>
+  );
 }
 
 export function DeployActions({
@@ -43,6 +77,8 @@ export function DeployActions({
   cfnDownloadBlockedReason = null,
   cfnExportError = null,
   pythonExportError = null,
+  cfnDownloadReceipt = null,
+  pythonDownloadReceipt = null,
 }: DeployActionsProps) {
   return (
     <div className="space-y-2">
@@ -78,6 +114,9 @@ export function DeployActions({
           {cfnExportError}
         </p>
       )}
+      {(state === 'idle' || state === 'deployed') && cfnDownloadReceipt && !cfnExportError && (
+        <DownloadIntegrity receipt={cfnDownloadReceipt} kind="cfn" />
+      )}
 
       {/* Export as Python */}
       {(state === 'idle' || state === 'deployed') && (
@@ -106,6 +145,9 @@ export function DeployActions({
           <p role="alert" className="text-xs text-red-600">
             {pythonExportError}
           </p>
+        )}
+        {pythonDownloadReceipt && !pythonExportError && (
+          <DownloadIntegrity receipt={pythonDownloadReceipt} kind="python" />
         )}
         {pythonExportBlockedReason && (
           <p id="python-export-blocked-reason" role="status" className="text-xs text-[#5f6b7a]">

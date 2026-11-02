@@ -91,14 +91,15 @@ def _assert_raw_http_absent(code: str, template_name: str):
 class TestCodeGeneratorSDKPattern:
     """Tests that all code_generator.py templates use BedrockAgentCoreApp."""
 
-    def test_langchain_web_search_uses_sdk(self):
-        code = code_generator._generate_langchain_web_search(
-            system_prompt="You are a web search assistant.",
-            model_id="us.anthropic.claude-sonnet-5",
-            region="us-west-2",
+    def test_managed_web_search_uses_gateway_sdk(self):
+        code = code_generator.generate_agent_code(
+            _make_runtime_config(),
+            template_id="web-search-agent",
         )
-        _assert_sdk_pattern_present(code, "langchain_web_search")
-        _assert_raw_http_absent(code, "langchain_web_search")
+        _assert_sdk_pattern_present(code, "managed_web_search")
+        _assert_raw_http_absent(code, "managed_web_search")
+        assert "MCPClient" in code
+        assert "duckduckgo.com" not in code
 
     def test_strands_gateway_uses_sdk(self):
         code = code_generator._generate_strands_gateway(

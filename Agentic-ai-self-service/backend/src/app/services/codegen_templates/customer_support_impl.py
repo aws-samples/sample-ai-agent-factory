@@ -11,13 +11,11 @@ CUSTOMERS = {
     "CUST-001": {
         "customer_id": "CUST-001",
         "name": "John Doe",
-        "email": "john@example.com",
         "member_since": "2023-06-01",
     },
     "CUST-002": {
         "customer_id": "CUST-002",
         "name": "Jane Smith",
-        "email": "jane@example.com",
         "member_since": "2024-01-15",
     },
 }
@@ -89,7 +87,9 @@ def _do_get_customer(event):
     customer_orders = [o for o in ORDERS.values() if o["customer_id"] == customer_id]
     return json.dumps(
         {
-            **customer,
+            "customer_id": customer["customer_id"],
+            "name": customer["name"],
+            "member_since": customer["member_since"],
             "total_orders": len(customer_orders),
             "total_spent": round(sum(o["total"] for o in customer_orders), 2),
         }

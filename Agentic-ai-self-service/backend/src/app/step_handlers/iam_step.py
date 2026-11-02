@@ -229,6 +229,7 @@ def handler(event: dict, context) -> dict:
                         provider_key_secret_arn=provider_key_arn,
                         gateway_key_secret_arn=gateway_key_arn,
                         model_free=(event.get("runtime_artifact_kind") == "mcp"),
+                        trace_export_enabled=bool(event.get("production_gate_required")),
                     )
                 ),
             )
@@ -366,6 +367,7 @@ def handler(event: dict, context) -> dict:
             # threaded through the SFN input; applied to the runtime exec role.
             resource_tags=event.get("resource_tags") or {},
             return_provenance=True,
+            trace_export_enabled=bool(event.get("production_gate_required")),
         )
         if isinstance(_role_result, tuple):
             role_arn, role_created = _role_result

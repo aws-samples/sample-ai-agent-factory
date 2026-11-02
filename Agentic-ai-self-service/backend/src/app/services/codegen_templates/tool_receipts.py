@@ -99,3 +99,113 @@ def _tool_receipts(messages, exclude=(), statuses=None, names=None):
             }
         )
     return receipts
+
+
+_STRUCTURED_RESULT_LIMIT = 64 * 1024
+_STRUCTURED_RESULT_NODE_LIMIT = 512
+
+
+def _explicit_json_requested(prompt):
+    """Whether the caller affirmatively requested a JSON representation."""
+    if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > _STRUCTURED_RESULT_LIMIT:
+        return False
+    normalized = (
+        prompt.casefold()
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("don't", "do not")
+        .replace("dont", "do not")
+    )
+    for character in "-_.,:;!?()[]{}'\"/\\":
+        normalized = normalized.replace(character, " ")
+    words = normalized.split()
+    json_indexes = [index for index, word in enumerate(words) if word == "json"]
+    if len(json_indexes) != 1:
+        return False
+    index = json_indexes[0]
+    before = words[max(0, index - 4) : index]
+    after = words[index + 1 : index + 3]
+    if {"not", "no", "without", "avoid", "never", "dont"}.intersection(before):
+        return False
+    return bool(
+        {"as", "in", "return", "respond", "output", "produce", "provide"}.intersection(before[-2:])
+        or {"format", "formatted", "object", "array", "response", "representation"}.intersection(after)
+    )
+
+
+def _safe_structured_result(value):
+    """Reject error-shaped or excessively nested structured tool content."""
+    pending = [value]
+    visited = 0
+    while pending:
+        current = pending.pop()
+        visited += 1
+        if visited > _STRUCTURED_RESULT_NODE_LIMIT:
+            return False
+        if isinstance(current, dict):
+            if current.get("error") not in (None, "", False) or current.get("success") is False:
+                return False
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+    return True
+
+
+def _current_structured_tool_response(prompt, messages, exclude=()):
+    """Return one guarded current-turn tool result verbatim-as-JSON when requested.
+
+    Strands writes an ``AfterToolCallEvent`` replacement back to the conversation
+    before ``Agent.__call__`` returns. Reading only the post-call ``toolResult``
+    blocks therefore keeps the existing fail-closed tool-result Guardrail boundary.
+    The exact ``toolUseId`` join and pre-invocation ``exclude`` fence prevent stale
+    conversation results or a second tool call from being selected implicitly.
+    """
+    if not _explicit_json_requested(prompt):
+        return None
+
+    excluded = set(exclude or ())
+    uses = {}
+    results = {}
+    duplicate_ids = set()
+    for block in _tool_blocks(messages):
+        use = block.get("toolUse")
+        if isinstance(use, dict):
+            use_id = use.get("toolUseId")
+            if use_id and use_id not in excluded:
+                if use_id in uses:
+                    duplicate_ids.add(use_id)
+                uses[use_id] = use
+        result = block.get("toolResult")
+        if isinstance(result, dict):
+            use_id = result.get("toolUseId")
+            if use_id and use_id not in excluded:
+                if use_id in results:
+                    duplicate_ids.add(use_id)
+                results[use_id] = result
+
+    if duplicate_ids or len(uses) != 1:
+        return None
+    use_id = next(iter(uses))
+    result = results.get(use_id)
+    if not isinstance(result, dict) or result.get("status") not in (None, "success"):
+        return None
+    content = result.get("content")
+    if not isinstance(content, list):
+        return None
+    texts = [
+        block.get("text")
+        for block in content
+        if isinstance(block, dict) and isinstance(block.get("text"), str) and block.get("text").strip()
+    ]
+    if len(texts) != 1:
+        return None
+    encoded = texts[0].encode("utf-8")
+    if len(encoded) > _STRUCTURED_RESULT_LIMIT:
+        return None
+    try:
+        value = json.loads(texts[0])
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if not isinstance(value, (dict, list)) or not _safe_structured_result(value):
+        return None
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

@@ -156,6 +156,44 @@ def test_cost_route_passes_the_target_logs_client_to_the_query_helper():
     )
 
 
+def test_cost_route_labels_authorization_units_as_non_billing_capacity():
+    target = _target(logs=MagicMock(name="target_logs"))
+    summary = {
+        "total_cost": 1.0,
+        "total_in": 10,
+        "total_out": 5,
+        "by_model": {},
+    }
+    budget = MagicMock(limit_usd=10.0, warn_pct=80)
+    budget_store = MagicMock()
+    budget_store.get.return_value = budget
+    budget_store.counter_snapshot.return_value = {
+        "authorized_microusd": 4_000_000,
+        "reserved_microusd": 1_000_000,
+        "committed_microusd": 3_000_000,
+    }
+    with (
+        patch.object(cost, "resolve_owned_runtime_target", return_value=target),
+        patch.object(cost, "summarize_from_logs", return_value=summary),
+        patch("app.services.budget_store.get_budget_store", return_value=budget_store),
+        patch("app.services.budget_store.invocation_reservation_usd", return_value=1.0),
+    ):
+        result = asyncio.run(
+            cost.get_runtime_cost(
+                "orders",
+                from_=100,
+                to=200,
+                caller_sub="owner",
+            )
+        )
+
+    owner_budget = result["owner_budget"]
+    assert owner_budget["authorization_scope"] == "platform-mediated-invocation-operation"
+    assert owner_budget["is_actual_cost_cap"] is False
+    assert owner_budget["authorized"] == 4.0
+    assert owner_budget["remaining_authorization"] == 6.0
+
+
 def test_trace_route_passes_the_target_logs_client_to_the_query_helper():
     logs = MagicMock(name="target_logs")
     target = _target(logs=logs)

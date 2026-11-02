@@ -74,7 +74,7 @@ _MODULE_REQUIRES: dict[str, tuple[str, ...]] = {
     "litellm": ("litellm",),
     "mistral": ("mistralai",),
     "ollama": ("ollama",),
-    "sagemaker": ("mypy-boto3-sagemaker-runtime",),
+    "sagemaker": ("mypy-boto3-sagemaker-runtime", "openai"),
     "llamaapi": ("llama-api-client",),
 }
 

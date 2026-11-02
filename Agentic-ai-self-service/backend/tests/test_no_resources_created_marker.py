@@ -86,6 +86,29 @@ def test_the_genuine_marker_records_an_honest_no_resources_outcome(marker):
     assert "delete_retained" not in statuses
 
 
+def test_genuine_empty_manifest_with_a_version_claim_releases_exact_metadata():
+    store = _store()
+    record = store.get.return_value.model_dump.return_value
+    record.update(
+        {
+            "version_id": "01a135161780b6d678d8ce7afe0aab25",
+            "friendly_runtime_name": "rejected_agent",
+        }
+    )
+    with patch(
+        "app.step_handlers.status_update_step._release_failed_deployment_metadata",
+        return_value=(True, ["Verified this deployment's version row and slot pointers are absent"]),
+    ) as release:
+        _run(store, {"no_resources_created": GENUINE})
+
+    release.assert_called_once_with(record, {"no_resources_created": GENUINE})
+    statuses = _delete_statuses(store)
+    assert statuses[-1] == "deleted"
+    messages = " ".join(str(arg) for call in store.update_delete_status.call_args_list for arg in call.args)
+    assert "Verified this deployment's version row and slot pointers are absent" in messages
+    assert "still require full teardown" not in messages
+
+
 def test_the_genuine_marker_marks_the_empty_manifest_complete():
     """The substantive half: an incomplete manifest keeps inventing supplemental rows."""
     store = _store()

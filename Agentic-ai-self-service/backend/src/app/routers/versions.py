@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.deployment_models import TestRequest, TestResponse
@@ -30,9 +30,24 @@ from app.services.agent_versions_store import (
     set_slot_pointers_atomically,
 )
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.delegated_identity import (
+    DelegatedIdentityError,
+    deployment_requires_obo,
+    extract_user_bearer,
+    workforce_token_expectations,
+)
 from app.services.gateway_deployer import gateway_aws_session, get_cognito_token
 from app.services.harness_deployer import invoke_harness
+from app.services.invocation_budget import (
+    reserve_invocation_budget,
+    settle_invocation_budget,
+)
 from app.services.invocation_identity import memory_invocation_identity
+from app.services.promotion_evidence import (
+    PromotionEvidenceError,
+    require_promotion_evidence,
+    validate_frozen_promotion_policy,
+)
 from app.services.rbac import require_scopes
 from app.services.runtime_invocation import (
     invoke_verified_http_runtime,
@@ -88,6 +103,9 @@ class VersionResponse(BaseModel):
     parent_version_id: str | None = None
     status: str
     description: str | None = None
+    production_gate_required: bool | None = None
+    promotion_policy: dict | None = None
+    promotion_evidence: dict | None = None
 
     @classmethod
     def from_model(cls, v: AgentVersion) -> VersionResponse:
@@ -103,6 +121,9 @@ class VersionResponse(BaseModel):
             parent_version_id=v.parent_version_id,
             status=v.status,
             description=v.description,
+            production_gate_required=v.production_gate_required,
+            promotion_policy=v.promotion_policy,
+            promotion_evidence=v.promotion_evidence,
         )
 
 
@@ -188,7 +209,7 @@ async def get_slots(
 ) -> SlotsResponse:
     """Return the production + staging slot pointers for a runtime."""
     runtime_name = _validate_runtime_name(runtime_name)
-    slots = get_slots_store().get(runtime_name)
+    slots = get_slots_store().get(runtime_name, consistent=True)
     if slots is None:
         raise HTTPException(status_code=404, detail="Not found")
     assert_owner(slots.owner_sub, caller_sub)
@@ -211,6 +232,7 @@ async def invoke_runtime_slot(
     runtime_name: str,
     slot: Literal["staging", "production"],
     body: SlotInvokeRequest,
+    raw_request: Request,
     caller_sub: str = Depends(get_caller_sub),
 ) -> SlotInvokeResponse:
     """Invoke the exact HTTP runtime version currently assigned to ``slot``."""
@@ -237,20 +259,52 @@ async def invoke_runtime_slot(
             state_store=get_deployment_store(),
         )
 
-    result = invoke_verified_http_runtime(
-        invocation_request,
-        caller_sub=caller_sub,
-        deployment_state=deployment_state,
-        runtime_id=target.runtime_id,
-        runtime_arn=target.runtime_arn,
-        region=target.region,
-        target_session=target.session,
-        promote_policy=_promote_policy,
-        invoke_harness=invoke_harness,
-        resolve_memory_identity=memory_invocation_identity,
-        gateway_session=gateway_aws_session,
-        get_gateway_token=get_cognito_token,
+    user_bearer_token = None
+    if deployment_requires_obo(deployment_state):
+        try:
+            expected_issuer, expected_client_id = workforce_token_expectations(target.region)
+            user_bearer_token = extract_user_bearer(
+                raw_request.headers,
+                expected_subject=caller_sub,
+                expected_issuer=expected_issuer,
+                expected_client_id=expected_client_id,
+            )
+        except DelegatedIdentityError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    reservation = reserve_invocation_budget(
+        owner_sub=caller_sub,
+        runtime_name=runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
     )
+    dispatched = False
+
+    def _mark_dispatched() -> None:
+        nonlocal dispatched
+        dispatched = True
+
+    try:
+        result = invoke_verified_http_runtime(
+            invocation_request,
+            caller_sub=caller_sub,
+            deployment_state=deployment_state,
+            runtime_id=target.runtime_id,
+            runtime_arn=target.runtime_arn,
+            region=target.region,
+            target_session=target.session,
+            promote_policy=_promote_policy,
+            invoke_harness=invoke_harness,
+            resolve_memory_identity=memory_invocation_identity,
+            gateway_session=gateway_aws_session,
+            get_gateway_token=get_cognito_token,
+            user_bearer_token=user_bearer_token,
+            on_dispatch=_mark_dispatched,
+            evaluation_capture=(slot == "staging" and target.production_gate_required is True),
+        )
+    except Exception:
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        raise
+    settle_invocation_budget(reservation, dispatched=dispatched)
     return SlotInvokeResponse(
         **result.model_dump(mode="python"),
         runtime_name=runtime_name,
@@ -258,6 +312,29 @@ async def invoke_runtime_slot(
         version_id=target.version_id,
         deployment_id=target.deployment_id,
         runtime_id=target.runtime_id,
+    )
+
+
+@router.post(
+    "/{runtime_name}/invoke",
+    response_model=SlotInvokeResponse,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def invoke_runtime_client(
+    runtime_name: str,
+    body: SlotInvokeRequest,
+    raw_request: Request,
+    caller_sub: str = Depends(get_caller_sub),
+) -> SlotInvokeResponse:
+    """Stable client surface pinned to the owner-checked production slot."""
+
+    return await invoke_runtime_slot(
+        runtime_name,
+        "production",
+        body,
+        raw_request,
+        caller_sub,
     )
 
 
@@ -293,6 +370,24 @@ async def promote_version(
                 f"'{target.status}'. Only succeeded deploys can be promoted."
             ),
         )
+
+    promotion_authority = "deployment"
+    promotion_evidence = None
+    promotion_policy = None
+    if body.slot == "production" and target.production_gate_required:
+        try:
+            promotion_policy = validate_frozen_promotion_policy(target.promotion_policy)
+            promotion_evidence = require_promotion_evidence(
+                target.promotion_evidence,
+                runtime_name=runtime_name,
+                version_id=version_id,
+                deployment_id=target.deployment_id,
+                runtime_id=target.runtime_id,
+                policy=promotion_policy,
+            )
+        except PromotionEvidenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        promotion_authority = "evaluation"
 
     slots_store = get_slots_store()
     # Consistent for the same reason as the version read: F-83 turns this read into the write's
@@ -331,6 +426,17 @@ async def promote_version(
                 deployment_id=target.deployment_id,
                 runtime_id=target.runtime_id,
                 runtime_arn=target.runtime_arn,
+                production_gate_required=target.production_gate_required,
+                promotion_authority=promotion_authority,
+                promotion_evidence_digest=(
+                    str(promotion_evidence["evidence_digest"]) if promotion_evidence is not None else None
+                ),
+                promotion_policy_digest=(
+                    str(promotion_policy["policy_digest"]) if promotion_policy is not None else None
+                ),
+                minimum_promotion_evidence_expiry_epoch=(
+                    int(promotion_evidence["expires_at_epoch"]) if promotion_evidence is not None else None
+                ),
             ),
         )
     except SlotWriteConflict:
@@ -425,6 +531,8 @@ async def rollback_runtime(
                 deployment_id=target.deployment_id,
                 runtime_id=target.runtime_id,
                 runtime_arn=target.runtime_arn,
+                production_gate_required=target.production_gate_required,
+                promotion_authority="rollback",
             ),
         )
     except SlotWriteConflict:

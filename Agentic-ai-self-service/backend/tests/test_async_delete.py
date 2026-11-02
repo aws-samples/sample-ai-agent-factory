@@ -248,6 +248,76 @@ def test_a_deleted_row_with_no_live_recovery_is_final(delete_client, monkeypatch
     delete_client._cleanup.assert_not_called()
 
 
+def test_a_deleted_row_reconciles_its_version_claim_before_success(delete_client, monkeypatch):
+    _Reopen(monkeypatch, dh.POINTER_ABSENT)
+    record = {
+        **FAST_RECORD,
+        "delete_status": "deleted",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "it_lifecycle_states_13a363a5",
+    }
+    delete_client._state["record"] = record
+    reconcile = MagicMock(return_value=True)
+    monkeypatch.setattr(dh, "_reconcile_deleted_version_claim", reconcile)
+
+    response = delete_client.delete("/api/runtime/rt_fast_1")
+
+    assert response.json()["success"] is True
+    reconcile.assert_called_once_with(record, "tester")
+    delete_client._claim.assert_not_called()
+    delete_client._cleanup.assert_not_called()
+
+
+def test_a_deleted_row_never_hides_a_version_claim_release_failure(delete_client, monkeypatch):
+    _Reopen(monkeypatch, dh.POINTER_ABSENT)
+    record = {
+        **FAST_RECORD,
+        "delete_status": "deleted",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "it_lifecycle_states_13a363a5",
+    }
+    delete_client._state["record"] = record
+    monkeypatch.setattr(dh, "_reconcile_deleted_version_claim", lambda *_args: False)
+
+    response = delete_client.delete("/api/runtime/rt_fast_1")
+
+    assert response.json()["success"] is False
+    assert "version and runtime-name metadata" in response.json()["message"]
+    delete_client._status.assert_called_once_with(
+        "dep-fast-1",
+        "delete_failed",
+        response.json()["message"],
+    )
+    delete_client._claim.assert_not_called()
+    delete_client._cleanup.assert_not_called()
+
+
+def test_deleted_version_reconciliation_uses_the_atomic_release(monkeypatch):
+    record = {
+        "deployment_id": "dep-fast-1",
+        "user_id": "tester",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "it_lifecycle_states_13a363a5",
+    }
+    release = MagicMock()
+
+    def _release(*args, **kwargs):
+        kwargs["outcome"].update({"released": True, "kept_locked": False})
+        return ["Released runtime name metadata"]
+
+    release.side_effect = _release
+    monkeypatch.setattr(dh, "_release_runtime_name_claim", release)
+
+    assert dh._reconcile_deleted_version_claim(record, "tester") is True
+    release.assert_called_once_with(
+        record,
+        "tester",
+        runtime_may_still_live=False,
+        trigger_cleanup_unconfirmed=False,
+        outcome={"released": True, "kept_locked": False},
+    )
+
+
 @pytest.mark.parametrize("outcome", [dh.POINTER_ACTIVE, dh.POINTER_RACED])
 def test_a_deleted_row_with_live_recovery_is_reopened_and_torn_down_again(delete_client, monkeypatch, outcome):
     """A promote that landed after the teardown read left a gateway only its name claim

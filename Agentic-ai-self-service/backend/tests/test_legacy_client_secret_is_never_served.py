@@ -3,8 +3,9 @@
 ``resolve_client_secret`` still honours an inline ``client_info["client_secret"]`` (rows written
 before ``_mint_client_secret_ref``), so that row shape is supported storage. ``DeploymentState.
 gateway_result`` is the whole gateway step result, ``GET /api/deploy/{id}`` and
-``GET /api/deployments`` serve ``model_dump(exclude=INTERNAL_ONLY_STATE_FIELDS)``, and that
-exclusion names no ``gateway_result`` leaf. So a legacy row served ``client_secret`` +
+``GET /api/deployments`` start from ``model_dump(exclude=INTERNAL_ONLY_STATE_FIELDS)``, add only the
+explicit derived ``runtime_name``, and that exclusion names no ``gateway_result`` leaf. So a legacy
+row served ``client_secret`` +
 ``token_endpoint`` + ``client_id`` + ``scope`` -- a complete client-credentials grant -- to any
 ``agent:read`` caller who knew the id (pre-tenancy rows are readable by design).
 
@@ -177,6 +178,7 @@ class TestTheModernRowIsServedUnchanged:
         state = _state(_modern_gateway_result(), user_id=OWNER)
         one, many = _serve(monkeypatch, state, OWNER)
         expected = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+        expected["runtime_name"] = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
         assert one == expected
         assert many == [expected]
         assert one["gateway_result"]["client_info"]["client_secret_ref"] == SECRET_REF

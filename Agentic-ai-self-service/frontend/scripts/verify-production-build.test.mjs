@@ -16,6 +16,8 @@ async function fixture({
   entrySource,
   authSource = 'export const AuthWrapper = true;',
   awsVendorSource = 'export const Amplify = true;',
+  widgetSource = 'const path = `/api/runtimes/${encodeURIComponent(runtime)}/invoke`;',
+  widgetTypesSource = 'export class AgentCoreClient {}',
   buildConfig = {
     apiBaseUrl: API_ORIGIN,
     awsRegion: AWS_REGION,
@@ -48,6 +50,8 @@ async function fixture({
   await writeFile(join(assets, 'index-app123.js'), source);
   if (authSource !== null) await writeFile(join(assets, authChunk), authSource);
   if (awsVendorSource !== null) await writeFile(join(assets, awsVendorChunk), awsVendorSource);
+  if (widgetSource !== null) await writeFile(join(directory, 'agentcore-chat-v1.js'), widgetSource);
+  if (widgetTypesSource !== null) await writeFile(join(directory, 'agentcore-chat-v1.d.ts'), widgetTypesSource);
   return directory;
 }
 
@@ -76,9 +80,29 @@ describe('production frontend build contract', () => {
       entryScript: 'index-app123.js',
       authChunk: 'AuthWrapper-auth123.js',
       awsVendorChunk: 'aws-vendor-aws123.js',
+      widget: 'agentcore-chat-v1.js',
       apiOrigin: API_ORIGIN,
       awsRegion: AWS_REGION,
     });
+  });
+
+  it('rejects a production build without the external client artifact', async () => {
+    const distDir = await fixture({ widgetSource: null });
+
+    await expect(verifyProductionBuild(options(distDir))).rejects.toThrow();
+  });
+
+  it('rejects a widget that reads bearer tokens from HTML attributes', async () => {
+    const distDir = await fixture({
+      widgetSource: [
+        'const path = `/api/runtimes/${encodeURIComponent(runtime)}/invoke`;',
+        "element.getAttribute('access-token');",
+      ].join('\n'),
+    });
+
+    await expect(verifyProductionBuild(options(distDir))).rejects.toThrow(
+      'reads a bearer token from HTML attributes',
+    );
   });
 
   it('rejects the unauthenticated local-build shape', async () => {

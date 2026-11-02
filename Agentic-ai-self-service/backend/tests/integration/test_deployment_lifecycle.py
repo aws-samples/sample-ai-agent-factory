@@ -16,6 +16,7 @@ import pytest
 
 from tests.integration.conftest import (
     DeploymentCleanupTracker,
+    RuntimeBudgetTracker,
     TrackedDeployment,
 )
 
@@ -158,6 +159,7 @@ class TestDeploymentLifecycle:
         self,
         api_session: Any,
         deployment_cleanup: DeploymentCleanupTracker,
+        runtime_budget: RuntimeBudgetTracker,
         wait_for_deployment: Any,
     ) -> None:
         record, _ = _start_deployment(
@@ -171,11 +173,17 @@ class TestDeploymentLifecycle:
             record,
             final,
         )
-        _invoke_runtime(
-            api_session,
-            runtime_id=runtime_id,
-            runtime_endpoint=runtime_endpoint,
-        )
+        runtime_name = final.get("runtime_name")
+        assert isinstance(runtime_name, str) and runtime_name
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_runtime(
+                api_session,
+                runtime_id=runtime_id,
+                runtime_endpoint=runtime_endpoint,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
 
     def test_delete_runtime_reaches_durable_deleted_tombstone(
         self,
@@ -198,6 +206,7 @@ class TestDeploymentLifecycle:
         self,
         api_session: Any,
         deployment_cleanup: DeploymentCleanupTracker,
+        runtime_budget: RuntimeBudgetTracker,
         wait_for_deployment: Any,
     ) -> None:
         record, body = _start_deployment(
@@ -213,11 +222,17 @@ class TestDeploymentLifecycle:
             record,
             final,
         )
-        _invoke_runtime(
-            api_session,
-            runtime_id=runtime_id,
-            runtime_endpoint=runtime_endpoint,
-        )
+        runtime_name = final.get("runtime_name")
+        assert isinstance(runtime_name, str) and runtime_name
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_runtime(
+                api_session,
+                runtime_id=runtime_id,
+                runtime_endpoint=runtime_endpoint,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
 
         tombstone = deployment_cleanup.delete_and_verify(record)
         assert tombstone.get("delete_status") == "deleted"

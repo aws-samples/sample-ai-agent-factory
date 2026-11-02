@@ -81,7 +81,7 @@ export const faq: FaqEntry[] = [
     id: 'self-service-other-regions',
     question: 'Can I deploy the Self-Service platform outside us-east-1?',
     answer:
-      'Yes, any region works by setting AWS_REGION. Two things differ. Outside us-east-1 the WAF rule set is attached as a REGIONAL web ACL on the Cognito user pool, and the CloudFront distribution runs without an edge ACL unless you pass CLOUDFRONT_WEB_ACL_ARN for one created in us-east-1. Account-global names also get a region suffix. In APAC regions, current-generation models use country or global prefixes, so the model ID may need to be set explicitly.',
+      'Only to one of the seven selected release Regions: us-east-1, us-east-2, us-west-2, eu-central-1, eu-west-1, eu-west-2 or eu-west-3. Every other value of AWS_REGION is refused by deploy.sh, by the CDK app at synth, and by the deploy API. Outside us-east-1 the WAF rule set is attached as a REGIONAL web ACL on the Cognito user pool, and the CloudFront distribution runs without an edge ACL unless you pass CLOUDFRONT_WEB_ACL_ARN for one created in us-east-1. Account-global names also get a region suffix. eu-central-1 and eu-west-2 run without managed Web Search, and eu-west-3 also without the AWS Agent Registry; the UI and API disable those features rather than offering them.',
     sources: [
       {
         file: SELF_SERVICE_README,
@@ -91,7 +91,7 @@ export const faq: FaqEntry[] = [
       {
         file: SELF_SERVICE_README,
         heading: 'Deploying to another region',
-        quote: 'family covers only the older Claude models. In APAC, current-generation models',
+        quote: 'every other value is refused by `deploy.sh`, by the CDK app at synth, and by the deploy API',
       },
     ],
     projectIds: ['self-service'],

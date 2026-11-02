@@ -43,6 +43,7 @@ from app.models import (
 from app.models.enums import StrandsModelProvider
 from app.services import codegen_templates, runtime_deployer
 from app.services.aws_pagination import list_all
+from app.services.delegated_identity import runtime_obo_transport_configuration
 from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
 from app.services.gateway_update import preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
@@ -712,7 +713,6 @@ MCP_BUILTIN_TOOLS = frozenset(
         "get_customer",
         "list_orders",
         "process_refund",
-        "duckduckgo_search",
         "wikipedia_search",
     }
 )
@@ -757,6 +757,12 @@ def validate_mcp_server_tools(tools) -> list[str]:
         if not name.isidentifier():
             # It becomes a Python function name in the generated server.
             problems.append(f"tools[{i}] name {name!r} is not a valid Python identifier")
+            continue
+        if name == "duckduckgo_search" and not has_body:
+            problems.append(
+                f"tools[{i}] 'duckduckgo_search' is a retired scraper alias. Use the managed "
+                "web_search tool on an AgentCore Gateway, or provide an explicit custom implementation"
+            )
             continue
         if name not in MCP_BUILTIN_TOOLS and not has_body:
             problems.append(
@@ -947,39 +953,12 @@ def process_refund(order_id: str, amount: float = 0, reason: str = "") -> str:
     return _do_process_refund({"order_id": order_id, "amount": amount, "reason": reason})
 ''')
 
-    if "duckduckgo_search" in tool_names:
-        tool_impls.append('''
-@mcp.tool()
-def duckduckgo_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo. Returns top results."""
-    import urllib.request, urllib.parse
-    url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_redirect=1"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read())
-        results = []
-        for topic in data.get("RelatedTopics", [])[:max_results]:
-            if "Text" in topic:
-                results.append({"text": topic["Text"], "url": topic.get("FirstURL", "")})
-        return json.dumps(results if results else [{"text": data.get("AbstractText", "No results"), "url": data.get("AbstractURL", "")}])
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-''')
-
     if "wikipedia_search" in tool_names:
         tool_impls.append('''
 @mcp.tool()
 def wikipedia_search(query: str) -> str:
     """Search and retrieve Wikipedia article summaries."""
-    import urllib.request, urllib.parse
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(query)}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "AgentCore/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        return json.dumps({"title": data.get("title", ""), "summary": data.get("extract", "No summary available")})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    return _do_wikipedia_search(query)
 ''')
 
     # Generate custom tools from dict definitions (name/toolName + code/implementation)
@@ -1056,6 +1035,10 @@ def {ct_name}({params_str}) -> str:
     mock_data = ""
     if has_customer_tools:
         mock_data = "\n" + codegen_templates.load_impl("customer_support_impl") + "\n"
+    has_web_tools = "wikipedia_search" in tool_names
+    web_tool_support = ""
+    if has_web_tools:
+        web_tool_support = "\n" + codegen_templates.load_impl("dynamic_tools_impl") + "\n"
 
     # Name + instructions reach the generated source as ``repr()`` literals so a
     # server name or system prompt carrying quotes, backslashes or newlines is a
@@ -1081,6 +1064,7 @@ from mcp.server.fastmcp import FastMCP
 # to 8000; honour PORT only if AgentCore ever overrides it.
 PORT = int(os.environ.get("PORT", "8000"))
 mcp = FastMCP(name={server_name_lit}, instructions={instructions_lit}, host="0.0.0.0", port=PORT, stateless_http=True)
+{web_tool_support}
 {mock_data}
 {tools_str}
 
@@ -2602,7 +2586,11 @@ class WorkflowExecutor:
             # token endpoint that does not exist. This path had no provider branch at all
             # and treated every gateway as Cognito; the twin in runtime_configure_step is
             # the contract being mirrored.
-            if gateway_result and str(client_info.get("provider") or "") == "litellm":
+            if gateway_result and gateway_result.get("obo_required") is True:
+                if str(client_info.get("provider") or "") != "workforce_jwt":
+                    raise RuntimeError("OBO gateway is not bound to the platform workforce authorizer")
+                env_vars["GATEWAY_AUTH_MODE"] = "obo"
+            elif gateway_result and str(client_info.get("provider") or "") == "litellm":
                 env_vars["GATEWAY_AUTH_MODE"] = "static_bearer"
                 _litellm_servers = [str(s) for s in (gateway_result.get("litellm_servers") or []) if str(s).strip()]
                 if _litellm_servers:
@@ -2669,6 +2657,14 @@ class WorkflowExecutor:
             )
             env_vars.update(otel_env)
 
+            authorizer_config = None
+            request_header_config = None
+            if gateway_result and gateway_result.get("obo_required") is True:
+                authorizer_config, request_header_config = runtime_obo_transport_configuration(
+                    self.region,
+                    owner_sub,
+                )
+
             runtime_result = create_agent_runtime(
                 agentcore_ctrl,
                 runtime_deployer.sanitize_runtime_name(runtime_config.name),
@@ -2681,7 +2677,10 @@ class WorkflowExecutor:
                 else "PYTHON_3_13",
                 runtime_config.protocol.value if hasattr(runtime_config.protocol, "value") else "HTTP",
                 env_vars,
+                authorizer_config=authorizer_config,
+                request_header_config=request_header_config,
                 region=self.region,
+                instrument_observability=bool(otel_env),
             )
             state.runtime_id = runtime_result["runtime_id"]
             _record_resource_best_effort(

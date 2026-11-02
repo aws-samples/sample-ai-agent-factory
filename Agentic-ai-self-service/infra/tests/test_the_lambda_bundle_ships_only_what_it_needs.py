@@ -45,7 +45,6 @@ _BACKEND = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", 
 _ALLOWED: dict[str, str] = {
     "src": "the application",
     "lib": "runtime dependencies, pip-installed by the deploy script",
-    "requirements-lambda.txt": "read by nothing at run time, but 881 bytes and it documents lib/",
     "pyproject.toml": "4 KB; tool config, harmless and useful when debugging in the console",
     ".env.example": "336 bytes of documentation, and deliberately an EXAMPLE -- .env itself is excluded",
 }
@@ -81,6 +80,11 @@ def test_the_two_measured_offenders_are_excluded():
         "138 MB uploaded twice per deploy; these bundles are fetched from the artifacts "
         "bucket by S3 key at run time, never read from the package"
     )
+
+
+def test_lambda_dependency_build_inputs_are_excluded_after_lib_is_materialized():
+    for build_input in ("requirements-lambda.in", "requirements-lambda.txt"):
+        assert _excluded(build_input), f"{build_input} is build metadata and must not ship in the Lambda asset"
 
 
 def test_the_deny_list_does_not_exclude_the_application_itself():

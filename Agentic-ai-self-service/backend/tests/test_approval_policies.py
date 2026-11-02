@@ -85,5 +85,5 @@ def test_hook_source_block_is_valid_python():
 
     ast.parse(_HITL_TOOL_SRC)
     assert "_ApprovalHook" in _HITL_TOOL_SRC
-    assert "BeforeToolInvocationEvent" in _HITL_TOOL_SRC
+    assert "BeforeToolCallEvent" in _HITL_TOOL_SRC
     assert "_APPROVAL_HOOKS" in _HITL_TOOL_SRC

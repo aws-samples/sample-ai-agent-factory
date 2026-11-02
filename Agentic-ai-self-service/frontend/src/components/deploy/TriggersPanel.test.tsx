@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TriggersPanel } from './TriggersPanel';
 
+const getSlots = vi.fn();
 const listTriggers = vi.fn();
 const createTrigger = vi.fn();
 const deleteTrigger = vi.fn();
@@ -9,6 +10,7 @@ const deleteTrigger = vi.fn();
 vi.mock('../../services/api', () => ({
   API_BASE_URL: 'https://agents.example.com',
   getApiClient: () => ({
+    getSlots,
     listTriggers,
     createTrigger,
     deleteTrigger,
@@ -53,6 +55,13 @@ function trigger(
 describe('TriggersPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getSlots.mockResolvedValue({
+      runtime_name: 'orders_agent',
+      production_version_id: 'version-production',
+      staging_version_id: null,
+      previous_production_version_id: null,
+      last_promoted_at: null,
+    });
     listTriggers.mockResolvedValue([]);
     createTrigger.mockResolvedValue(trigger());
     deleteTrigger.mockResolvedValue({
@@ -67,13 +76,34 @@ describe('TriggersPanel', () => {
 
     expect(screen.queryByText('Preview')).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Create live cron, EventBridge, S3/i),
+      await screen.findByText(/Create live cron, EventBridge, S3/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/exact deployed runtime version/i)).toBeInTheDocument();
     expect(screen.getByText(/does not silently retarget/i)).toBeInTheDocument();
     await waitFor(() =>
       expect(listTriggers).toHaveBeenCalledWith('orders_agent'),
     );
+  });
+
+  it('blocks trigger controls until a version is promoted to production', async () => {
+    getSlots.mockResolvedValue({
+      runtime_name: 'orders_agent',
+      production_version_id: null,
+      staging_version_id: 'version-staging',
+      previous_production_version_id: null,
+      last_promoted_at: null,
+    });
+
+    render(<TriggersPanel runtimeName="orders_agent" />);
+
+    expect(
+      await screen.findByText(/Promote a succeeded version to production/i),
+    ).toBeInTheDocument();
+    expect(listTriggers).not.toHaveBeenCalled();
+    expect(createTrigger).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole('button', { name: 'Add trigger' }),
+    ).not.toBeInTheDocument();
   });
 
   it('requires a non-empty cron expression before calling the API', async () => {
@@ -364,7 +394,9 @@ describe('TriggersPanel', () => {
     const { rerender } = render(
       <TriggersPanel runtimeName="orders_agent" refreshKey={0} />,
     );
-    expect(await screen.findByText('No triggers yet.')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Promote a succeeded version to production/i),
+    ).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
     listTriggers.mockRejectedValueOnce({

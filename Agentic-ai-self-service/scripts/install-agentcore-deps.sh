@@ -55,9 +55,14 @@ OUTPUT_DIR="${PROJECT_ROOT}/backend/agentcore-deps"
 # deltas, so each delta resolved mcp 2.1.1 as a transitive of strands-agents[<extra>] and
 # shipped a partial 2.x tree on top of the pinned 1.x.
 CONSTRAINTS_FILE="${PROJECT_ROOT}/backend/agentcore-deps-constraints.txt"
+PACKAGER="${PROJECT_ROOT}/scripts/package-agentcore-deps.py"
 
 if [[ ! -f "${CONSTRAINTS_FILE}" ]]; then
   echo "[ERROR] missing ${CONSTRAINTS_FILE}; refusing to build unpinned bundles" >&2
+  exit 1
+fi
+if [[ ! -f "${PACKAGER}" ]]; then
+  echo "[ERROR] missing ${PACKAGER}; refusing to build non-reproducible bundles" >&2
   exit 1
 fi
 
@@ -91,11 +96,6 @@ install_packages() {
   mkdir -p "${target_dir}"
 
   local constraint_flags=(--constraint "${CONSTRAINTS_FILE}")
-  # A second, GENERATED constraint used only for the provider deltas: see
-  # emit_tree_constraints below.
-  if [[ -n "${EXTRA_CONSTRAINTS:-}" && -f "${EXTRA_CONSTRAINTS}" ]]; then
-    constraint_flags+=(--constraint "${EXTRA_CONSTRAINTS}")
-  fi
 
   pip3 install \
     "${PIP_PLATFORM_FLAGS[@]}" \
@@ -107,68 +107,41 @@ install_packages() {
   remove_cache_files "${target_dir}"
 }
 
-# Emit a pip constraint file naming the EXACT version of every distribution installed in
-# a tree, skipping anything CONSTRAINTS_FILE already pins (pip rejects a package
-# constrained twice, even to the same version).
-#
-# This is what makes a provider DELTA sound. The delta subtracts the baseline by FILE
-# PATH, so a shared distribution that resolves to a different version in the provider's
-# own resolution loses only its overlapping paths: its version-unique modules and its
-# dist-info survive, and the container ends up with two versions of one package merged
-# into a single tree. Measured across the eight deltas built without this:
-#
-#   mcp        2.1.1 over the baseline's 1.30.0, in ALL EIGHT. 62 orphan 2.x modules
-#              plus a second dist-info, so importlib.metadata.version("mcp") is a coin
-#              flip, and mcp 2.x's own httpx2/httpcore2/mcp_types came along for the ride
-#              (provider-litellm.zip: 26 MB against provider-anthropic.zip's 2 MB, spent
-#              against AgentCore's hard 30s cold-start budget).
-#   websockets 16.1.1 over the baseline's 17.1, in provider-gemini.zip -- a DOWNGRADE,
-#              because google-genai caps it lower than strands does.
-#
-# Pinning the offenders by hand does not generalize: any shared distribution can do this,
-# and the next one is found in production. Constraining each delta to the baseline's own
-# resolution removes the whole class -- every shared distribution then resolves to the
-# same version, every one of its paths overlaps, and the subtraction deletes it entirely.
-#
-# If a provider SDK cannot accept a baseline version, pip FAILS HERE, loudly. That is the
-# correct outcome and it is not hypothetical: the first build with these constraints stopped
-# at provider-gemini with ResolutionImpossible, because every published google-genai caps
-# websockets<17.0 while the baseline's own free resolution took 17.1. The lesson is that the
-# BASELINE is the thing that has to give -- it must resolve inside the intersection of every
-# provider extra's ranges, not at the newest version it can reach on its own -- so the fix
-# is a pin in CONSTRAINTS_FILE (websockets==16.1.1), not a per-delta exemption. A delta
-# carrying its own version of a shared distribution is unsound by construction, whatever
-# makes it happen. Read this failure as "the baseline is wrong", never as "skip the
-# constraint for this provider".
-emit_tree_constraints() {
-  local tree_dir="$1"
-  local out_file="$2"
-  local d base name ver normalized
+# The complete canonical lock applies to the baseline and every provider delta. If a
+# provider cannot accept one of those versions, pip fails instead of creating a mixed tree.
 
-  : >"${out_file}"
-  for d in "${tree_dir}"/*.dist-info; do
-    [ -d "${d}" ] || continue
-    base="$(basename "${d}" .dist-info)"
-    name="${base%-*}"
-    ver="${base##*-}"
-    [ -n "${name}" ] && [ -n "${ver}" ] || continue
-    # Skip names CONSTRAINTS_FILE already pins, comparing PEP 503-normalized.
-    normalized="$(printf '%s' "${name}" | tr '[:upper:]_.' '[:lower:]--')"
-    if grep -qiE "^[[:space:]]*${normalized}[[:space:]]*==" \
-      <(tr '_.' '--' <"${CONSTRAINTS_FILE}"); then
-      continue
-    fi
-    printf '%s==%s\n' "${name}" "${ver}" >>"${out_file}"
-  done
-  LC_ALL=C sort -o "${out_file}" "${out_file}"
-}
-
-# Remove __pycache__ directories and .pyc files.
+# Remove caches and installer-generated files that the runtime never reads. Console
+# scripts embed the absolute --target directory in their shebang, and RECORD hashes those
+# path-dependent bytes; retaining either makes two otherwise identical builds differ.
 remove_cache_files() {
   local target_dir="$1"
 
+  # Production-gated runtimes use the AWS-documented direct-code entrypoint
+  # ["opentelemetry-instrument", "agent.py"]. Preserve that one script at the
+  # bundle root with a path-neutral shebang; remove every other console script.
+  if [[ -f "${target_dir:?}/bin/opentelemetry-instrument" ]]; then
+    {
+      printf '#!/usr/bin/env python3\n'
+      tail -n +2 "${target_dir:?}/bin/opentelemetry-instrument"
+    } >"${target_dir:?}/opentelemetry-instrument"
+    chmod 0755 "${target_dir:?}/opentelemetry-instrument"
+  fi
+  rm -rf "${target_dir:?}/bin"
   find "${target_dir}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
   find "${target_dir}" -type f -name "*.pyc" -delete 2>/dev/null || true
+  find "${target_dir}" -type f -path "*.dist-info/RECORD" -delete 2>/dev/null || true
+}
+
+# Validate every installed distribution against the complete lock and write a
+# deterministic archive (fixed metadata, sorted paths, normalized permissions).
+package_bundle() {
+  local target_dir="$1"
+  local zip_path="$2"
+
+  python3 "${PACKAGER}" \
+    --source "${target_dir}" \
+    --constraints "${CONSTRAINTS_FILE}" \
+    --output "${zip_path}"
 }
 
 # Create a zip from a directory's contents and remove the directory.
@@ -176,7 +149,7 @@ create_bundle_zip() {
   local target_dir="$1"
   local zip_path="$2"
 
-  (cd "${target_dir}" && zip -r -q "${zip_path}" .)
+  package_bundle "${target_dir}" "${zip_path}"
   rm -rf "${target_dir}"
 }
 
@@ -186,7 +159,7 @@ create_bundle_zip_keep() {
   local target_dir="$1"
   local zip_path="$2"
 
-  (cd "${target_dir}" && zip -r -q "${zip_path}" .)
+  package_bundle "${target_dir}" "${zip_path}"
 }
 
 # Build one provider-extras bundle: strands-agents[<extra>] MINUS everything the
@@ -243,6 +216,7 @@ main() {
   # native CloudWatch sidecar, etc.). Strands' setup_otlp_exporter() lazily
   # imports the HTTP exporter, so it MUST be in the bundle.
   local otel_packages=(
+    "aws-opentelemetry-distro"
     "opentelemetry-api"
     "opentelemetry-sdk"
     "opentelemetry-semantic-conventions"
@@ -289,12 +263,6 @@ main() {
   create_bundle_zip_keep "${strands_dir}" "${OUTPUT_DIR}/strands-mcp.zip"
   local strands_manifest="${OUTPUT_DIR}/.strands-mcp.manifest"
   (cd "${strands_dir}" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) >"${strands_manifest}"
-  # The baseline's own resolution, as constraints for the provider deltas below. Emitted
-  # from the tree that was just BUILT, not from a checked-in list, so it cannot disagree
-  # with the artifact the deltas are actually subtracted from. See emit_tree_constraints.
-  local baseline_constraints="${OUTPUT_DIR}/.strands-mcp.constraints"
-  emit_tree_constraints "${strands_dir}" "${baseline_constraints}"
-  log_info "Baseline pins for provider deltas: $(wc -l <"${baseline_constraints}" | tr -d ' ') distributions"
   rm -rf "${strands_dir}"
 
   # Bundle 3: mcp-lean (Bug 171) — the generated MCP SERVER only does
@@ -330,17 +298,13 @@ main() {
   # and provider-writer.zip would be a 1.0 MB artifact nothing can ever download.
   # Measured: it built fine and was dead weight. Same reasoning for groq/deepseek/
   # together, which map to the openai and litellm extras.
-  # Every delta below resolves against the baseline's exact versions, so that a shared
-  # distribution's paths all overlap and the subtraction removes it completely. Scoped to
-  # this loop and unset afterwards: the three bundles above ARE the baseline and must
-  # resolve freely within CONSTRAINTS_FILE.
+  # Every delta resolves under the same complete lock as the baseline. Shared paths
+  # therefore subtract cleanly, and any incompatible provider fails during pip resolution.
   local extra
-  EXTRA_CONSTRAINTS="${baseline_constraints}"
   for extra in "${provider_extras[@]}"; do
     build_provider_bundle "${extra}" "${strands_manifest}"
   done
-  unset EXTRA_CONSTRAINTS
-  rm -f "${strands_manifest}" "${baseline_constraints}"
+  rm -f "${strands_manifest}"
 
   local base_size strands_size mcplean_size
   base_size=$(du -sh "${OUTPUT_DIR}/base.zip" | cut -f1)

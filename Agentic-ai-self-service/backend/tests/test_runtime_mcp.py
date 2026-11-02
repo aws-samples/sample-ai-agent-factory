@@ -184,7 +184,9 @@ def app() -> FastAPI:
 
 
 @pytest.fixture
-def client(app: FastAPI) -> TestClient:
+def client(app: FastAPI, monkeypatch) -> TestClient:
+    monkeypatch.setattr(router_module, "reserve_invocation_budget", lambda **_kwargs: None)
+    monkeypatch.setattr(router_module, "settle_invocation_budget", lambda *_args, **_kwargs: None)
     return TestClient(app)
 
 
@@ -726,3 +728,139 @@ def test_failed_authority_read_is_503_not_an_ambient_session(monkeypatch):
     assert exc.value.status_code == 503
     assert "sensitive" not in str(exc.value.detail)
     session_for_event.assert_not_called()
+
+
+def test_mcp_tool_call_reserves_and_commits_after_dispatch(client, monkeypatch):
+    agentcore = _McpClient()
+    monkeypatch.setattr(
+        router_module,
+        "resolve_owned_deployment_runtime_target",
+        MagicMock(return_value=_target(agentcore)),
+    )
+    reservation = object()
+    reserve = MagicMock(return_value=reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(router_module, "reserve_invocation_budget", reserve)
+    monkeypatch.setattr(router_module, "settle_invocation_budget", settle)
+
+    response = client.post(
+        "/api/test-mcp-runtime/call",
+        json={"deploymentId": DEPLOYMENT_ID, "toolName": "get_weather", "arguments": {}},
+    )
+
+    assert response.status_code == 200, response.text
+    reserve.assert_called_once_with(
+        owner_sub=_LOCAL_DEV_SUB,
+        runtime_name=RUNTIME_ID,
+        resource_tags={},
+    )
+    settle.assert_called_once_with(reservation, dispatched=True)
+    assert agentcore.calls
+
+
+def test_mcp_budget_429_never_reaches_agentcore(client, monkeypatch):
+    agentcore = _McpClient()
+    monkeypatch.setattr(
+        router_module,
+        "resolve_owned_deployment_runtime_target",
+        MagicMock(return_value=_target(agentcore)),
+    )
+    monkeypatch.setattr(
+        router_module,
+        "reserve_invocation_budget",
+        MagicMock(side_effect=HTTPException(status_code=429, detail="hard budget exhausted")),
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(router_module, "settle_invocation_budget", settle)
+
+    response = client.post(
+        "/api/test-mcp-runtime/call",
+        json={"deploymentId": DEPLOYMENT_ID, "toolName": "get_weather", "arguments": {}},
+    )
+
+    assert response.status_code == 429
+    assert agentcore.calls == []
+    settle.assert_not_called()
+
+
+def test_mcp_local_validation_failure_releases_before_dispatch(client, monkeypatch):
+    agentcore = _McpClient()
+    monkeypatch.setattr(
+        router_module,
+        "resolve_owned_deployment_runtime_target",
+        MagicMock(return_value=_target(agentcore)),
+    )
+    reservation = object()
+    monkeypatch.setattr(
+        router_module,
+        "reserve_invocation_budget",
+        MagicMock(return_value=reservation),
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(router_module, "settle_invocation_budget", settle)
+
+    response = client.post(
+        "/api/test-mcp-runtime/call",
+        json={
+            "deploymentId": DEPLOYMENT_ID,
+            "toolName": "bad\ntool",
+            "arguments": {},
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    assert agentcore.calls == []
+    settle.assert_called_once_with(reservation, dispatched=False)
+
+
+def test_mcp_tool_discovery_reserves_and_commits_after_dispatch(client, monkeypatch):
+    agentcore = _McpClient()
+    monkeypatch.setattr(
+        router_module,
+        "resolve_owned_deployment_runtime_target",
+        MagicMock(return_value=_target(agentcore)),
+    )
+    reservation = object()
+    reserve = MagicMock(return_value=reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(router_module, "reserve_invocation_budget", reserve)
+    monkeypatch.setattr(router_module, "settle_invocation_budget", settle)
+
+    response = client.post(
+        "/api/test-mcp-runtime/tools",
+        json={"deploymentId": DEPLOYMENT_ID},
+    )
+
+    assert response.status_code == 200, response.text
+    reserve.assert_called_once_with(
+        owner_sub=_LOCAL_DEV_SUB,
+        runtime_name=RUNTIME_ID,
+        resource_tags={},
+    )
+    settle.assert_called_once_with(reservation, dispatched=True)
+    assert agentcore.calls
+
+
+def test_mcp_discovery_authorization_429_never_reaches_runtime(client, monkeypatch):
+    agentcore = _McpClient()
+    monkeypatch.setattr(
+        router_module,
+        "resolve_owned_deployment_runtime_target",
+        MagicMock(return_value=_target(agentcore)),
+    )
+    monkeypatch.setattr(
+        router_module,
+        "reserve_invocation_budget",
+        MagicMock(side_effect=HTTPException(status_code=429, detail="authorization exhausted")),
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(router_module, "settle_invocation_budget", settle)
+
+    response = client.post(
+        "/api/test-mcp-runtime/tools",
+        json={"deploymentId": DEPLOYMENT_ID},
+    )
+
+    assert response.status_code == 429
+    assert agentcore.calls == []
+    settle.assert_not_called()

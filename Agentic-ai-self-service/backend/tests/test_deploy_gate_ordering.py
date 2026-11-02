@@ -30,6 +30,7 @@ pitfall, which is why the ordering is the thing under test.
 
 from __future__ import annotations
 
+import json
 import sys
 
 sys.path.insert(0, "src")
@@ -226,6 +227,16 @@ def spy(monkeypatch):
 
     monkeypatch.setattr(reg, "unapproved_integrations", lambda idents: [])
     monkeypatch.setattr(dh, "resolve_system_prompt", lambda *a, **k: None, raising=False)
+
+    # Production admission now requires an append-only audit intent before the
+    # route executes. This suite tests the route's own ordering, not audit outage
+    # behavior (covered by test_audit_production_contract), so provide a durable
+    # no-op sink rather than letting ambient AWS credentials decide the result.
+    import app.services.audit_middleware as audit_middleware
+
+    audit_sink = MagicMock()
+    monkeypatch.setattr(audit_middleware, "get_audit_store", lambda: audit_sink)
+    s.audit_sink = audit_sink
 
     return s
 
@@ -619,7 +630,6 @@ def test_a_malformed_state_machine_arn_weakens_one_check_and_breaks_nothing(spy,
 # id into ``workflow_id`` would pass them all, and nothing would distinguish the two fields.
 # --------------------------------------------------------------------------------------
 
-import json  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 FLOW = "7d1e0c2a-5b9f-4f7e-8a31-2c6d9e0b4a17"
@@ -837,3 +847,346 @@ def test_listing_by_flow_returns_only_the_callers_rows(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert [r["deployment_id"] for r in response.json()] == ["mine"]
+
+
+def test_production_like_environment_defaults_new_deploys_to_staging(spy, monkeypatch):
+    evaluation_key_arn = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/12345678-1234-1234-1234-1234567890ab"
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.setenv("EVALUATION_EVIDENCE_KMS_KEY_ARN", evaluation_key_arn)
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is True
+    assert version.promotion_policy["policy_digest"]
+    assert version.evaluation_kms_key_arn == evaluation_key_arn
+    state = spy.store.create.call_args.args[0]
+    assert state.evaluation_kms_key_arn == evaluation_key_arn
+    sfn_input = json.loads(spy.start.input_json)
+    assert sfn_input["deployment_slot"] == "staging"
+    assert sfn_input["evaluation_kms_key_arn"] == evaluation_key_arn
+    assert sfn_input["production_gate_required"] is True
+
+
+def test_production_gate_propagation_removal_mutant_is_rejected(spy, monkeypatch):
+    """The version claim and every runtime step must consume the same gate bit."""
+
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    assert execution["production_gate_required"] is True
+
+    # Removal is the live defect: downstream ``event.get`` calls all became
+    # false while the immutable version row still said evaluation was required.
+    from app.services.deployment_payload_validation import (
+        PayloadPhase,
+        validate_deployment_payload,
+    )
+
+    removed = {key: value for key, value in execution.items() if key != "production_gate_required"}
+    verdict = validate_deployment_payload(removed, phase=PayloadPhase.PREPARED)
+    assert "missing_server_field" in verdict.codes()
+
+
+def test_production_like_environment_rejects_direct_production_before_side_effects(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body(deploymentSlot="production"))
+
+    assert response.status_code == 409, response.text
+    assert "Direct production deployment is disabled" in response.json()["detail"]
+    assert spy.side_effects == []
+
+
+def test_dev_environment_preserves_direct_production_default(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is False
+    execution = json.loads(spy.start.input_json)
+    assert execution["deployment_slot"] == "production"
+    assert execution["production_gate_required"] is False
+
+
+# --------------------------------------------------------------------------------------
+# Production safety: mandatory Guardrails and non-bypassable evaluation gating.
+# --------------------------------------------------------------------------------------
+
+
+def _enable_production_admission(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+    monkeypatch.setenv(
+        "EVALUATION_EVIDENCE_KMS_KEY_ARN",
+        f"arn:aws:kms:{REGION}:{ACCOUNT}:key/11111111-2222-3333-4444-555555555555",
+    )
+
+
+def test_production_deploy_injects_guardrail_baseline_before_execution(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    guardrail = execution["guardrails_config"]
+    assert guardrail["enabled"] is True
+    assert guardrail["mode"] == "create_new"
+    assert guardrail["baselineProfile"] == "production-v1"
+    assert set(guardrail["contentFilters"].values()) == {"HIGH"}
+    assert "guardrails" in execution["connected_tools"]
+    assert "policy_config" not in execution
+
+
+def test_production_model_free_mcp_uses_protocol_gates_not_model_controls(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    import app.services.observability as observability
+
+    monkeypatch.setattr(observability, "get_platform_observability_defaults", lambda: None)
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            templateId="mcp-server-runtime",
+            deploymentSlot="production",
+            config={
+                "name": "orders_mcp_server",
+                "protocol": "MCP",
+                "deploymentType": "direct_code_deploy",
+                "pythonRuntime": "PYTHON_3_13",
+                "enableOtel": False,
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is False
+    assert version.promotion_policy == {}
+    assert version.evaluation_kms_key_arn is None
+    execution = json.loads(spy.start.input_json)
+    assert execution["deployment_slot"] == "production"
+    assert execution["production_gate_required"] is False
+    assert "guardrails_config" not in execution
+    assert "guardrails" not in execution["connected_tools"]
+
+
+def test_production_deploy_raises_weak_guardrail_settings_to_platform_floor(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    body = _body(
+        guardrailsConfig={
+            "enabled": False,
+            "mode": "create_new",
+            "contentFilters": {"hate": "NONE", "prompt_attack": "LOW"},
+            "piiFilters": [{"type": "EMAIL", "action": "BLOCK"}],
+        }
+    )
+
+    response = _client().post("/api/deploy", json=body)
+
+    assert response.status_code == 202, response.text
+    guardrail = json.loads(spy.start.input_json)["guardrails_config"]
+    assert guardrail["enabled"] is True
+    assert guardrail["contentFilters"]["hate"] == "HIGH"
+    assert guardrail["contentFilters"]["prompt_attack"] == "HIGH"
+    pii = {item["type"]: item["action"] for item in guardrail["piiFilters"]}
+    assert pii["EMAIL"] == "BLOCK"
+    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"  # pragma: allowlist secret
+
+
+def test_production_existing_guardrail_is_refused_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(guardrailsConfig={"mode": "existing", "guardrailId": "gr-unattested"}),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "cannot be attested" in response.text
+    assert spy.side_effects == []
+
+
+def test_production_evaluation_gate_disable_is_refused_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setenv("PRODUCTION_EVALUATION_GATE", "false")
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 503, response.text
+    assert "evaluation policy is invalid" in response.text
+    assert spy.side_effects == []
+
+
+def test_production_gateway_injects_fail_closed_cedar_before_execution(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(gatewayConfig={"name": "gateway-policy-probe"}),
+    )
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    assert execution["policy_config"] == {
+        "enabled": True,
+        "mode": "ENFORCE",
+        "on_enforce_failure": "fail_closed",
+        "baselineProfile": "production-v1",
+    }
+
+
+def test_production_gateway_overrides_disabled_log_only_policy(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            gatewayConfig={"name": "gateway-policy-probe"},
+            policyConfig={
+                "enabled": False,
+                "mode": "LOG_ONLY",
+                "on_enforce_failure": "log_only",
+                "rules": [{"effect": "forbid", "action": "delete"}],
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    policy = json.loads(spy.start.input_json)["policy_config"]
+    assert policy["enabled"] is True
+    assert policy["mode"] == "ENFORCE"
+    assert policy["on_enforce_failure"] == "fail_closed"
+    assert policy["rules"] == [{"effect": "forbid", "action": "delete"}]
+
+
+def test_production_rejects_litellm_tool_gateway_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            gatewayConfig={
+                "name": "gateway-policy-probe",
+                "gatewayProvider": "litellm",
+            }
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "require AgentCore Gateway" in response.text
+    assert spy.side_effects == []
+
+
+def test_production_rejects_a2a_budget_bypass_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "outside the invocation-authorization support envelope" in response.text
+    assert spy.side_effects == []
+
+
+def test_development_keeps_a2a_interoperability_available(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1
+
+
+def test_mutation_removing_a2a_envelope_reopens_production_bypass(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setattr(
+        dh,
+        "enforce_production_invocation_budget_envelope",
+        lambda **_kwargs: None,
+    )
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1
+
+
+def test_production_rejects_managed_harness_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "Harness hooks cannot redact model output" in response.text
+    assert spy.side_effects == []
+
+
+def test_development_keeps_managed_harness_available(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1
+
+
+def test_mutation_removing_harness_envelope_reopens_guardrail_bypass(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setattr(
+        dh,
+        "enforce_production_execution_mode",
+        lambda _mode: None,
+    )
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1

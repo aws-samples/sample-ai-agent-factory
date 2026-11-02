@@ -4,7 +4,7 @@ Converts a DeployRequest (workflow definition from the frontend) into a
 complete CloudFormation template bundle using native AWS::BedrockAgentCore::*
 resource types wherever they exist.
 
-Four Custom Resources are emitted, all served by the single cfn-provider
+Five Custom Resources are emitted, all served by the single cfn-provider
 Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
 
 - ``Custom::AgentCodePackage`` — merges the agent code with a prebuilt
@@ -20,6 +20,12 @@ Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
   Runtime. Emitted only on the MCP-server path.
 - ``Custom::AgentCorePolicy`` — creates the Cedar policy attached to a
   PolicyEngine. Emitted only when a policy is configured.
+- ``Custom::ManagedWebSearchTarget`` — creates and verifies the managed Web
+  Search connector at the exact certified version. Managed connector targets
+  publish automatically and reject ``SynchronizeGatewayTargets``; the provider
+  requires exact READY read-back instead. CloudFormation's native GatewayTarget
+  connector surface does not expose ``version``. Emitted only when managed Web
+  Search is requested.
 
 Keep this list in sync with the handler dispatch in
 ``cfn_provider/handler.py`` and with the architecture note in the generated
@@ -36,6 +42,9 @@ The generated bundle includes:
 - deploy.sh — One-command deployment script
 - teardown.sh — Stack deletion script
 - README.md — Documentation
+- artifact-manifest.json / SHA256SUMS / verify-artifact.py — canonical integrity
+  metadata and a dependency-free safe extractor
+- .github/, buildspec.yml, and ci/ — inert integrity-first CI/CD examples
 
 The large dependency ZIP is deliberately not nested in every export. Instead,
 ``deploy.sh`` checks the target bucket and, when it is absent, runs the included
@@ -60,13 +69,36 @@ from string import Formatter
 import yaml
 from pydantic import BaseModel
 
-from app.models.deployment_models import CfnNamingProfile, DeployRequest, RuntimeConfig
+from app.models.deployment_models import (
+    CfnNamingProfile,
+    DeployRequest,
+    RuntimeConfig,
+    validate_export_references,
+)
 from app.services import codegen_templates
-from app.services.code_generator import generate_agent_code, resolve_model_id
+from app.services.code_generator import (
+    PROVIDER_STRANDS_EXTRA,
+    generate_agent_code,
+    provider_bundle_key,
+    provider_bundle_keys_for,
+    provider_strands_extras_for,
+    resolve_model_id,
+)
+from app.services.downloadable_artifact import build_artifact_zip
 from app.services.gateway_deployer import _default_lambda_tool_schema
 from app.services.litellm_gateway_deployer import resolve_gateway_provider, resolve_mcp_url
+from app.services.managed_web_search import (
+    MANAGED_WEB_SEARCH_CONNECTOR_ID,
+    MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+    MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
+    MANAGED_WEB_SEARCH_TARGET_NAME,
+    MANAGED_WEB_SEARCH_TOOL_IDS,
+    MANAGED_WEB_SEARCH_TOOL_NAME,
+    managed_web_search_requested,
+)
 from app.services.mcp_gateway_protocol import MCP_SUPPORTED_VERSIONS
 from app.services.observability import build_otel_env_vars
+from app.services.region_capabilities import SUPPORTED_SINGLE_REGION_RELEASES
 from app.services.region_models import current_region, is_inference_profile_id, repoint_regional_prefix
 from app.services.runtime_artifact import (
     BASE_BUNDLE_KEY,
@@ -75,7 +107,15 @@ from app.services.runtime_artifact import (
     RuntimeArtifactError,
     classify_runtime_artifact,
 )
-from app.services.runtime_deployer import _build_network_configuration
+from app.services.runtime_deployer import (
+    _build_network_configuration,
+    canvas_model_providers,
+    needs_provider_api_key,
+)
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,11 +222,12 @@ _CUSTOM_RESOURCE_TAG_LIMITS: dict[str, int] = {
     "Custom::RuntimeLogGroup": 50,
 }
 
-# AgentCore Policy children do not support tags. Their owning PolicyEngine does, and
-# is tagged by the native-resource pass above. Keep this explicit so the exception
-# cannot be mistaken for the old blanket "skip every Custom::*" behavior.
+# AgentCore Policy and GatewayTarget children do not support tags. Their owning
+# native resources carry the effective tags. Keep these explicit so neither
+# exception can be mistaken for the old blanket "skip every Custom::*" behavior.
 _CUSTOM_RESOURCE_TAG_COVERED_BY: dict[str, str] = {
     "Custom::AgentCorePolicy": "AWS::BedrockAgentCore::PolicyEngine",
+    "Custom::ManagedWebSearchTarget": "AWS::BedrockAgentCore::Gateway",
 }
 
 #: The tag character class, the 128/256 length bounds, the reserved-prefix rule and the
@@ -2865,6 +2906,10 @@ def _a2a_agentcore_runtime_arn(entry: str) -> str | None:
 SECRETSMANAGER_ARN_PATTERN = (
     r"^arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]{1,32}:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$"
 )
+AGENTCORE_CONNECTOR_SECRET_ARN_PATTERN = (
+    r"^arn:aws:secretsmanager:[a-z0-9-]{1,32}:[0-9]{12}:"
+    r"secret:agentcore-connector/[A-Za-z0-9/_+=.@-]{1,492}$"
+)
 
 # https only. The virtual key rides this connection on every MCP call, so a
 # template that could be pointed at http:// by overriding a parameter would let
@@ -2977,15 +3022,6 @@ def _litellm_export_settings(gateway_config: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
-    "duckduckgo_search": {
-        "name": "duckduckgo_search",
-        "description": "Search the web using DuckDuckGo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-    },
     "wikipedia_search": {
         "name": "wikipedia_search",
         "description": "Search Wikipedia and return an article summary.",
@@ -3066,7 +3102,7 @@ GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
 # to the "CustomerSupportTools" target. This mirrors the live gateway_deployer
 # routing so an export and a UI deploy advertise and execute the same tools.
 _CUSTOMER_SUPPORT_TOOL_IDS = {"get_order", "get_customer", "list_orders", "process_refund"}
-_DYNAMIC_TOOL_IDS = {"duckduckgo_search", "wikipedia_search", "weather_api", "web_page_fetcher"}
+_DYNAMIC_TOOL_IDS = {"wikipedia_search", "weather_api", "web_page_fetcher"}
 _LEGACY_CUSTOMER_TOOL_IDS = {
     "check_order_status",
     "lookup_customer",
@@ -3091,11 +3127,13 @@ _LEGACY_TOOL_SCHEMAS: dict[str, dict] = {
     },
     "lookup_customer": {
         "name": "lookup_customer",
-        "description": "Look up customer information by email address.",
+        "description": "Look up customer information by customer ID.",
         "inputSchema": {
             "type": "object",
-            "properties": {"email": {"type": "string", "description": "Customer email address"}},
-            "required": ["email"],
+            "properties": {
+                "customer_id": {"type": "string", "description": "Customer ID"},
+            },
+            "required": ["customer_id"],
         },
     },
     "search_knowledge_base": {
@@ -3139,6 +3177,7 @@ _LEGACY_TOOL_SCHEMAS: dict[str, dict] = {
 # tests/test_cfn_export_contract.py parses that script and compares, because a
 # silent divergence here means a stack that deploys and then dies at import.
 _OTEL_PACKAGES = [
+    "aws-opentelemetry-distro",
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-semantic-conventions",
@@ -3637,24 +3676,29 @@ DEPENDENCY_BUNDLE_PACKAGES = {
 }
 
 
-def _dependency_bundle_recipe(bundle_key: str) -> list[str]:
-    """The package recipe for a dependency-bundle key, or fail closed.
-
-    Both the build-script generator and the README describe what a bundle installs, so
-    both route through here: neither may silently fall back to the Strands or lean recipe
-    when the classifier and this table drift. An unknown key means the emitted artifact --
-    a build script or the deployment instructions -- would build or describe packages the
-    template never selected, and the only symptom would be a 30s init timeout at deploy
-    time. Refuse rather than lie.
-    """
+def _dependency_bundle_recipe(bundle_key: str, provider_extras: tuple[str, ...] = ()) -> list[str]:
+    """Return the exact base recipe plus the canvas's complete provider closure."""
     try:
-        return DEPENDENCY_BUNDLE_PACKAGES[bundle_key]
+        packages = list(DEPENDENCY_BUNDLE_PACKAGES[bundle_key])
     except KeyError as exc:
         raise RuntimeArtifactError(
             f"No dependency-bundle recipe for {bundle_key!r}; refusing to emit deployment "
             f"artifacts describing packages the template never selected. Known bundles: "
             f"{sorted(DEPENDENCY_BUNDLE_PACKAGES)}."
         ) from exc
+    extras = tuple(sorted(set(provider_extras)))
+    known_extras = {extra for extra in PROVIDER_STRANDS_EXTRA.values() if extra}
+    if set(extras) - known_extras:
+        raise RuntimeArtifactError("The export selected an unreviewed Strands provider extra")
+    if extras:
+        try:
+            index = packages.index("strands-agents")
+        except ValueError as exc:
+            raise RuntimeArtifactError(
+                "A model-provider extra was selected for a dependency recipe without Strands"
+            ) from exc
+        packages[index] = f"strands-agents[{','.join(extras)}]"
+    return packages
 
 
 # AgentCore Runtime is aarch64/Python 3.13. `--only-binary=:all:` with an explicit
@@ -3689,20 +3733,206 @@ DEPENDENCY_BUNDLE_PIP_FLAGS = [
 #: platform's build: a constraint fixes a version without installing anything, so only the pins
 #: for packages a recipe actually installs take effect.
 DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
-    "strands-agents==1.56.0",
-    "strands-agents-tools==0.8.9",
+    "aiohappyeyeballs==2.7.1",
+    "aiohttp==3.14.4",
+    "aiosignal==1.4.0",
+    "annotated-types==0.8.0",
+    "anthropic==0.125.0",
+    "anyio==4.15.1",
+    "attrs==26.1.0",
+    "aws-bedrock-token-generator==1.1.0",
+    "aws-requests-auth==0.4.3",
+    "beautifulsoup4==4.15.0",
     "bedrock-agentcore==1.23.1",
+    "boto3==1.43.109",
+    "boto3-stubs==1.43.108",
+    "botocore==1.43.109",
+    "botocore-stubs==1.43.67",
+    "certifi==2026.7.22",
+    "cffi==2.1.1",
+    "charset-normalizer==3.5.2",
+    "click==8.5.0",
+    "cryptography==50.0.2",
+    "dill==0.4.1",
+    "distro==1.9.0",
+    "docstring-parser==0.18.0",
+    "eval-type-backport==0.4.0",
+    "fastuuid==0.14.0",
+    "filelock==4.0.12",
+    "frozenlist==1.8.0",
+    "fsspec==2026.9.0",
+    "google-auth==2.60.0",
+    "google-genai==2.28.0",
+    "googleapis-common-protos==1.75.5",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "httpx==0.28.1",
+    "httpx-sse==0.4.3",
+    "huggingface-hub==0.31.4",
+    "idna==3.20",
+    "importlib-metadata==8.9.0",
+    "jinja2==3.1.6",
+    "jiter==0.17.0",
+    "jmespath==1.1.0",
+    "jsonpath-python==1.1.6",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "litellm==1.91.5",
+    "llama-api-client==0.6.0",
+    "markdown-it-py==4.2.0",
+    "markdownify==1.2.3",
+    "markupsafe==3.0.4",
     "mcp==1.30.0",
-    "websockets==16.1.1",
+    "mdurl==0.1.2",
+    "mistralai==2.10.1",
+    "mpmath==1.3.0",
+    "multidict==6.9.1",
+    "mypy-boto3-sagemaker-runtime==1.43.68",
+    "ollama==0.6.3",
+    "openai==2.54.0",
     "opentelemetry-api==1.44.0",
-    "opentelemetry-sdk==1.44.0",
-    "opentelemetry-semantic-conventions==0.65b0",
-    "opentelemetry-proto==1.44.0",
     "opentelemetry-exporter-otlp-proto-common==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.44.0",
     "opentelemetry-instrumentation==0.65b0",
     "opentelemetry-instrumentation-threading==0.65b0",
+    "opentelemetry-proto==1.44.0",
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-semantic-conventions==0.65b0",
+    "packaging==26.3",
+    "pillow==12.2.0",
+    "prompt-toolkit==3.0.53",
+    "propcache==0.5.4",
+    "protobuf==6.33.5",
+    "pyasn1==0.6.4",
+    "pyasn1-modules==0.4.2",
+    "pycparser==3.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "pydantic-settings==2.15.0",
+    "pygments==2.21.0",
+    "pyjwt==2.15.1",
+    "python-dateutil==2.9.0.post0",
+    "python-dotenv==1.2.4",
+    "python-multipart==0.0.32",
+    "pyyaml==6.0.3",
+    "referencing==0.37.0",
+    "regex==2026.9.29",
+    "requests==2.34.2",
+    "rich==15.0.0",
+    "rpds-py==2026.9.1",
+    "s3transfer==0.19.2",
+    "six==1.17.0",
+    "slack-bolt==1.30.0",
+    "slack-sdk==3.45.0",
+    "sniffio==1.3.1",
+    "soupsieve==2.10",
+    "sse-starlette==3.5.0",
+    "starlette==1.7.0",
+    "strands-agents==1.56.0",
+    "strands-agents-tools==0.8.9",
+    "sympy==1.14.0",
+    "tenacity==9.1.2",
+    "tiktoken==0.11.0",
+    "tokenizers==0.23.2",
+    "tqdm==4.70.1",
+    "types-s3transfer==0.16.0",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4",
+    "urllib3==2.8.0",
+    "uvicorn==0.54.0",
+    "watchdog==6.0.0",
+    "wcwidth==0.9.2",
+    "websockets==16.1.1",
+    "wrapt==2.5.0",
+    "yarl==1.25.1",
+    # AWS ADOT 0.21.0 direct-code instrumentation graph.
+    "asgiref==3.12.1",
+    "aws-opentelemetry-distro==0.21.0",
+    "cachetools==6.2.4",
+    "grpcio==1.84.0",
+    "opentelemetry-distro==0.65b0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    "opentelemetry-instrumentation-aio-pika==0.65b0",
+    "opentelemetry-instrumentation-aiohttp-client==0.65b0",
+    "opentelemetry-instrumentation-aiokafka==0.65b0",
+    "opentelemetry-instrumentation-aiopg==0.65b0",
+    "opentelemetry-instrumentation-asgi==0.65b0",
+    "opentelemetry-instrumentation-asyncpg==0.65b0",
+    "opentelemetry-instrumentation-aws-lambda==0.65b0",
+    "opentelemetry-instrumentation-boto3sqs==0.65b0",
+    "opentelemetry-instrumentation-botocore==0.65b0",
+    "opentelemetry-instrumentation-cassandra==0.65b0",
+    "opentelemetry-instrumentation-celery==0.65b0",
+    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+    "opentelemetry-instrumentation-dbapi==0.65b0",
+    "opentelemetry-instrumentation-django==0.65b0",
+    "opentelemetry-instrumentation-falcon==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-flask==0.65b0",
+    "opentelemetry-instrumentation-grpc==0.65b0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-jinja2==0.65b0",
+    "opentelemetry-instrumentation-kafka-python==0.65b0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+    "opentelemetry-instrumentation-mysql==0.65b0",
+    "opentelemetry-instrumentation-mysqlclient==0.65b0",
+    "opentelemetry-instrumentation-pika==0.65b0",
+    "opentelemetry-instrumentation-psycopg2==0.65b0",
+    "opentelemetry-instrumentation-pymemcache==0.65b0",
+    "opentelemetry-instrumentation-pymongo==0.65b0",
+    "opentelemetry-instrumentation-pymysql==0.65b0",
+    "opentelemetry-instrumentation-pyramid==0.65b0",
+    "opentelemetry-instrumentation-redis==0.65b0",
+    "opentelemetry-instrumentation-remoulade==0.65b0",
+    "opentelemetry-instrumentation-requests==0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.65b0",
+    "opentelemetry-instrumentation-sqlite3==0.65b0",
+    "opentelemetry-instrumentation-starlette==0.65b0",
+    "opentelemetry-instrumentation-system-metrics==0.65b0",
+    "opentelemetry-instrumentation-tornado==0.65b0",
+    "opentelemetry-instrumentation-tortoiseorm==0.65b0",
+    "opentelemetry-instrumentation-urllib==0.65b0",
+    "opentelemetry-instrumentation-urllib3==0.65b0",
+    "opentelemetry-instrumentation-wsgi==0.65b0",
+    "opentelemetry-processor-baggage==0.65b0",
+    "opentelemetry-propagator-aws-xray==1.0.2",
+    "opentelemetry-propagator-b3==1.44.0",
+    "opentelemetry-propagator-jaeger==1.44.0",
+    "opentelemetry-propagator-ot-trace==0.65b0",
+    "opentelemetry-sdk-extension-aws==2.1.0",
+    "opentelemetry-util-http==0.65b0",
+    "psutil==7.2.2",
+    "zipp==4.1.1",
 )
+
+_DEPENDENCY_CONSTRAINTS_SHA256 = hashlib.sha256(
+    ("\n".join(DEPENDENCY_BUNDLE_CONSTRAINTS) + "\n").encode("utf-8")
+).hexdigest()
+
+
+def _content_addressed_bundle_key(base_bundle_key: str, provider_extras: tuple[str, ...] = ()) -> str:
+    """Key one export recipe by base closure, extras, and the exact lock digest."""
+    identity = json.dumps(
+        {
+            "base_bundle_key": base_bundle_key,
+            "base_recipe": _dependency_bundle_recipe(base_bundle_key),
+            "constraint_sha256": _DEPENDENCY_CONSTRAINTS_SHA256,
+            "provider_extras": tuple(sorted(set(provider_extras))),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"agentcore-deps/export-{hashlib.sha256(identity).hexdigest()}.zip"
+
+
+def _export_provider_extras(config: RuntimeConfig) -> tuple[str, ...]:
+    """Resolve parent and multi-agent extras through the runtime's authorities."""
+    providers = canvas_model_providers(config)
+    extras = tuple(provider_strands_extras_for(providers))
+    if set(provider_bundle_keys_for(providers)) != {provider_bundle_key(extra) for extra in extras}:
+        raise RuntimeArtifactError("Provider bundle and Strands-extra closure disagree")
+    return extras
+
 
 # The pip that runs the build must be 24.2 or newer. Measured with these exact flags
 # (aarch64/cp313 target) from a Python 3.9 interpreter on 2026-10-01:
@@ -4177,6 +4407,305 @@ def _sanitize_deployment_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _entrypoint_integrity_verifier_source(artifact_type: str) -> str:
+    """Verifier for executable entrypoints, anchored outside the artifact itself."""
+    template = r"""#!/usr/bin/env python3 -I
+# Verify manifest-declared files against an externally retained manifest digest.
+#
+# Bootstrap trust comes first: this file runs inside the untrusted artifact directory,
+# so it must never import a module that directory can shadow. Python isolated mode
+# (-I) keeps the script directory and PYTHON* environment out of sys.path. The check
+# below uses only the already-loaded `sys` module and runs before any other import.
+import sys
+
+if not sys.flags.isolated or sys.flags.ignore_environment != 1 or sys.flags.no_user_site != 1:
+    sys.stderr.write(
+        "entrypoint integrity verification failed: run `python3 -I verify-integrity.py`; "
+        "a non-isolated interpreter can import modules from the unverified artifact directory\n"
+    )
+    raise SystemExit(1)
+
+import hashlib, json, os, re, stat
+from pathlib import Path, PurePosixPath
+
+EXPECTED_TYPE = "__ARTIFACT_TYPE__"
+EXPECTED_ENV = "EXPECTED_ARTIFACT_MANIFEST_SHA256"
+HEX = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA = "agentcore.downloadable-artifact/v1"
+
+class IntegrityError(ValueError):
+    pass
+
+def fail(message):
+    raise IntegrityError(message)
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+def safe_path(value):
+    if not isinstance(value, str) or not value or "\\" in value:
+        fail("manifest contains an unsafe path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts) or path.as_posix() != value:
+        fail("manifest contains an unsafe path")
+    if path.parts[0].casefold() == ".git" or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        fail("manifest contains a reserved path")
+    return value
+
+def read_regular(relative):
+    path = Path(relative)
+    current = Path(".")
+    for part in path.parts[:-1]:
+        current /= part
+        result = current.lstat()
+        if not stat.S_ISDIR(result.st_mode) or stat.S_ISLNK(result.st_mode):
+            fail("an artifact path traverses a symlink or non-directory")
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        fail("an artifact member is missing, a symlink, or not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino or opened.st_size != before.st_size):
+            fail("an artifact member changed while being opened")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (opened.st_size != after.st_size or opened.st_mtime_ns != after.st_mtime_ns
+                or opened.st_mode != after.st_mode):
+            fail("an artifact member changed while being read")
+        return b"".join(chunks), stat.S_IFREG | stat.S_IMODE(opened.st_mode)
+    finally:
+        os.close(descriptor)
+
+def main():
+    expected = os.environ.get(EXPECTED_ENV, "")
+    if expected.startswith("sha256:"):
+        expected = expected[7:]
+    if not HEX.fullmatch(expected):
+        fail(f"{EXPECTED_ENV} must be the artifact_manifest_sha256 from the authenticated export response")
+    manifest_bytes, manifest_mode = read_regular("artifact-manifest.json")
+    if manifest_mode != 0o100644 or sha(manifest_bytes) != expected:
+        fail("artifact manifest does not match the externally retained digest")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("artifact manifest is invalid")
+    canonical = (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+    if canonical != manifest_bytes:
+        fail("artifact manifest is not canonical")
+    if set(manifest) != {"artifact_type", "files", "schema"} or manifest.get("schema") != SCHEMA:
+        fail("artifact manifest schema is unsupported")
+    if manifest.get("artifact_type") != EXPECTED_TYPE or not isinstance(manifest.get("files"), list):
+        fail("artifact manifest type is wrong")
+    declared = {}; previous = ""
+    for row in manifest["files"]:
+        if not isinstance(row, dict) or set(row) != {"bytes", "mode", "path", "sha256", "type"}:
+            fail("artifact manifest row is invalid")
+        relative = safe_path(row["path"])
+        if relative <= previous or row["type"] != "file" or row["mode"] not in {"100644", "100755"}:
+            fail("artifact manifest rows are not canonical")
+        if type(row["bytes"]) is not int or row["bytes"] < 0 or not HEX.fullmatch(row["sha256"]):
+            fail("artifact manifest digest or size is invalid")
+        previous = relative; declared[relative] = row
+    sums_bytes, sums_mode = read_regular("SHA256SUMS")
+    if sums_mode != 0o100644:
+        fail("SHA256SUMS mode is invalid")
+    try:
+        lines = sums_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        fail("SHA256SUMS is not UTF-8")
+    sums = {}
+    for line in lines:
+        if "  " not in line:
+            fail("SHA256SUMS row is invalid")
+        digest, relative = line.split("  ", 1); safe_path(relative)
+        if relative in sums or not HEX.fullmatch(digest):
+            fail("SHA256SUMS row is invalid")
+        sums[relative] = digest
+    if set(sums) != set(declared) | {"artifact-manifest.json"} or sums["artifact-manifest.json"] != expected:
+        fail("SHA256SUMS does not match the externally anchored manifest")
+    for relative, row in declared.items():
+        data, mode = read_regular(relative); digest = sha(data)
+        if len(data) != row["bytes"] or digest != row["sha256"] or digest != sums[relative]:
+            fail("an artifact member failed its digest or size check")
+        if mode != int(row["mode"], 8):
+            fail("an artifact member failed its mode check")
+    print(f"verified externally anchored {EXPECTED_TYPE} artifact ({len(declared)} files)")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (IntegrityError, OSError) as exc:
+        print(f"entrypoint integrity verification failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+"""
+    return template.replace("__ARTIFACT_TYPE__", artifact_type)
+
+
+def _cfn_ci_files() -> dict[str, str]:
+    """Portable integrity-first CI/CD examples shipped with every CFN bundle.
+
+    Deployment is deliberately gated by ``ALLOW_DEPLOY=true``.  Extracting the
+    archive, committing it, or running the validator cannot mutate AWS.
+    """
+    verify = """#!/usr/bin/env bash
+set -euo pipefail
+python3 -I verify-integrity.py
+python3 -I verify-artifact.py --directory . --artifact-type cfn
+for tool in cfn-lint checkov; do
+  command -v "$tool" >/dev/null || { echo "ERROR: $tool is required" >&2; exit 1; }
+done
+cfn-lint template.yaml --regions "${AWS_REGION:-us-east-1}" --ignore-checks W
+checkov -f template.yaml --framework cloudformation --compact --quiet --skip-check CKV_AWS_116
+"""
+    deploy = """#!/usr/bin/env bash
+set -euo pipefail
+./ci/verify.sh
+if [ "${ALLOW_DEPLOY:-false}" != "true" ]; then
+  echo "Deployment is inert. Set ALLOW_DEPLOY=true explicitly." >&2
+  exit 2
+fi
+: "${STACK_NAME:?set STACK_NAME}"
+: "${AWS_REGION:?set AWS_REGION}"
+: "${ARTIFACTS_BUCKET:?set ARTIFACTS_BUCKET}"
+command -v aws >/dev/null || { echo "ERROR: aws CLI v2 is required" >&2; exit 1; }
+# deploy.sh is the sole deployment authority. It stages the template and every
+# content-addressed package before asking CloudFormation to deploy, so rich
+# templates are never sent through the 51,200-byte inline template-body API.
+# Credential material is never an argument: pass only secret ARNs through the
+# documented *_SECRET_ARN environment variables.
+./deploy.sh "$STACK_NAME" "$AWS_REGION" "$ARTIFACTS_BUCKET"
+"""
+    workflow = """name: validate-and-optionally-deploy
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy after every integrity and static gate passes
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Verify externally anchored artifact integrity first
+        env:
+          EXPECTED_ARTIFACT_MANIFEST_SHA256: ${{ vars.EXPECTED_ARTIFACT_MANIFEST_SHA256 }}
+        run: |
+          python3 -I verify-integrity.py
+          python3 -I verify-artifact.py --directory . --artifact-type cfn
+      - name: Install pinned validation tools
+        run: |
+          pipx install cfn-lint==1.57.0
+          pipx install checkov==3.3.1
+      - name: Lint and scan
+        run: ./ci/verify.sh
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Verify externally anchored artifact integrity before credentials
+        env:
+          EXPECTED_ARTIFACT_MANIFEST_SHA256: ${{ vars.EXPECTED_ARTIFACT_MANIFEST_SHA256 }}
+        run: |
+          python3 -I verify-integrity.py
+          python3 -I verify-artifact.py --directory . --artifact-type cfn
+      - name: Install pinned validation tools
+        run: |
+          pipx install cfn-lint==1.57.0
+          pipx install checkov==3.3.1
+      - name: Lint and scan
+        run: ./ci/verify.sh
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+      - name: Package and deploy
+        env:
+          ALLOW_DEPLOY: "true"
+          STACK_NAME: ${{ vars.STACK_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ARTIFACTS_BUCKET: ${{ vars.ARTIFACTS_BUCKET }}
+          PROVIDER_API_KEY_SECRET_ARN: ${{ secrets.PROVIDER_API_KEY_SECRET_ARN }}
+          LITELLM_API_KEY_SECRET_ARN: ${{ secrets.LITELLM_API_KEY_SECRET_ARN }}
+          OTEL_AUTH_SECRET_ARN: ${{ secrets.OTEL_AUTH_SECRET_ARN }}
+        run: ./ci/deploy.sh
+"""
+    buildspec = """version: 0.2
+env:
+  variables:
+    ALLOW_DEPLOY: "false"
+phases:
+  install:
+    runtime-versions:
+      python: 3.13
+    commands:
+      - python3 -m pip install --disable-pip-version-check cfn-lint==1.57.0 checkov==3.3.1
+  pre_build:
+    commands:
+      - python3 -I verify-integrity.py
+      - python3 -I verify-artifact.py --directory . --artifact-type cfn
+      - ./ci/verify.sh
+  build:
+    commands:
+      - |
+        if [ "$ALLOW_DEPLOY" = "true" ]; then
+          ./ci/deploy.sh
+        else
+          echo "Validation complete; deployment remains disabled"
+        fi
+"""
+    guide = """# CI/CD examples
+
+Both examples verify `artifact-manifest.json` and `SHA256SUMS` before any
+build or AWS command. They then run cfn-lint 1.57.0 and Checkov 3.3.1; only
+CKV_AWS_116 is accepted because these synchronously invoked Lambdas cannot use
+a dead-letter queue.
+
+Deployment is inert unless `ALLOW_DEPLOY=true` is set deliberately. Store the
+authenticated response's `artifact_manifest_sha256` outside this checkout as
+`EXPECTED_ARTIFACT_MANIFEST_SHA256`; absence or mismatch fails before OIDC can mint
+AWS credentials. Protect the GitHub `production` environment, permit deployment only
+from the repository's protected default branch, and configure the OIDC trust policy
+for audience `sts.amazonaws.com` and subject
+`repo:OWNER/REPOSITORY:environment:production`. Set `AWS_ACCOUNT_ID` to the one allowed
+target account; the credential action refuses any other account. Feature refs run only
+the token-free verify job.
+
+GitHub and CodeBuild install cfn-lint 1.57.0 and Checkov 3.3.1 exactly under Python
+3.13. Pass credential references rather than secret values. `ci/deploy.sh` validates
+first, then delegates exactly once to `deploy.sh`.
+"""
+    return {
+        ".github/workflows/deploy.yml": workflow,
+        "CI-CD.md": guide,
+        "buildspec.yml": buildspec,
+        "ci/deploy.sh": deploy,
+        "ci/verify.sh": verify,
+        "verify-integrity.py": _entrypoint_integrity_verifier_source("cfn"),
+    }
+
+
 @dataclass
 class CfnBundle:
     """Complete CloudFormation bundle ready for download."""
@@ -4198,52 +4727,37 @@ class CfnBundle:
     deployment_name: str = "agent"
 
     def to_zip(self) -> bytes:
-        """Package everything into a downloadable zip."""
-        buf = io.BytesIO()
-        prefix = f"{self.deployment_name}-cfn"
-
-        def write_script(name: str, content: str) -> None:
-            """Write an entry the recipient is told to execute.
-
-            ``writestr`` with a plain string name stores mode 0600, so every shipped
-            script arrived non-executable and the README's own first command failed
-            with ``permission denied`` (exit 126). The quick-start's ``chmod +x``
-            hid it for anyone who copied the whole block; the recipient who ran
-            ``./build-dependency-bundle.sh`` on its own hit it. Setting the mode in
-            the archive is better than adding another chmod line to the docs,
-            because the docs cannot cover every path into these files.
-            """
-            info = zipfile.ZipInfo(f"{prefix}/{name}")
-            info.external_attr = 0o755 << 16
-            info.compress_type = zipfile.ZIP_DEFLATED
-            zf.writestr(info, content)
-
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"{prefix}/template.yaml", self.template_yaml)
-            zf.writestr(f"{prefix}/agent-code/agent.py", self.agent_code)
-            zf.writestr(f"{prefix}/cfn-provider.zip", self.cfn_provider_code)
-            if self.tool_lambda_code:
-                zf.writestr(f"{prefix}/tool-lambdas.zip", self.tool_lambda_code)
-            if self.custom_tool_code:
-                zf.writestr(f"{prefix}/custom-tools.zip", self.custom_tool_code)
-            if self.mcp_server_code:
-                zf.writestr(f"{prefix}/agent-code/mcp_server.py", self.mcp_server_code)
-            write_script("deploy.sh", self.deploy_sh)
-            write_script("teardown.sh", self.teardown_sh)
-            # The recipient cannot deploy without the dependency bundle, and the
-            # bundle is not something we can put in this zip: it is ~43MB of
-            # platform-specific wheels. Ship the recipe instead. deploy.sh runs
-            # this automatically when the bundle is missing from the bucket.
-            if self.build_bundle_sh:
-                write_script("build-dependency-bundle.sh", self.build_bundle_sh)
-            # The two-runtime pattern needs a SECOND bundle for the FastMCP server.
-            # deploy.sh runs this automatically when the MCP bundle is missing from
-            # the bucket, exactly as it does for the main bundle above.
-            if self.build_mcp_bundle_sh:
-                write_script("build-mcp-server-bundle.sh", self.build_mcp_bundle_sh)
-            zf.writestr(f"{prefix}/README.md", self.readme)
-        buf.seek(0)
-        return buf.read()
+        """Package everything into the canonical downloadable artifact format."""
+        files: dict[str, str | bytes] = {
+            "template.yaml": self.template_yaml,
+            "agent-code/agent.py": self.agent_code,
+            "cfn-provider.zip": self.cfn_provider_code,
+            "deploy.sh": self.deploy_sh,
+            "teardown.sh": self.teardown_sh,
+            "README.md": self.readme,
+            **_cfn_ci_files(),
+        }
+        executable = {"deploy.sh", "teardown.sh", "ci/deploy.sh", "ci/verify.sh"}
+        if self.tool_lambda_code:
+            files["tool-lambdas.zip"] = self.tool_lambda_code
+        if self.custom_tool_code:
+            files["custom-tools.zip"] = self.custom_tool_code
+        if self.mcp_server_code:
+            files["agent-code/mcp_server.py"] = self.mcp_server_code
+        # The recipient cannot deploy without the dependency bundle, and the
+        # bundle is not nested here: it is ~43 MiB of platform-specific wheels.
+        if self.build_bundle_sh:
+            files["build-dependency-bundle.sh"] = self.build_bundle_sh
+            executable.add("build-dependency-bundle.sh")
+        if self.build_mcp_bundle_sh:
+            files["build-mcp-server-bundle.sh"] = self.build_mcp_bundle_sh
+            executable.add("build-mcp-server-bundle.sh")
+        return build_artifact_zip(
+            prefix=f"{self.deployment_name}-cfn",
+            artifact_type="cfn",
+            files=files,
+            executable_paths=executable,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4527,7 +5041,7 @@ def _reject_what_the_export_cannot_express(request: DeployRequest) -> None:
 # HTTP-agent doc and the MCP-native doc are chosen by template_id in _generate_readme.
 _AGENT_INVOKE_MD = '## Invoking the Agent\n\nThe runtime answers on the **data** plane, `bedrock-agentcore`. That is a different\nservice name from the `bedrock-agentcore-control` plane the stack\'s own resources live\non, and the invoke call exists only on the former. Both values it needs are outputs:\n\n```bash\nSTACK=my-agent\nREGION=YOUR-REGION\n\nRUNTIME_ARN="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\\n    --query "Stacks[0].Outputs[?OutputKey==\'RuntimeArn\'].OutputValue" --output text)"\nENDPOINT_NAME="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\\n    --query "Stacks[0].Outputs[?OutputKey==\'EndpointName\'].OutputValue" --output text)"\n{invoke_ids_sh}\nrm -f response.json\naws bedrock-agentcore invoke-agent-runtime \\\n    --region "$REGION" \\\n    --agent-runtime-arn "$RUNTIME_ARN" \\\n    --qualifier "$ENDPOINT_NAME" \\\n    --runtime-session-id {invoke_session_arg} \\\n    --content-type application/json \\\n    --cli-binary-format raw-in-base64-out \\\n    --payload {invoke_payload_arg} \\\n    response.json\n\ncat response.json\n```\n{invoke_memory_md}\nTwo separate `describe-stacks` calls rather than one query for both keys, deliberately.\nA `[?A || B]` query is a filter over the outputs: it hands them back in whatever order\nthe *stack* reports them, which is not the order you named them in and is not something\nyou control. Measured on a stack built from this template, the pair came back reversed,\nso `read -r RUNTIME_ARN ENDPOINT_NAME` put the endpoint name into the ARN variable and\nthe failure that followed was about a malformed ARN rather than about the order. Two\ncalls cost one extra round trip and cannot do that.\n\nA few things about that command are worth knowing before you adapt it.\n\n**`--cli-binary-format raw-in-base64-out` is not optional.** AWS CLI v2 treats blob\narguments as base64 by default, so without it the CLI tries to *decode* your payload.\nThis fails in two different shapes, and the second one is the expensive one. A payload\ncontaining `{{` or `"` is rejected on your own machine with `Invalid base64` — annoying,\nbut it tells you what is wrong. A payload that happens to be valid base64 is decoded to\nbinary and sent, and then the error names nothing you can act on:\n\n```\nAn error occurred (RuntimeClientError) when calling the InvokeAgentRuntime operation:\nReceived error (400) from runtime. Please check your CloudWatch logs for more information.\n```\n\nThat reads exactly like a broken deployment, and it is not: it is this flag. The logs it\nsends you to do say so, as a `WARNING` reading `Invalid encoding in request ... \'utf-8\'\ncodec can\'t decode byte` — but that sentence never reaches your terminal, so do not wait\nto see it. The byte it names is whatever your decoded payload happened to begin with, so\nthere is no fixed string to search for. If a runtime you just deployed answers 400 with\nnothing else to go on, check this flag before you go looking at your agent.\n\n**The output file is a required positional argument, and it takes the answer.** The\nresponse body is written to `response.json`; only the metadata — `runtimeSessionId`,\n`contentType`, `statusCode` — is printed to your terminal. So a call that looks like it\nreturned nothing useful has almost certainly succeeded and put the reply in the file.\nOmit the argument entirely and the CLI refuses the command.\n\nThe `rm -f` in front of the invoke is not tidiness. A *failed* call does not create or\ntruncate the output file, it leaves whatever was there untouched — verified as the same\nsha256 before and after a rejected invoke. So on the second attempt of a block you are\nstill getting right, `cat response.json` hands you a plausible-looking agent reply from\nthe attempt that worked, and you conclude the one that just failed succeeded. Delete it\nfirst and an absent file means what it says.\n\n**Pass `--qualifier` even though it is optional.** It takes an endpoint *name*, not an\nARN — which is what the `EndpointName` output is for. Left off, it defaults to the\nliteral endpoint `DEFAULT`, which AgentCore maintains for you. That is a different\nendpoint from the one this stack creates and updates, so invoking it tells you about\nAgentCore\'s endpoint rather than about your stack\'s. Name your own and the thing you\ntest is the thing you deployed.\n\n**`--runtime-session-id` has a minimum length of 33 characters.** A shorter one is\nrejected as a validation error before the request leaves your machine, which is\nconfusing if you reached for something short and readable. `uuidgen` gives 36. Reuse one\nacross calls to continue a conversation; use a fresh one to start a new one.\n\n**Do not lower `--cli-read-timeout`, and do not wrap this call in your own retry loop.**\nThe CLI retries a read timeout for you, and each retry runs your agent again. Measured:\none command with `--cli-read-timeout 2` against a request needing about seven seconds\nprinted a single clean `statusCode 200` and exit 0, while the runtime\'s log showed\n*three* completed invocations under that one session id. Nothing in the CLI\'s output says\nso. For an agent that only answers a question that is a billing surprise; for an agent\nthat writes something, files a ticket or sends a mail, it happens three times.\n\nYou should not need the flag at all. A genuine first-ever cold start on a\nfreshly deployed stack measured 7.1s against the CLI\'s 60s default — about eight times\nthe headroom — and raising it to 180 measured 7.8s, which is noise, because the flag is a\nsocket timeout and cannot make the service faster. Useful latency to expect: roughly 7s\nfor a new `--runtime-session-id`, roughly 3s for another call reusing the same one. That\npremium is per session, not per runtime, so every new conversation pays it.\n\nTwo honest limits on those numbers. They were measured in one region on an agent that\nmakes a single model call, so an agent doing many tool calls or a long generation can\nexceed 60s on its own merits — what is established is that AgentCore\'s *startup* does not\nthreaten the default, not that 60s suits every agent. And if the retries do run out, we\nhave not seen what the CLI prints.'
 
-_MCP_RUNTIME_INVOKE_MD = '## Invoking the MCP Runtime\n\nThis runtime is a Model Context Protocol server, not an agent. It has no `prompt`\ninput and does not answer the agent request/response envelope. It speaks JSON-RPC 2.0\nover the streamable-HTTP MCP transport on the **data** plane, `bedrock-agentcore` -- a\ndifferent service name from the `bedrock-agentcore-control` plane the stack\'s own\nresources live on. `ProtocolConfiguration` on the emitted runtime is `MCP`, and that is\nwhat makes the data plane speak MCP instead of the agent envelope.\n\nA client opens a session and exchanges four kinds of JSON-RPC message, in order:\n\n1. **`initialize`** -- the client\'s first request. It advertises the protocol version\n   and its capabilities and the server replies with its own. Nothing else may be called\n   until this round trip completes.\n2. **`notifications/initialized`** -- a notification (no `id`, no reply) the client\n   sends once it has processed the `initialize` result. It tells the server the session\n   is live; only after it may `tools/*` be called.\n3. **`tools/list`** -- enumerates the tools this server exposes. The generated server\n   registers `get_weather`, `search_web`, and `fetch_url`; the result carries each\n   tool\'s name, description, and JSON input schema.\n4. **`tools/call`** -- invokes one tool by name with an `arguments` object matching that\n   tool\'s input schema, and returns the tool\'s content blocks.\n\nThe `initialize` + `notifications/initialized` pair is how the client and server agree on a\nprotocol version and capabilities, so a well-behaved client always sends it first. This server\nruns FastMCP in **stateless HTTP mode** (`stateless_http=True`): every request is handled on its\nown, no session id is issued, and a `tools/*` request is answered even without a prior\n`initialize`. Do not rely on the server to reject an un-initialized call; rely on the handshake\nto negotiate. The request\nbodies look like this (ids and arguments are yours to choose):\n\n```json\n{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}}\n{"jsonrpc": "2.0", "method": "notifications/initialized"}\n{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}\n{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_weather", "arguments": {"city": "Dublin"}}}\n```\n\nReach the data-plane URL with a SigV4-signed POST (the runtime\'s default SigV4 auth) or\na bearer token if you configured a JWT authorizer instead -- the two auth methods are\nmutually exclusive on a runtime. A generic MCP client that speaks streamable-HTTP\nhandles the session-id header, framing, and the handshake ordering for you; the sequence\nabove is what it puts on the wire.'
+_MCP_RUNTIME_INVOKE_MD = '## Invoking the MCP Runtime\n\nThis runtime is a Model Context Protocol server, not an agent. It has no `prompt`\ninput and does not answer the agent request/response envelope. It speaks JSON-RPC 2.0\nover the streamable-HTTP MCP transport on the **data** plane, `bedrock-agentcore` -- a\ndifferent service name from the `bedrock-agentcore-control` plane the stack\'s own\nresources live on. `ProtocolConfiguration` on the emitted runtime is `MCP`, and that is\nwhat makes the data plane speak MCP instead of the agent envelope.\n\nA client opens a session and exchanges four kinds of JSON-RPC message, in order:\n\n1. **`initialize`** -- the client\'s first request. It advertises the protocol version\n   and its capabilities and the server replies with its own. Nothing else may be called\n   until this round trip completes.\n2. **`notifications/initialized`** -- a notification (no `id`, no reply) the client\n   sends once it has processed the `initialize` result. It tells the server the session\n   is live; only after it may `tools/*` be called.\n3. **`tools/list`** -- enumerates the tools this server exposes. The generated server\n   registers `get_weather` and `fetch_url`; the result carries each\n   tool\'s name, description, and JSON input schema.\n4. **`tools/call`** -- invokes one tool by name with an `arguments` object matching that\n   tool\'s input schema, and returns the tool\'s content blocks.\n\nThe `initialize` + `notifications/initialized` pair is how the client and server agree on a\nprotocol version and capabilities, so a well-behaved client always sends it first. This server\nruns FastMCP in **stateless HTTP mode** (`stateless_http=True`): every request is handled on its\nown, no session id is issued, and a `tools/*` request is answered even without a prior\n`initialize`. Do not rely on the server to reject an un-initialized call; rely on the handshake\nto negotiate. The request\nbodies look like this (ids and arguments are yours to choose):\n\n```json\n{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}}\n{"jsonrpc": "2.0", "method": "notifications/initialized"}\n{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}\n{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_weather", "arguments": {"city": "Dublin"}}}\n```\n\nReach the data-plane URL with a SigV4-signed POST (the runtime\'s default SigV4 auth) or\na bearer token if you configured a JWT authorizer instead -- the two auth methods are\nmutually exclusive on a runtime. A generic MCP client that speaks streamable-HTTP\nhandles the session-id header, framing, and the handshake ordering for you; the sequence\nabove is what it puts on the wire.'
 
 
 class CfnTemplateGenerator:
@@ -4535,8 +5049,7 @@ class CfnTemplateGenerator:
 
     def generate(self, request: DeployRequest) -> CfnBundle:
         """Generate a complete CFN bundle from a deploy request."""
-        # Before anything is built: refuse rather than silently drop. See the function's
-        # docstring for the byte-level measurement that motivates it.
+        validate_export_references(request)
         _reject_what_the_export_cannot_express(request)
         config = request.config
         deployment_name = _sanitize_gateway_name(config.name)
@@ -4545,6 +5058,7 @@ class CfnTemplateGenerator:
         gateway_config = request.gateway_config
         gateway_tools = request.gateway_tools or []
         custom_tools = request.custom_tools or []
+        has_managed_web_search = managed_web_search_requested(template_id, gateway_tools)
         memory_config = request.memory_config
         policy_config = request.policy_config
         mcp_server_config = request.mcp_server_config
@@ -4560,6 +5074,7 @@ class CfnTemplateGenerator:
             or template_id
             in (
                 "strands-gateway-agent",
+                "web-search-agent",
                 "customer-support-assistant",
                 "customer-support-blueprint",
                 "mcp-server-gateway-target",
@@ -4598,6 +5113,7 @@ class CfnTemplateGenerator:
         # mislabelled standalone export fails closed rather than shipping a model-bearing
         # role for model-free code.
         is_standalone_mcp = template_id == "mcp-server-runtime"
+        has_provider_secret = not is_standalone_mcp and needs_provider_api_key(config)
 
         if is_litellm and has_mcp_server:
             # An MCP-server node is published to callers as an AgentCore
@@ -4713,6 +5229,8 @@ class CfnTemplateGenerator:
         # dangling {"Ref": "ModelId"} to a removed parameter would fail cfn-lint (E2502).
         if is_standalone_mcp:
             template["Parameters"].pop("ModelId", None)
+        if has_provider_secret or config.provider_base_url:
+            self._add_provider_parameters(template, config, require_secret=has_provider_secret)
 
         # Always present
         self._add_cfn_provider(
@@ -4725,6 +5243,7 @@ class CfnTemplateGenerator:
             # E3005, and a deploy that never starts).
             has_agentcore_gateway=has_gateway and not is_litellm,
             has_resource_tags=bool(request.resource_tags),
+            has_managed_web_search=has_managed_web_search,
         )
         self._add_code_package(template, config, litellm_secret=is_litellm)
 
@@ -4755,6 +5274,7 @@ class CfnTemplateGenerator:
             # Model-free: withhold the BedrockModelAccess statement for a standalone MCP
             # tool server so the runtime role grants no bedrock:InvokeModel it cannot use.
             is_standalone_mcp=is_standalone_mcp,
+            provider_secret=has_provider_secret,
         )
 
         # Conditional components
@@ -4777,8 +5297,10 @@ class CfnTemplateGenerator:
                 )
         elif has_gateway:
             self._add_cognito(template, deployment_name)
-            self._add_gateway_role(template)
+            self._add_gateway_role(template, has_managed_web_search=has_managed_web_search)
             self._add_gateway(template, deployment_name)
+            if has_managed_web_search:
+                self._add_managed_web_search_target(template)
 
             # Add predefined tool targets
             tool_ids = self._resolve_gateway_tools(template_id, gateway_tools, custom_tools)
@@ -4838,6 +5360,7 @@ class CfnTemplateGenerator:
             is_litellm=is_litellm,
             kb_id_ref=kb_id_ref,
             is_standalone_mcp=is_standalone_mcp,
+            provider_secret=has_provider_secret,
         )
         self._add_runtime_endpoint(template, deployment_name)
         self._add_outputs(template, has_gateway, has_memory, has_mcp_server, is_litellm=is_litellm)
@@ -4898,7 +5421,7 @@ class CfnTemplateGenerator:
         # come from the knowledge base or the MCP server, not just from gateway tools.
         resource_types = [r.get("Type") for r in template.get("Resources", {}).values()]
         if "AWS::BedrockAgentCore::Gateway" in resource_types and not any(
-            t == "AWS::BedrockAgentCore::GatewayTarget" for t in resource_types
+            t in {"AWS::BedrockAgentCore::GatewayTarget", "Custom::ManagedWebSearchTarget"} for t in resource_types
         ):
             logger.warning(
                 "Gateway export: the template creates a gateway with no targets, so tool "
@@ -5055,7 +5578,10 @@ class CfnTemplateGenerator:
         # guessing a bundle. `agent_artifact.kind` also drives whether this runtime is
         # model-bearing (see the model-parameter/IAM gating below).
         agent_artifact = classify_runtime_artifact(agent_code)
-        bundle_key = agent_artifact.bundle_key
+        base_bundle_key = agent_artifact.bundle_key
+        provider_extras = () if agent_artifact.kind == "mcp" else _export_provider_extras(config)
+        bundle_recipe = _dependency_bundle_recipe(base_bundle_key, provider_extras)
+        bundle_key = _content_addressed_bundle_key(base_bundle_key, provider_extras)
         template["Parameters"]["DependencyBundleKey"]["Default"] = bundle_key
 
         # Cross-check the caller's template_id against what agent.py actually imports.
@@ -5090,7 +5616,9 @@ class CfnTemplateGenerator:
             template["Parameters"]["McpServerCodeDigest"]["Default"] = content_digest(
                 {"mcp_server.py": mcp_server_code}
             )
-            mcp_bundle_key = classify_runtime_artifact(mcp_server_code).bundle_key
+            mcp_base_bundle_key = classify_runtime_artifact(mcp_server_code).bundle_key
+            mcp_bundle_recipe = _dependency_bundle_recipe(mcp_base_bundle_key)
+            mcp_bundle_key = _content_addressed_bundle_key(mcp_base_bundle_key)
             template["Parameters"]["McpServerDependencyBundleKey"]["Default"] = mcp_bundle_key
 
         # Generate deployment scripts. A naming profile narrows DeploymentName to
@@ -5119,11 +5647,15 @@ class CfnTemplateGenerator:
         teardown_sh = self._generate_teardown_script(
             retention_policy, retained_resources, template, bundle_key=bundle_key, mcp_bundle_key=mcp_bundle_key
         )
-        build_bundle_sh = self._generate_bundle_build_script(bundle_key)
+        build_bundle_sh = self._generate_bundle_build_script(bundle_key, packages=bundle_recipe)
         # The two-runtime pattern's FastMCP server has its own (lean) bundle, built
         # from its own recipe and staged independently by deploy.sh.
         build_mcp_bundle_sh = (
-            self._generate_bundle_build_script(mcp_bundle_key, script_name="build-mcp-server-bundle.sh")
+            self._generate_bundle_build_script(
+                mcp_bundle_key,
+                script_name="build-mcp-server-bundle.sh",
+                packages=mcp_bundle_recipe,
+            )
             if mcp_bundle_key
             else ""
         )
@@ -5139,7 +5671,10 @@ class CfnTemplateGenerator:
             retained_resources,
             litellm,
             bundle_key,
+            bundle_recipe=bundle_recipe,
+            provider_extras=provider_extras,
             mcp_bundle_key=mcp_bundle_key,
+            mcp_bundle_recipe=mcp_bundle_recipe if mcp_bundle_key else None,
             has_knowledge_base="BedrockKnowledgeBase" in template["Resources"],
             template=template,
             # The parameter table's "Set with" column reads the variable names out of
@@ -5154,6 +5689,14 @@ class CfnTemplateGenerator:
         # Governance tags, last, so every resource the branches above added is covered by
         # one pass rather than each branch remembering to tag its own resources.
         _apply_resource_tags(template, request.resource_tags)
+
+        # Final authority gate after every conditional branch has appended its
+        # data-plane grants. A later component cannot smuggle a Gateway/Policy
+        # mutation into the Runtime role after the initial role construction.
+        runtime_role = template["Resources"].get("RuntimeExecutionRole")
+        if runtime_role:
+            complete_runtime_policy = runtime_role["Properties"]["Policies"][0]["PolicyDocument"]
+            assert_runtime_policy_is_data_plane_only(complete_runtime_policy)
 
         # Serialize template
         template_yaml = _dump_template(template)
@@ -5192,6 +5735,25 @@ class CfnTemplateGenerator:
         return {
             "AWSTemplateFormatVersion": "2010-09-09",
             "Description": f"AgentCore {template_id or 'custom'} stack - {readable_name} | Generated by AgentCore Flows",
+            "Rules": {
+                "SupportedReleaseRegion": {
+                    "Assertions": [
+                        {
+                            "Assert": {
+                                "Fn::Contains": [
+                                    sorted(SUPPORTED_SINGLE_REGION_RELEASES),
+                                    {"Ref": "AWS::Region"},
+                                ]
+                            },
+                            "AssertDescription": (
+                                "This reviewed export supports exactly: "
+                                + ", ".join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))
+                                + ". Re-export after the reviewed Region contract changes."
+                            ),
+                        }
+                    ]
+                }
+            },
             "Parameters": {
                 # Lowercase only, and that is a correctness constraint rather than a
                 # style one. This value is interpolated into a Cognito hosted-UI
@@ -5281,13 +5843,11 @@ class CfnTemplateGenerator:
                 # until this parameter existed (CWE-494, Download of Code Without
                 # Integrity Check).
                 #
-                # Unlike AgentCodeDigest this cannot default to a real value: the
-                # bundle is built on the operator's machine (or copied in from
-                # somewhere else), so the generator has never seen its bytes. "none"
-                # therefore means "no digest was supplied", and the packaging step
-                # says so out loud rather than pretending to have verified anything.
-                # deploy.sh fills it in whenever it is the thing that uploaded the
-                # bundle, and an operator can always supply one by hand.
+                # Unlike AgentCodeDigest, the generator cannot embed an archive
+                # digest because the bundle is built in the recipient's environment.
+                # The parameter therefore has no default: deploy.sh either derives it
+                # from a deterministic reviewed local build or accepts an explicit
+                # operator-trusted value, and direct template consumers must supply one.
                 #
                 # Whole-archive hash, not the per-member digest the source zips use:
                 # the bundle is uploaded byte-for-byte as built, so there is no
@@ -5295,12 +5855,11 @@ class CfnTemplateGenerator:
                 # something the recipient can reproduce in one command.
                 "DependencyBundleDigest": {
                     "Type": "String",
-                    "Default": "none",
-                    "AllowedPattern": "^(none|sha256:[0-9a-f]{64})$",
-                    "ConstraintDescription": ("none, or sha256:<64 hex chars> - the sha256 of the bundle zip itself"),
+                    "AllowedPattern": "^sha256:[0-9a-f]{64}$",
+                    "ConstraintDescription": "sha256:<64 hex chars> - the sha256 of the reviewed bundle zip",
                     "Description": (
-                        "sha256 of the dependency bundle zip, verified before its contents are "
-                        "merged into the deployed code. 'none' skips the check."
+                        "Required sha256 of the dependency bundle zip, independently derived from "
+                        "the reviewed local recipe before its contents are merged into deployed code."
                     ),
                 },
                 # A permissions boundary is what lets a security team allow a
@@ -5441,8 +6000,9 @@ class CfnTemplateGenerator:
         has_mcp_server: bool = False,
         has_agentcore_gateway: bool = False,
         has_resource_tags: bool = False,
+        has_managed_web_search: bool = False,
     ) -> None:
-        """Add the CFN provider Lambda + role for Custom::AgentCodePackage."""
+        """Add the CFN provider Lambda and least-privilege role."""
         policies = [
             {
                 "PolicyName": "CodePackagingPolicy",
@@ -5612,6 +6172,35 @@ class CfnTemplateGenerator:
                 },
             },
         ]
+
+        if has_managed_web_search:
+            policies.append(
+                {
+                    "PolicyName": "ManagedWebSearchTargetManagement",
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Sid": "ManagedWebSearchTargetLifecycle",
+                                "Effect": "Allow",
+                                "Action": [
+                                    "bedrock-agentcore:CreateGatewayTarget",
+                                    "bedrock-agentcore:GetGatewayTarget",
+                                    "bedrock-agentcore:ListGatewayTargets",
+                                    "bedrock-agentcore:UpdateGatewayTarget",
+                                    "bedrock-agentcore:DeleteGatewayTarget",
+                                ],
+                                # The service-authorization reference assigns all
+                                # five supported connector lifecycle actions to
+                                # the parent gateway resource type. Managed
+                                # connector targets reject SynchronizeGatewayTargets
+                                # and therefore receive no such permission.
+                                "Resource": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]},
+                            }
+                        ],
+                    },
+                }
+            )
 
         # Custom::RuntimeLogGroup applies the stack's retention and key to the log
         # groups AgentCore creates for the runtime. Always granted, because every
@@ -5882,6 +6471,30 @@ class CfnTemplateGenerator:
                 "MemorySize": 1024,
             },
         }
+        if has_managed_web_search:
+            # A NEW function, not another reference to CfnProviderLambda. During
+            # rollback of an update that first introduces a custom type,
+            # CloudFormation can restore the existing shared provider's old code
+            # before deleting the new custom resource. That old code legitimately
+            # does not know the new type and its compatibility path reports Delete
+            # success without touching anything, orphaning the target. This function
+            # is introduced in the same update as the target, so the ServiceToken
+            # dependency forces CloudFormation to delete the target before deleting
+            # its provider; no old function version can be restored in between.
+            template["Resources"]["ManagedWebSearchProviderLambda"] = {
+                "Type": "AWS::Lambda::Function",
+                "Properties": {
+                    "Runtime": "python3.13",
+                    "Handler": "handler.handler",
+                    "Role": {"Fn::GetAtt": ["CfnProviderRole", "Arn"]},
+                    "Code": {
+                        "S3Bucket": {"Ref": "ArtifactsBucket"},
+                        "S3Key": {"Ref": "CfnProviderCodeKey"},
+                    },
+                    "Timeout": 300,
+                    "MemorySize": 1024,
+                },
+            }
 
         # Stated rather than inherited. CloudFormation invokes a custom resource
         # asynchronously, and handler.py deliberately fails the invocation when it
@@ -5899,6 +6512,15 @@ class CfnTemplateGenerator:
                 "MaximumRetryAttempts": 2,
             },
         }
+        if has_managed_web_search:
+            template["Resources"]["ManagedWebSearchProviderLambdaAsyncConfig"] = {
+                "Type": "AWS::Lambda::EventInvokeConfig",
+                "Properties": {
+                    "FunctionName": {"Ref": "ManagedWebSearchProviderLambda"},
+                    "Qualifier": "$LATEST",
+                    "MaximumRetryAttempts": 2,
+                },
+            }
 
     def _add_code_package(self, template: dict, config: RuntimeConfig, *, litellm_secret: bool = False) -> None:
         """Add the Custom::AgentCodePackage resource.
@@ -5919,17 +6541,7 @@ class CfnTemplateGenerator:
         environment variable, so adding it here exposes nothing new. A key value here would
         be a hard stop.
         """
-        # Without a bundle digest the merged key must move with the bundle KEY instead.
-        # Raised by the independent G10 review: a Terraform or direct-template recipient
-        # who leaves DependencyBundleDigest at "none" and points DependencyBundleKey at a
-        # new bundle got the Update (the key is a property) merged into the SAME
-        # OutputKey, so CodeZipPrefix did not move, the Runtime published no version, and
-        # the overwrite destroyed the bytes the previous version referenced. The bundle
-        # key is the only other thing that identifies the bundle, so it is what keys the
-        # output when no digest does; "/" is joined to "_" to keep one path segment.
-        template.setdefault("Conditions", {})["DependencyBundleDigestSupplied"] = {
-            "Fn::Not": [{"Fn::Equals": [{"Ref": "DependencyBundleDigest"}, "none"]}]
-        }
+        # The mandatory bundle digest keys the merged executable identity.
         template["Resources"]["AgentCodePackage"] = {
             "Type": "Custom::AgentCodePackage",
             "Properties": {
@@ -5959,17 +6571,10 @@ class CfnTemplateGenerator:
                 # carrying the new dependency. That is the same failure this key exists to
                 # prevent, just reached by the other half of the zip.
                 #
-                # DependencyBundleDigest is the awkward one. When it is "none" the bundle
-                # KEY takes its place in the path (see the Condition above the resource):
-                # a digest-less recipient who swaps the bundle object under a NEW key still
-                # moves CodeZipPrefix and gets a new runtime version; only "new bytes under
-                # the same key with no digest" cannot be detected, and the README says so.
-                # When a digest IS supplied it has no ":" problem in the true branch, but
-                # the guard stays because "none" has no ":" to split on: splitting it would put
-                # Fn::Select out of range and fail the whole template rather than just
-                # this resource. Appending ":none" before splitting guarantees a second
-                # element either way — "none" becomes "none:none" and yields "none", while
-                # "sha256:<hex>" becomes "sha256:<hex>:none" and yields the hex.
+                # The required archive digest is split only after its parameter's
+                # anchored sha256 pattern has validated it. Direct template consumers
+                # must provide the value; deploy.sh derives it from a reviewed local
+                # build or accepts an explicit operator-trusted digest.
                 #
                 # A superseded object outlives the update that replaced it, deliberately:
                 # a rollback reverts the prefix to the previous key and that object has to
@@ -5986,21 +6591,7 @@ class CfnTemplateGenerator:
                         {
                             "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "AgentCodeDigest"}]}]},
                             "BundleDigest": {
-                                "Fn::If": [
-                                    "DependencyBundleDigestSupplied",
-                                    {
-                                        "Fn::Select": [
-                                            1,
-                                            {
-                                                "Fn::Split": [
-                                                    ":",
-                                                    {"Fn::Join": ["", [{"Ref": "DependencyBundleDigest"}, ":none"]]},
-                                                ]
-                                            },
-                                        ]
-                                    },
-                                    {"Fn::Join": ["_", {"Fn::Split": ["/", {"Ref": "DependencyBundleKey"}]}]},
-                                ]
+                                "Fn::Select": [1, {"Fn::Split": [":", {"Ref": "DependencyBundleDigest"}]}]
                             },
                         },
                     ]
@@ -6062,6 +6653,7 @@ class CfnTemplateGenerator:
         litellm_secret: bool = False,
         a2a_peer_arns: list[str] | None = None,
         is_standalone_mcp: bool = False,
+        provider_secret: bool = False,
     ) -> None:
         # A standalone MCP tool server never calls a model, so it gets no Bedrock grant.
         # Every other runtime does (even a base boto3 agent invokes Bedrock directly),
@@ -6097,7 +6689,6 @@ class CfnTemplateGenerator:
                 "Resource": _log_group_resources(),
             },
         ]
-
         # `has_gateway` already includes "gateway" in connected_tools (see generate()),
         # so an `or "gateway" in connected_tools` here would add nothing — except that
         # it also undid the caller's deliberate `has_gateway and not is_litellm`, and
@@ -6294,6 +6885,30 @@ class CfnTemplateGenerator:
                 }
             )
 
+        if provider_secret:
+            statements.extend(
+                [
+                    {
+                        "Sid": "ModelProviderApiKey",
+                        "Effect": "Allow",
+                        "Action": ["secretsmanager:GetSecretValue"],
+                        "Resource": [{"Ref": "ProviderApiKeySecretArn"}],
+                    },
+                    {
+                        "Sid": "ModelProviderApiKeyDecrypt",
+                        "Effect": "Allow",
+                        "Action": ["kms:Decrypt"],
+                        "Resource": "*",
+                        "Condition": {
+                            "StringEquals": {
+                                "kms:ViaService": {"Fn::Sub": "secretsmanager.${AWS::Region}.amazonaws.com"},
+                                "kms:EncryptionContext:SecretARN": {"Ref": "ProviderApiKeySecretArn"},
+                            }
+                        },
+                    },
+                ]
+            )
+
         if litellm_secret:
             statements.append(
                 {
@@ -6426,6 +7041,9 @@ class CfnTemplateGenerator:
                 }
             )
 
+        statements.append(runtime_control_plane_deny_statement())
+        runtime_policy = {"Version": "2012-10-17", "Statement": statements}
+        assert_runtime_policy_is_data_plane_only(runtime_policy)
         template["Resources"]["RuntimeExecutionRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -6443,11 +7061,49 @@ class CfnTemplateGenerator:
                 "Policies": [
                     {
                         "PolicyName": "RuntimePolicy",
-                        "PolicyDocument": {"Version": "2012-10-17", "Statement": statements},
+                        "PolicyDocument": runtime_policy,
                     }
                 ],
             },
         }
+
+    # ------------------------------------------------------------------
+    # Direct model-provider credential reference
+    # ------------------------------------------------------------------
+
+    def _add_provider_parameters(
+        self,
+        template: dict,
+        config: RuntimeConfig,
+        *,
+        require_secret: bool,
+    ) -> None:
+        if require_secret:
+            parameter = {
+                "Type": "String",
+                "AllowedPattern": (
+                    r"^arn:aws:secretsmanager:[a-z0-9-]{1,32}:[0-9]{12}:"
+                    r"secret:agentcore-provider/[A-Za-z0-9/_+=.@-]{1,493}$"
+                ),
+                "ConstraintDescription": (
+                    "must be a complete commercial-partition Secrets Manager ARN in the agentcore-provider/ namespace"
+                ),
+                "Description": (
+                    "ARN of the agentcore-provider/ secret holding the model-provider API key. "
+                    "The runtime reads it at startup; plaintext keys are never parameters."
+                ),
+            }
+            if config.provider_api_key_ref:
+                parameter["Default"] = config.provider_api_key_ref
+            template["Parameters"]["ProviderApiKeySecretArn"] = parameter
+        if config.provider_base_url:
+            template["Parameters"]["ProviderBaseUrl"] = {
+                "Type": "String",
+                "Default": config.provider_base_url,
+                "AllowedPattern": LITELLM_URL_PATTERN,
+                "ConstraintDescription": "must be an HTTPS URL without whitespace or userinfo",
+                "Description": "Optional HTTPS base URL for the selected model provider.",
+            }
 
     # ------------------------------------------------------------------
     # LiteLLM gateway provider (no AWS gateway resource exists)
@@ -6475,8 +7131,10 @@ class CfnTemplateGenerator:
 
         secret_param = {
             "Type": "String",
-            "AllowedPattern": SECRETSMANAGER_ARN_PATTERN,
-            "ConstraintDescription": "must be a Secrets Manager secret ARN",
+            "AllowedPattern": AGENTCORE_CONNECTOR_SECRET_ARN_PATTERN,
+            "ConstraintDescription": (
+                "must be a complete commercial-partition Secrets Manager ARN in the agentcore-connector/ namespace"
+            ),
             "Description": (
                 "ARN of a Secrets Manager secret holding your LiteLLM virtual key, either "
                 'as plain text or as {"apiKey": "<key>"}. The key itself is never part of '
@@ -6609,7 +7267,7 @@ class CfnTemplateGenerator:
     # Gateway IAM Role
     # ------------------------------------------------------------------
 
-    def _add_gateway_role(self, template: dict) -> None:
+    def _add_gateway_role(self, template: dict, *, has_managed_web_search: bool = False) -> None:
         template["Resources"]["GatewayRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -6812,6 +7470,18 @@ class CfnTemplateGenerator:
                 ],
             },
         }
+        if has_managed_web_search:
+            statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+                "Statement"
+            ]
+            statements.append(
+                {
+                    "Sid": "ManagedWebSearch",
+                    "Effect": "Allow",
+                    "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                    "Resource": {"Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"},
+                }
+            )
 
     # ------------------------------------------------------------------
     # Gateway (native CFN)
@@ -6891,16 +7561,18 @@ class CfnTemplateGenerator:
         - customer-support-assistant -> the 4 LEGACY customer-support tools
           (CustomerSupportTools); these are a distinct contract, NOT the canonical
           order tools, so the shipped legacy Lambda actually answers them
-        - strands-gateway-agent -> the 4 web tools PLUS the 4 canonical order
-          tools (8 total), all executed by the DynamicTools Lambda
+        - strands-gateway-agent -> the 3 Lambda-backed web-adjacent tools PLUS
+          the 4 canonical order tools (7 core tools total); managed Web Search is
+          available only through its dedicated template or an explicit tool ID
         """
+        if template_id == "web-search-agent":
+            return ["weather_api", "web_page_fetcher"]
         if template_id == "customer-support-blueprint":
             return ["get_order", "get_customer", "list_orders", "process_refund"]
         if template_id == "customer-support-assistant":
             return ["check_order_status", "lookup_customer", "search_knowledge_base", "get_return_policy"]
         if template_id == "strands-gateway-agent":
             return [
-                "duckduckgo_search",
                 "wikipedia_search",
                 "weather_api",
                 "web_page_fetcher",
@@ -6921,7 +7593,9 @@ class CfnTemplateGenerator:
         # single _package_tool_lambdas zip must carry both families; rather than
         # rely on that coupling staying correct, refuse the mix here so the export
         # matches the live deployer, which also fails closed on it.
-        _known = _DYNAMIC_TOOL_IDS | _CUSTOMER_SUPPORT_TOOL_IDS | _LEGACY_CUSTOMER_TOOL_IDS
+        _known = (
+            _DYNAMIC_TOOL_IDS | _CUSTOMER_SUPPORT_TOOL_IDS | _LEGACY_CUSTOMER_TOOL_IDS | MANAGED_WEB_SEARCH_TOOL_IDS
+        )
         _unknown = [t for t in tool_ids if t not in _known]
         if _unknown:
             raise CfnExportUnsupportedError(
@@ -6939,8 +7613,9 @@ class CfnTemplateGenerator:
                 f"({', '.join(_dynamic_requested)}). Export each family separately."
             )
 
-        # Custom tools don't add to gateway_tools — they become separate targets
-        return tool_ids
+        # Managed search IDs become the connector target above, never a
+        # Lambda schema. The legacy DuckDuckGo ID migrates here too.
+        return [tool_id for tool_id in tool_ids if tool_id not in MANAGED_WEB_SEARCH_TOOL_IDS]
 
     def _add_tool_lambdas_and_targets(self, template: dict, deployment_name: str, tool_ids: list[str]) -> None:
         """Add Lambda functions and Gateway targets for the specified tools."""
@@ -6986,6 +7661,45 @@ class CfnTemplateGenerator:
 
         # Permission for Gateway to invoke Lambda
         template["Resources"][f"{logical_id}Permission"] = _gateway_invoke_permission(logical_id)
+
+    def _add_managed_web_search_target(self, template: dict) -> None:
+        """Add the pinned AWS-managed Web Search connector target."""
+
+        template.setdefault("Rules", {})["ManagedWebSearchRegion"] = {
+            "Assertions": [
+                {
+                    "Assert": {
+                        "Fn::Contains": [
+                            sorted(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS),
+                            {"Ref": "AWS::Region"},
+                        ]
+                    },
+                    "AssertDescription": (
+                        "AgentCore Web Search is available only in "
+                        + ", ".join(sorted(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS))
+                        + "."
+                    ),
+                }
+            ]
+        }
+        template["Resources"]["ManagedWebSearchTarget"] = {
+            "Type": "Custom::ManagedWebSearchTarget",
+            "Metadata": {
+                "WhyCustom": (
+                    "AWS::BedrockAgentCore::GatewayTarget supports ConnectorId but does not expose "
+                    "the connector Version property. This provider pins and verifies version 1.2.0."
+                )
+            },
+            "Properties": {
+                "ServiceToken": {"Fn::GetAtt": ["ManagedWebSearchProviderLambda", "Arn"]},
+                "GatewayIdentifier": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayIdentifier"]},
+                "Region": {"Ref": "AWS::Region"},
+                "TargetName": MANAGED_WEB_SEARCH_TARGET_NAME,
+                "ConnectorId": MANAGED_WEB_SEARCH_CONNECTOR_ID,
+                "ConnectorVersion": MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+                "ToolName": MANAGED_WEB_SEARCH_TOOL_NAME,
+            },
+        }
 
     def _add_gateway_target(
         self,
@@ -8175,6 +8889,15 @@ def handler(event, context):
         actions: list[str] = []
         unknowable: list[str] = []
         for resource in template["Resources"].values():
+            if resource["Type"] == "Custom::ManagedWebSearchTarget":
+                props = resource["Properties"]
+                target = props.get("TargetName")
+                tool = props.get("ToolName")
+                if isinstance(target, str) and isinstance(tool, str):
+                    actions.append(f"{target}___{tool}")
+                else:
+                    unknowable.append(str(target))
+                continue
             if resource["Type"] != "AWS::BedrockAgentCore::GatewayTarget":
                 continue
             props = resource["Properties"]
@@ -8182,8 +8905,15 @@ def handler(event, context):
             if not isinstance(target, str):  # an Fn::Sub target name cannot be named here
                 unknowable.append(str(target))
                 continue
-            payload = props.get("TargetConfiguration", {}).get("Mcp", {}).get("Lambda", {})
-            schemas = payload.get("ToolSchema", {}).get("InlinePayload", [])
+            mcp = props.get("TargetConfiguration", {}).get("Mcp", {})
+            connector = mcp.get("Connector", {})
+            source = connector.get("Source", {})
+            if source.get("ConnectorId") == MANAGED_WEB_SEARCH_CONNECTOR_ID:
+                enabled = connector.get("Enabled") or [MANAGED_WEB_SEARCH_TOOL_NAME]
+                if MANAGED_WEB_SEARCH_TOOL_NAME in enabled:
+                    actions.append(f"{target}___{MANAGED_WEB_SEARCH_TOOL_NAME}")
+                continue
+            schemas = mcp.get("Lambda", {}).get("ToolSchema", {}).get("InlinePayload", [])
             if not schemas:
                 unknowable.append(target)
                 continue
@@ -8639,7 +9369,12 @@ def handler(event, context):
             target_ids = sorted(
                 lid
                 for lid, res in template["Resources"].items()
-                if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::GatewayTarget"
+                if isinstance(res, dict)
+                and res.get("Type")
+                in {
+                    "AWS::BedrockAgentCore::GatewayTarget",
+                    "Custom::ManagedWebSearchTarget",
+                }
             )
             template["Resources"][logical_id] = {
                 "Type": "Custom::AgentCorePolicy",
@@ -8753,18 +9488,13 @@ def handler(event, context):
                 ),
             }
         if "McpServerDependencyBundleDigest" not in template["Parameters"]:
-            # Same "none means no digest supplied" contract as DependencyBundleDigest:
-            # the bundle is built on the operator's machine, so the generator has never
-            # seen its bytes. deploy.sh fills it in from the object it reads back out of
-            # the bucket.
             template["Parameters"]["McpServerDependencyBundleDigest"] = {
                 "Type": "String",
-                "Default": "none",
-                "AllowedPattern": "^(none|sha256:[0-9a-f]{64})$",
-                "ConstraintDescription": ("none, or sha256:<64 hex chars> - the sha256 of the MCP bundle zip itself"),
+                "AllowedPattern": "^sha256:[0-9a-f]{64}$",
+                "ConstraintDescription": "sha256:<64 hex chars> - the sha256 of the reviewed MCP bundle zip",
                 "Description": (
-                    "sha256 of the MCP server dependency bundle zip, verified before its "
-                    "contents are merged into the deployed code. 'none' skips the check."
+                    "Required sha256 of the MCP server dependency bundle zip, independently "
+                    "derived from the reviewed local recipe before its contents are merged."
                 ),
             }
 
@@ -8820,11 +9550,7 @@ def handler(event, context):
             },
         }
 
-        # Code package for MCP server
-        # Same rule as AgentCodePackage: no digest, so the MCP bundle key keys the output.
-        template.setdefault("Conditions", {})["McpServerDependencyBundleDigestSupplied"] = {
-            "Fn::Not": [{"Fn::Equals": [{"Ref": "McpServerDependencyBundleDigest"}, "none"]}]
-        }
+        # Code package for MCP server. Its independent bundle digest is mandatory.
         template["Resources"]["McpServerCodePackage"] = {
             "Type": "Custom::AgentCodePackage",
             "Properties": {
@@ -8845,35 +9571,17 @@ def handler(event, context):
                 # left the old server running. Identical to the defect proven live on the
                 # main runtime; this half simply had no test covering it.
                 #
-                # Both digests, and the ":none" guard on the bundle digest, for the
-                # reasons given at AgentCodePackage's OutputKey. The bundle digest is the
-                # MCP server's own (McpServerDependencyBundleDigest), so a change to the
-                # main agent's bundle does not needlessly re-key the server and vice versa.
+                # Both required digests key the package. The bundle digest is the
+                # MCP server's own, so the two runtimes version independently.
                 "OutputKey": {
                     "Fn::Sub": [
                         "deployments/${AWS::StackName}/${Digest}-${BundleDigest}/mcp-server-code.zip",
                         {
                             "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "McpServerCodeDigest"}]}]},
                             "BundleDigest": {
-                                "Fn::If": [
-                                    "McpServerDependencyBundleDigestSupplied",
-                                    {
-                                        "Fn::Select": [
-                                            1,
-                                            {
-                                                "Fn::Split": [
-                                                    ":",
-                                                    {
-                                                        "Fn::Join": [
-                                                            "",
-                                                            [{"Ref": "McpServerDependencyBundleDigest"}, ":none"],
-                                                        ]
-                                                    },
-                                                ]
-                                            },
-                                        ]
-                                    },
-                                    {"Fn::Join": ["_", {"Fn::Split": ["/", {"Ref": "McpServerDependencyBundleKey"}]}]},
+                                "Fn::Select": [
+                                    1,
+                                    {"Fn::Split": [":", {"Ref": "McpServerDependencyBundleDigest"}]},
                                 ]
                             },
                         },
@@ -9242,6 +9950,7 @@ def handler(event, context):
         is_litellm: bool = False,
         kb_id_ref: dict | None = None,
         is_standalone_mcp: bool = False,
+        provider_secret: bool = False,
     ) -> None:
         # Most ordering is already encoded by Ref/GetAtt in the properties below.
         # Keep only dependencies with no property reference of their own.
@@ -9251,6 +9960,10 @@ def handler(event, context):
         # invokes no model, so it gets no MODEL_ID env var. Every other runtime does.
         if not is_standalone_mcp:
             env_vars["MODEL_ID"] = {"Ref": "ModelId"}
+        if provider_secret:
+            env_vars["PROVIDER_API_KEY_SECRET_ARN"] = {"Ref": "ProviderApiKeySecretArn"}
+        if config.provider_base_url:
+            env_vars["PROVIDER_BASE_URL"] = {"Ref": "ProviderBaseUrl"}
 
         if kb_id_ref is not None:
             # The agent's retrieve_from_kb tool reads this. Only set on the paths
@@ -9376,6 +10089,11 @@ def handler(event, context):
                                 "Prefix": {"Fn::GetAtt": ["AgentCodePackage", "CodeZipPrefix"]},
                             }
                         },
+                        # Python direct-code accepts the Python module as its entrypoint.
+                        # AgentCore's executable-prefix validation is the Node.js
+                        # auto-instrumentation contract and rejects Python ZIPs even
+                        # when they contain the console script. Generated agent.py
+                        # initializes the packaged ADOT distro in-process instead.
                         "EntryPoint": [config.entrypoint or "agent.py"],
                         "Runtime": config.python_runtime or "PYTHON_3_13",
                     }
@@ -9651,7 +10369,7 @@ def handler(event, context):
         needs_legacy = any(t in _LEGACY_CUSTOMER_TOOL_IDS for t in _tool_ids)
         # Template overrides mirror _resolve_gateway_tools: strands and blueprint
         # both need the DynamicTools Lambda; the assistant needs the legacy one.
-        if template_id in ("strands-gateway-agent", "customer-support-blueprint"):
+        if template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-blueprint"):
             needs_dynamic = True
         if template_id == "customer-support-assistant":
             needs_legacy = True
@@ -9734,7 +10452,23 @@ fi
         # deploy` with "Parameter ModelId does not exist in the template". Keyed on the
         # template the caller passed, so the script and the template cannot disagree.
         model_override = ""
+        model_region_preflight = ""
         if "ModelId" in (template or {}).get("Parameters", {}):
+            if (getattr(config, "model_provider", "bedrock") or "bedrock") == "bedrock":
+                model_region_preflight = f"""# Cross-Region inference profiles are regional by prefix.
+DESIGN_MODEL_ID={_shell_literal(model_id)}
+EFFECTIVE_MODEL_ID="${{MODEL_ID:-$DESIGN_MODEL_ID}}"
+case "$REGION" in
+    us-*) EXPECTED_MODEL_PREFIX="us." ;;
+    eu-*) EXPECTED_MODEL_PREFIX="eu." ;;
+    *) echo "ERROR: no reviewed model-prefix oracle exists for $REGION." >&2; exit 1 ;;
+esac
+if [[ "$EFFECTIVE_MODEL_ID" =~ ^(us|eu)\\. && "$EFFECTIVE_MODEL_ID" != "$EXPECTED_MODEL_PREFIX"* ]]; then
+    echo "ERROR: MODEL_ID uses a cross-Region inference-profile prefix that does not match $REGION." >&2
+    echo "       Set MODEL_ID to a model or inference profile valid in the target Region." >&2
+    exit 1
+fi
+"""
             model_override = f"""# Optional model override. The template's ModelId default is already the model this
 # agent was designed with ({model_id}); set MODEL_ID only to deploy a different one,
 # and note that it must be valid in $REGION -- a `us.` inference profile does not exist
@@ -9819,7 +10553,7 @@ litellm_arn_ok() {{
     # POSIX ERE intervals are capped by RE_DUP_MAX (255 on macOS), so the 1..512 name length is enforced arithmetically
     # on the captured name instead of as an interval; the class is ASCII, so bytes and characters agree.
     local LC_ALL=C
-    [[ "$1" =~ ^arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]{{1,32}}:[0-9]{{12}}:secret:([A-Za-z0-9/_+=.@-]+)$ ]] || return 1
+    [[ "$1" =~ ^arn:aws:secretsmanager:[a-z0-9-]{{1,32}}:[0-9]{{12}}:secret:(agentcore-connector/[A-Za-z0-9/_+=.@-]+)$ ]] || return 1
     (( ${{#BASH_REMATCH[1]}} >= 1 && ${{#BASH_REMATCH[1]}} <= 512 ))
 }}
 if ! litellm_arn_ok "$LITELLM_EFFECTIVE_ARN"; then
@@ -9957,49 +10691,27 @@ echo "MCP server code digest: $MCP_SERVER_DIGEST"
         if mcp_bundle_key:
             mcp_bundle_file = mcp_bundle_key.rsplit("/", 1)[-1]
             mcp_bundle_staging = """
-# 3b. Check/build/upload the MCP-server dependency bundle (Template 5 only).
-# The FastMCP server runtime imports `mcp` but NOT `strands`, so it ships the lean MCP
-# bundle on its own key — never the client agent's strands-mcp bundle. Same read-back
-# discipline as the main bundle: the digest recorded in the template must describe the
-# bytes actually in the bucket, or a substituted bundle runs with the runtime's role.
+# 3b. Build/verify the independent MCP-server closure with the same authority.
 MCP_BUNDLE_KEY="__MCP_BUNDLE_KEY__"
 MCP_BUNDLE_FILE="__MCP_BUNDLE_FILE__"
 MCP_BUNDLE_DIGEST="${MCP_SERVER_DEPENDENCY_BUNDLE_DIGEST:-}"
-if ! aws s3api head-object --bucket "$BUCKET" --key "$MCP_BUNDLE_KEY" --region "$REGION" >/dev/null 2>&1; then
-    echo "MCP-server dependency bundle not in s3://$BUCKET/$MCP_BUNDLE_KEY."
-    if [[ ! -f "$MCP_BUNDLE_FILE" ]]; then
-        if [[ ! -x ./build-mcp-server-bundle.sh && ! -f ./build-mcp-server-bundle.sh ]]; then
-            echo "ERROR: build-mcp-server-bundle.sh is missing from this bundle." >&2
-            echo "       Re-export the stack, or see README.md > Dependency Bundle." >&2
-            exit 1
-        fi
-        echo "Building it (a few minutes, downloads wheels from PyPI)..."
-        bash ./build-mcp-server-bundle.sh "$MCP_BUNDLE_FILE"
-    fi
-    echo "Uploading $MCP_BUNDLE_FILE to s3://$BUCKET/$MCP_BUNDLE_KEY..."
-    aws s3 cp "$MCP_BUNDLE_FILE" "s3://$BUCKET/$MCP_BUNDLE_KEY" --region "$REGION"
-    MCP_BUNDLE_DIGEST="$(bundle_digest_in_bucket "$MCP_BUNDLE_KEY")"
-    echo "MCP-server dependency bundle digest: $MCP_BUNDLE_DIGEST"
-elif [[ -z "$MCP_BUNDLE_DIGEST" ]]; then
-    echo "MCP-server dependency bundle already in s3://$BUCKET/$MCP_BUNDLE_KEY; hashing the object..."
-    MCP_BUNDLE_DIGEST="$(bundle_digest_in_bucket "$MCP_BUNDLE_KEY")"
-    echo "MCP-server dependency bundle digest: $MCP_BUNDLE_DIGEST"
-fi
+stage_reviewed_bundle \
+    "$MCP_BUNDLE_KEY" "$MCP_BUNDLE_FILE" ./build-mcp-server-bundle.sh \
+    "$MCP_BUNDLE_DIGEST" "MCP-server"
+MCP_BUNDLE_DIGEST="$RESOLVED_BUNDLE_DIGEST"
+echo "MCP-server dependency bundle digest: $MCP_BUNDLE_DIGEST"
 """.replace("__MCP_BUNDLE_KEY__", mcp_bundle_key).replace("__MCP_BUNDLE_FILE__", mcp_bundle_file)
             mcp_bundle_overrides = """
-# The MCP server's own bundle key + digest. Distinct parameters from the client agent's
-# DependencyBundleKey/DependencyBundleDigest so the two runtimes cannot collapse onto one
-# bundle. The digest guard mirrors the main bundle's: never send "none" over a real one.
+# The MCP server's own mandatory bundle key + digest.
 PARAM_OVERRIDES+=("McpServerDependencyBundleKey=$MCP_BUNDLE_KEY")
-if [[ -n "$MCP_BUNDLE_DIGEST" ]]; then
-    PARAM_OVERRIDES+=("McpServerDependencyBundleDigest=$MCP_BUNDLE_DIGEST")
-fi
+PARAM_OVERRIDES+=("McpServerDependencyBundleDigest=$MCP_BUNDLE_DIGEST")
 """
 
         return f'''#!/usr/bin/env bash
 # deploy.sh — Deploy AgentCore {deployment_name} CloudFormation stack
 # Generated by AgentCore Flows
 set -euo pipefail
+python3 -I verify-integrity.py
 
 STACK_NAME="${{1:-{deployment_name}}}"
 # Region precedence: this argument, then your own AWS configuration, and only then the
@@ -10013,7 +10725,15 @@ if [[ -z "$REGION" ]]; then
     REGION="${{AWS_REGION:-${{AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}}}"
 fi
 REGION="${{REGION:-{current_region()}}}"
-# No echo here: the banner below already prints the resolved region, before the first
+case "$REGION" in
+    {"|".join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))}) ;;
+    *)
+        echo "ERROR: unsupported deployment Region. This reviewed export supports exactly:" >&2
+        echo "       {", ".join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))}" >&2
+        exit 1
+        ;;
+esac
+{model_region_preflight}# No echo here: the banner below already prints the resolved region, before the first
 # AWS call. Printing it twice for one run reads like the script changed its mind.
 BUCKET="${{3:-}}"
 
@@ -10177,91 +10897,87 @@ TLS_POLICY_JSON
 )"
 fi
 
-# 3. Check/build/upload the dependency bundle
-# This used to print "upload the pre-built dependency bundle. See README.md" and
-# exit 1 — and neither this script nor the README ever said where to obtain it,
-# because it is a build artifact that is not in this download. Build it instead.
+# 3. Build or verify the reviewed dependency recipe, then compare exact S3 bytes.
 BUNDLE_KEY="{bundle_key}"
 BUNDLE_FILE="{bundle_file}"
-# Your override, if you set one. Otherwise filled in below: hashed from the file this
-# run uploads, or, when the bundle is already in the bucket, from the bucket's own bytes.
-# Never from a stale local copy while S3 has the object — the two can differ for entirely
-# innocent reasons (a rebuild that was never uploaded, or simply a zip that does not
-# rebuild byte-for-byte), and a digest that fails a deploy for an innocent reason teaches
-# operators to switch it off.
 BUNDLE_DIGEST="${{DEPENDENCY_BUNDLE_DIGEST:-}}"
 
-# The bytes the provider Lambda will fetch, hashed. Both branches below go through this:
-# the digest recorded in the template has to describe the object in the bucket, because
-# the object in the bucket is what gets verified. Prints the digest and nothing else.
-#
-# Failing to read it back is fatal on purpose. The alternative -- carry on with no digest
-# -- turns the one check that catches a substituted bundle into something a transient
-# network error silently disables.
+file_digest() {{
+    printf 'sha256:%s' "$(sha256_stdin <"$1")"
+}}
+
 bundle_digest_in_bucket() {{
-    # Takes the S3 key as $1 so it can hash either bundle. Every caller passes it
-    # explicitly: a defaulted $1 with a bare call trips ShellCheck SC2120/SC2119
-    # (0.9.0, the Ubuntu package) and the recipient's own lint would then fail.
     local key tmp
     key="$1"
     tmp="$(mktemp)"
     if ! aws s3 cp "s3://$BUCKET/$key" "$tmp" --region "$REGION" --quiet; then
         rm -f "$tmp"
-        echo "ERROR: could not read back s3://$BUCKET/$key to hash it." >&2
-        echo "       That needs s3:GetObject on the key. Not continuing: the digest is" >&2
-        echo "       what stops a substituted dependency bundle from being executed." >&2
+        echo "ERROR: could not read back the dependency object for independent comparison." >&2
+        echo "       s3:GetObject on the exact bundle key is required." >&2
         exit 1
     fi
-    printf 'sha256:%s' "$(sha256_stdin <"$tmp")"
+    file_digest "$tmp"
     rm -f "$tmp"
 }}
 
-if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REGION" >/dev/null 2>&1; then
-    echo "Dependency bundle not in s3://$BUCKET/$BUNDLE_KEY."
-    if [[ ! -f "$BUNDLE_FILE" ]]; then
-        if [[ ! -x ./build-dependency-bundle.sh && ! -f ./build-dependency-bundle.sh ]]; then
-            echo "ERROR: build-dependency-bundle.sh is missing from this bundle." >&2
-            echo "       Re-export the stack, or see README.md > Dependency Bundle." >&2
+valid_bundle_digest() {{
+    local LC_ALL=C
+    [[ "$1" =~ ^sha256:[0-9a-f]{{64}}$ ]]
+}}
+
+# Sets RESOLVED_BUNDLE_DIGEST. With no explicit operator digest this always
+# rebuilds the current integrity-bound recipe, even when the key already exists.
+stage_reviewed_bundle() {{
+    local key file builder expected label remote local_digest
+    key="$1"; file="$2"; builder="$3"; expected="$4"; label="$5"
+    if [[ -n "$expected" ]] && ! valid_bundle_digest "$expected"; then
+        echo "ERROR: the explicit $label bundle digest is not sha256:<64 lowercase hex>." >&2
+        exit 1
+    fi
+    if [[ -n "$expected" ]] && aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" >/dev/null 2>&1; then
+        remote="$(bundle_digest_in_bucket "$key")"
+        if [[ "$remote" != "$expected" ]]; then
+            echo "ERROR: existing $label bundle bytes do not match the explicit trusted digest." >&2
             exit 1
         fi
-        echo "Building it (a few minutes, downloads wheels from PyPI)..."
-        bash ./build-dependency-bundle.sh "$BUNDLE_FILE"
+        RESOLVED_BUNDLE_DIGEST="$expected"
+        return
     fi
-    echo "Uploading $BUNDLE_FILE to s3://$BUCKET/$BUNDLE_KEY..."
-    aws s3 cp "$BUNDLE_FILE" "s3://$BUCKET/$BUNDLE_KEY" --region "$REGION"
-    # Hash what is in the bucket, not the file just uploaded, even though this branch is
-    # the one that uploaded it. The two can differ, and it is not hypothetical: measured
-    # live, two first-time deploys from one bucket both found this key absent, both built
-    # the bundle, and both uploaded. Each recorded a digest of ITS OWN local zip, so the
-    # one whose upload lost the race had recorded bytes that were no longer in the bucket
-    # and the provider Lambda failed it into ROLLBACK_COMPLETE -- correctly, over a
-    # difference that was only embedded mtimes. build-dependency-bundle.sh now builds
-    # deterministically, which removes that cause; reading back the object closes the race
-    # itself, including the case where the other build genuinely resolved a newer wheel.
-    BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"
-    echo "Dependency bundle digest: $BUNDLE_DIGEST"
-elif [[ -z "$BUNDLE_DIGEST" ]]; then
-    # Hash the object that is IN THE BUCKET. Not a local copy, and above all not
-    # "leave the recorded digest alone", which is what this branch used to do.
-    #
-    # The comment that used to sit here claimed a changed bundle would "fail the
-    # packaging step, exactly as it should". It does not, and the opposite is true:
-    # the packaging step never runs at all. With the digest left alone, BundleDigest
-    # and AgentCodeDigest both keep their recorded values, so every property of
-    # Custom::AgentCodePackage is byte-identical, CloudFormation skips the resource
-    # entirely, and _verify_bundle_digest is never reached to notice the mismatch.
-    # A green stack, a correct template, and the OLD dependencies still executing —
-    # the same defect as a constant OutputKey, one level down.
-    #
-    # Hashing S3 also answers the objection the old design was built on: that a stale
-    # local $BUNDLE_FILE could differ from the bucket for entirely innocent reasons,
-    # and a digest that fails a deploy for an innocent reason teaches operators to
-    # switch it off. That was a fair worry about a LOCAL hash. These are the exact
-    # bytes the provider Lambda will fetch, so there is no innocent difference left.
-    echo "Dependency bundle already in s3://$BUCKET/$BUNDLE_KEY; hashing the object..."
-    BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"
-    echo "Dependency bundle digest: $BUNDLE_DIGEST"
-fi
+    if [[ ! -f "$builder" ]]; then
+        echo "ERROR: the reviewed $label bundle builder is missing; re-export the artifact." >&2
+        exit 1
+    fi
+    echo "Building the current reviewed $label dependency recipe..."
+    bash "$builder" "$file"
+    local_digest="$(file_digest "$file")"
+    if [[ -n "$expected" && "$local_digest" != "$expected" ]]; then
+        echo "ERROR: the reviewed local $label build does not match the explicit trusted digest." >&2
+        exit 1
+    fi
+    expected="${{expected:-$local_digest}}"
+    if aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" >/dev/null 2>&1; then
+        remote="$(bundle_digest_in_bucket "$key")"
+        if [[ "$remote" != "$expected" ]]; then
+            echo "ERROR: stale or substituted bytes already occupy the content-addressed $label key." >&2
+            echo "       Nothing was uploaded and CloudFormation was not invoked." >&2
+            exit 1
+        fi
+    else
+        aws s3 cp "$file" "s3://$BUCKET/$key" --region "$REGION"
+        remote="$(bundle_digest_in_bucket "$key")"
+        if [[ "$remote" != "$expected" ]]; then
+            echo "ERROR: uploaded $label bundle bytes differ from the reviewed local build." >&2
+            exit 1
+        fi
+    fi
+    RESOLVED_BUNDLE_DIGEST="$expected"
+}}
+
+stage_reviewed_bundle \
+    "$BUNDLE_KEY" "$BUNDLE_FILE" ./build-dependency-bundle.sh \
+    "$BUNDLE_DIGEST" "agent"
+BUNDLE_DIGEST="$RESOLVED_BUNDLE_DIGEST"
+echo "Dependency bundle digest: $BUNDLE_DIGEST"
 {mcp_bundle_staging}
 # 4. Package and upload assets (stack-specific keys to avoid collisions)
 echo "Packaging CFN provider Lambda..."
@@ -10302,13 +11018,8 @@ PARAM_OVERRIDES=(
     "DependencyBundleKey=$BUNDLE_KEY"
 )
 
-# Always set by now — uploaded, hashed out of the bucket, or pinned by the operator —
-# so this guard is belt-and-braces rather than the live branch it used to be. Kept
-# because the alternative to omitting an unset one is sending "none", which would turn
-# the integrity check OFF on a stack that had previously recorded a real digest.
-if [[ -n "$BUNDLE_DIGEST" ]]; then
-    PARAM_OVERRIDES+=("DependencyBundleDigest=$BUNDLE_DIGEST")
-fi
+# Mandatory: the template has no digest-free mode.
+PARAM_OVERRIDES+=("DependencyBundleDigest=$BUNDLE_DIGEST")
 {litellm_overrides}
 if [[ -f tool-lambdas.zip ]]; then
     PARAM_OVERRIDES+=("ToolLambdaCodeKey=$TOOL_LAMBDA_KEY")
@@ -10395,7 +11106,13 @@ echo ""
 echo "Deployment complete!"
 '''
 
-    def _generate_bundle_build_script(self, bundle_key: str, script_name: str = "build-dependency-bundle.sh") -> str:
+    def _generate_bundle_build_script(
+        self,
+        bundle_key: str,
+        script_name: str = "build-dependency-bundle.sh",
+        *,
+        packages: list[str] | None = None,
+    ) -> str:
         """The recipe for the dependency bundle this stack needs.
 
         Shipped in the download because the bundle itself cannot be: it is tens of
@@ -10410,7 +11127,7 @@ echo "Deployment complete!"
         # strands for whatever bundle it did not recognise, so a new bundle key
         # (mcp-lean was exactly this) would have produced a script building the
         # WRONG packages, and the only symptom would again be the 30s init timeout.
-        packages = _dependency_bundle_recipe(bundle_key)
+        packages = list(packages) if packages is not None else _dependency_bundle_recipe(bundle_key)
         bundle_name = bundle_key.rsplit("/", 1)[-1]
         # ``script_name`` is the file this recipe is actually written as, passed by the
         # caller — the same mcp-lean.zip is the MAIN bundle of a standalone MCP runtime
@@ -10438,6 +11155,7 @@ echo "Deployment complete!"
 # deploy.sh runs this for you when the bundle is not already in your S3 bucket.
 # Run it by hand if you want to inspect or vendor the result first.
 set -euo pipefail
+python3 -I verify-integrity.py
 
 OUT="${{1:-{bundle_name}}}"
 BUILD_DIR="$(mktemp -d)"
@@ -10471,10 +11189,21 @@ run_pip install \\
     --quiet \\
     {package_args}
 
-# Strip caches: they are the largest source of non-reproducibility and the
-# runtime regenerates them anyway.
+# Strip caches and installer-generated files that are not imported at runtime.
+# Preserve only the AWS-documented opentelemetry-instrument command, moving it
+# to the bundle root with a path-neutral shebang; every other console script and
+# every RECORD hash remains path-dependent and is removed.
+if [[ -f "${{BUILD_DIR:?}}/bin/opentelemetry-instrument" ]]; then
+    {{
+        printf '#!/usr/bin/env python3\\n'
+        tail -n +2 "${{BUILD_DIR:?}}/bin/opentelemetry-instrument"
+    }} >"${{BUILD_DIR:?}}/opentelemetry-instrument"
+    chmod 0755 "${{BUILD_DIR:?}}/opentelemetry-instrument"
+fi
+rm -rf "${{BUILD_DIR:?}}/bin"
 find "$BUILD_DIR" -type d -name '__pycache__' -exec rm -rf {{}} + 2>/dev/null || true
 find "$BUILD_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true
+find "$BUILD_DIR" -type f -path '*.dist-info/RECORD' -delete 2>/dev/null || true
 {arch_check}
 OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 rm -f "$OUT_ABS"
@@ -10498,11 +11227,10 @@ rm -f "$OUT_ABS"
 #                 and `zip -r` follows it, so two identical trees can zip to two different
 #                 byte streams without a single timestamp differing.
 #
-# This removes the causes inside this script's control. The constraint file fixes the
-# version of every package the platform pins; the dependencies it deliberately leaves
-# floating (boto3 and botocore, which must move forward with new AWS APIs) can still
-# resolve a newer release between two runs. That is why deploy.sh hashes the object in
-# the bucket rather than the file it just built.
+# This removes every archive-level source of drift inside this script. The complete
+# constraint lock fixes every resolved distribution, including boto3/botocore and all
+# provider SDKs; a dependency upgrade therefore requires a reviewed lock update rather
+# than appearing between two builds of the same commit.
 find "$BUILD_DIR" -exec touch -t 198001010000 {{}} + 2>/dev/null || true
 (cd "$BUILD_DIR" && find . -print | sort | zip -q -X "$OUT_ABS" -@)
 
@@ -10742,6 +11470,7 @@ echo "      if the conversation record must survive a teardown."
         return f"""#!/usr/bin/env bash
 # teardown.sh — Delete AgentCore CloudFormation stack
 set -euo pipefail
+python3 -I verify-integrity.py
 
 STACK_NAME="${{1:-}}"
 # Same precedence as deploy.sh, and it has to be the same: a teardown that defaults to a
@@ -10782,7 +11511,10 @@ echo "Stack deleted."
         retained_resources: list[str] | None = None,
         litellm: dict | None = None,
         bundle_key: str = STRANDS_BUNDLE_KEY,
+        bundle_recipe: list[str] | None = None,
+        provider_extras: tuple[str, ...] = (),
         mcp_bundle_key: str | None = None,
+        mcp_bundle_recipe: list[str] | None = None,
         has_knowledge_base: bool = False,
         template: dict | None = None,
         deploy_sh: str = "",
@@ -10802,7 +11534,10 @@ echo "Stack deleted."
         # unknown key as the Strands bundle would hand a Terraform user believable
         # instructions for packages the template never selected. A .get() default here was
         # that silent lie.
-        bundle_packages = ", ".join(f"`{p}`" for p in _dependency_bundle_recipe(bundle_key))
+        resolved_bundle_recipe = (
+            list(bundle_recipe) if bundle_recipe is not None else _dependency_bundle_recipe(bundle_key)
+        )
+        bundle_packages = ", ".join(f"`{p}`" for p in resolved_bundle_recipe)
         # The two-runtime pattern ships a SECOND bundle: the client agent above carries
         # Strands (DependencyBundleKey), while the hosted MCP server runs a lean, model-free
         # FastMCP closure staged under its own McpServerDependencyBundleKey and built by its
@@ -10810,7 +11545,10 @@ echo "Stack deleted."
         # bundle covers both runtimes and never builds the second.
         if mcp_bundle_key:
             mcp_bundle_file = mcp_bundle_key.rsplit("/", 1)[-1]
-            mcp_bundle_packages = ", ".join(f"`{p}`" for p in _dependency_bundle_recipe(mcp_bundle_key))
+            resolved_mcp_recipe = (
+                list(mcp_bundle_recipe) if mcp_bundle_recipe is not None else _dependency_bundle_recipe(mcp_bundle_key)
+            )
+            mcp_bundle_packages = ", ".join(f"`{p}`" for p in resolved_mcp_recipe)
             mcp_bundle_md = f"""### MCP Server Dependency Bundle
 
 This export deploys **two** runtimes with different dependency closures, so it ships two
@@ -10820,22 +11558,16 @@ model-free FastMCP closure built into `{mcp_bundle_file}` and staged under its o
 parameter `McpServerDependencyBundleKey` — it carries no Strands and no model-provider SDK,
 because an MCP tool server never calls a model.
 
-`deploy.sh` treats the second bundle exactly like the first: it checks your bucket for
-`{mcp_bundle_key}` and, if it is missing, runs `build-mcp-server-bundle.sh` (included here)
-and uploads the result. To build it yourself first:
+`deploy.sh` applies the same authority as the main bundle. Without an explicit operator
+digest it runs `build-mcp-server-bundle.sh`, derives the digest from that reviewed local
+recipe, and compares any existing object at `{mcp_bundle_key}` byte-for-byte. A mismatch
+is fatal and is never overwritten. With an explicit digest, existing bytes must match it;
+a missing object is built locally and must match before upload.
 
-```bash
-./build-mcp-server-bundle.sh
-aws s3 cp {mcp_bundle_file} s3://YOUR-BUCKET/{mcp_bundle_key}
-```
-
-It contains: {mcp_bundle_packages}.
-
-**Integrity.** The MCP server's code-packaging step verifies this bundle against the
-separate `McpServerDependencyBundleDigest` parameter before merging it, on the same
-read-the-object-back-from-the-bucket basis as `DependencyBundleDigest` above — so a
-dependency-only change to the MCP server redeploys, and two concurrent deploys stay safe.
-The two digests are distinct parameters so the two bundles version independently.
+It contains: {mcp_bundle_packages}. `McpServerDependencyBundleDigest` has no bypass
+default, and the MCP server's code-packaging step verifies it before merging. The two
+keys and digests remain independent so a dependency-only change to either runtime cannot
+silently reuse the other's executable package.
 
 """
         else:
@@ -10864,7 +11596,8 @@ The two digests are distinct parameters so the two bundles version independently
             target_count = sum(
                 1
                 for res in (template or {}).get("Resources", {}).values()
-                if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::GatewayTarget"
+                if isinstance(res, dict)
+                and res.get("Type") in {"AWS::BedrockAgentCore::GatewayTarget", "Custom::ManagedWebSearchTarget"}
             )
             if target_count:
                 components.append("GatewayTargets")
@@ -10902,6 +11635,17 @@ The two digests are distinct parameters so the two bundles version independently
             "Retain, deleting the stack leaves the agent's logs in place, "
             "expiring on the retention you set.",
         ]
+        if "Custom::ManagedWebSearchTarget" in resource_types:
+            custom_resources.append(
+                "- `Custom::ManagedWebSearchTarget` — creates the AWS-managed Web Search "
+                "connector as target `AmazonWebSearch`, pins connector version `1.2.0`, "
+                "and verifies the exact configuration plus `READY` status before reporting "
+                "success. Managed connector targets publish automatically and reject "
+                "`SynchronizeGatewayTargets`; the live Gateway `tools/list` check proves the "
+                "served tool. The native GatewayTarget connector surface does not expose a "
+                "version property. The target cannot carry tags, so its "
+                "owning `AWS::BedrockAgentCore::Gateway` carries the effective governance tags."
+            )
         if has_mcp_server:
             custom_resources.append(
                 "- `Custom::OAuth2CredentialProvider` — creates the AgentCore OAuth2 "
@@ -11462,14 +12206,11 @@ and any tool/MCP ZIPs present in this download, then supply their keys and diges
 through the parameters listed below. `deploy.sh` is the executable reference for
 that staging contract.
 
-Two of those parameters deserve a sentence. `DependencyBundleDigest` (and
-`McpServerDependencyBundleDigest` when a server is present) default to `none`, which
-skips the integrity check on the bundle and says so in the provider's log. Supply the
-real `sha256:<hex>` of the object in the bucket, as `deploy.sh` does. Either way a
-bundle change publishes a new runtime version: with a digest the merged `code.zip`
-key moves with the digest, without one it moves with the bundle's S3 key. The one
-combination that does not propagate is new bytes under the same key with the digest
-left at `none` — do not do that.
+`DependencyBundleDigest` (and `McpServerDependencyBundleDigest` when a server is
+present) is required and accepts only `sha256:<hex>`. Terraform has no local recipe
+builder, so its pipeline must build the reviewed recipe independently, compare the exact
+object bytes after staging, and pass that digest. Never derive the expected value from the
+same pre-existing object it is meant to authenticate.
 
 A minimal stack wrapper, after those artifact parameters have been assembled, is:
 
@@ -11557,77 +12298,53 @@ Components: {", ".join(components)}
 3. `zip`, and either pip 24.2 or newer or a `python3` that can create a virtualenv, to
    build the dependency bundle (see below){litellm_prereq}
 
+Supported target Regions are exactly {", ".join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))}.
+Both template Rules and `deploy.sh` reject any other Region before AWS mutation. For a
+Bedrock cross-Region inference profile, the `us.` or `eu.` prefix must match the target;
+set `MODEL_ID` explicitly when deploying an export into a different geography.
+
+### Artifact integrity anchor
+
+The authenticated export response returns both `archive_sha256` and
+`artifact_manifest_sha256`. Keep those values outside this download. Before any direct
+launcher, installer, deploy, or teardown command, set:
+
+```bash
+export EXPECTED_ARTIFACT_MANIFEST_SHA256=<artifact_manifest_sha256-from-the-authenticated-response>
+```
+
+Every executable entrypoint calls `verify-integrity.py` before side effects. That verifier
+trusts only the externally retained digest, then verifies every manifest-declared file and
+`SHA256SUMS`; it deliberately ignores runtime-only `.env` and virtual-environment files.
+An intentional source edit invalidates the artifact. Re-export it, or use an explicit
+reviewed release process that regenerates metadata and updates the external digest. This
+bundle contains no self-resigning command because one would let modified code bless itself.
+
 ### Dependency Bundle
 
-The AgentCore Runtime enforces a 30-second initialization limit, so this stack does
-not pip-install at cold start: the agent's Python dependencies are pre-built into
-`{bundle_file}` and merged with your code at deploy time.
+The Runtime enforces a 30-second initialization limit, so dependencies are pre-built into
+`{bundle_file}` and merged with code at deploy time. This export's key is
+`{bundle_key}`. It is content-addressed by the base recipe, sorted provider extras, and the
+exact constraint digest `{_DEPENDENCY_CONSTRAINTS_SHA256}`. The provider closure covers the
+parent and every multi-agent model; selected extras are
+{", ".join(f"`{extra}`" for extra in provider_extras) if provider_extras else "`none`"}.
 
-**You do not need to obtain that file from anywhere.** `deploy.sh` checks your bucket
-for it and, if it is missing, runs `build-dependency-bundle.sh` (included here) and
-uploads the result. The build pulls from PyPI with an explicit aarch64/Python 3.13
-target, so it works from any machine and needs nothing from the platform that
-generated this bundle.
+The included `build-dependency-bundle.sh` installs {bundle_packages} for aarch64 Python
+3.13 under the complete exact constraint lock. There are no floating direct or transitive versions.
 
-To build it yourself first — to inspect it, vendor it, or run it on a build host with
-network access:
+When `DEPENDENCY_BUNDLE_DIGEST` is absent, `deploy.sh` always rebuilds that reviewed recipe
+locally, hashes it independently, and compares the exact S3 bytes. An existing mismatch is
+fatal and nothing is overwritten. When you provide an explicit trusted digest, an existing
+object is accepted only if its bytes match; if the object is absent, the deterministic local
+build must match before upload. The upload is always read back and compared.
 
-```bash
-./build-dependency-bundle.sh
-aws s3 cp {bundle_file} s3://YOUR-BUCKET/{bundle_key}
-```
+Run the builder and deploy script from this extracted bundle using credentials for the target
+AWS account and one of the seven supported target Regions. Set
+`DEPENDENCY_BUNDLE_DIGEST` to the local bundle's SHA-256 when using an operator-approved
+prebuilt bundle.
 
-It contains: {bundle_packages}, at the exact versions the platform builds its own
-runtimes with (the script carries the pins). If the `pip3` on your PATH is older than 24.2
--- the macOS Command Line Tools pip is 21.2.4 -- the script builds with a current pip in a
-temporary virtualenv instead, because older pips cannot resolve this recipe for the
-runtime's Python 3.13.
-
-If your environment blocks PyPI, build it on a machine that does not and copy
-`{bundle_file}` next to `deploy.sh`, or upload it to
-`s3://YOUR-BUCKET/{bundle_key}` — `deploy.sh` uses either and skips the build.
-
-**Integrity.** The bundle is most of the code that ends up running under the agent's
-execution role, so the code-packaging step verifies it against the
-`DependencyBundleDigest` parameter before merging it, and fails the stack on a
-mismatch.
-
-`deploy.sh` always fills that parameter in, and always by downloading the object from
-your bucket and hashing those bytes — including on the run that just uploaded it. That
-does more than integrity: the digest is part of the S3 key the packaged code is written
-to, so hashing the object is also what makes a dependency-only change actually redeploy.
-Were the value left stale instead, every property of the packaging resource would be
-unchanged, CloudFormation would skip the resource, and the previous dependencies would go
-on running under a stack that reported success.
-
-Reading it back rather than hashing the local file is what makes two deploys at once
-safe. If two stacks are created from the same bucket before the bundle exists, both build
-it and both upload it; whichever lands second is what the bucket holds. A digest taken
-from the local copy would then describe bytes that are no longer there, and the stack that
-lost the race would be failed — correctly — by its own integrity check.
-`build-dependency-bundle.sh` builds reproducibly (fixed member order and mtimes) so that
-two builds of the same package versions are byte-identical and the question does not
-arise, but the dependencies the platform deliberately leaves unpinned (boto3, botocore)
-can resolve a newer release between them, so the read-back is what actually closes it.
-
-Be clear about what that does and does not buy you. Because the hash is taken from the
-object in the bucket, it proves the bytes merged into your agent are the bytes that were
-in the bucket at deploy time — it cannot, by itself, tell you those were the bytes you
-intended. For that, pin the digest of a bundle you built yourself:
-
-```bash
-DEPENDENCY_BUNDLE_DIGEST="sha256:$(shasum -a 256 {bundle_file} | cut -d' ' -f1)" \\
-  ./deploy.sh my-agent YOUR-REGION YOUR-BUCKET
-```
-
-A pinned value takes precedence over anything `deploy.sh` would have computed, so the
-deploy fails if the object in the bucket is not what you pinned. Pin it in any account
-where more than one principal can write to the artifacts bucket.
-
-The parameter's default is `none`, which skips the check and says so in the packaging
-step's CloudWatch logs. With `deploy.sh` you will not see that default; it applies if
-you deploy this template directly — from the console, or through a Terraform or
-CloudFormation wrapper — without supplying a digest of your own.
+A direct console, Terraform, or CloudFormation deployment has no local recipe authority, so
+`DependencyBundleDigest` has no default and must be supplied explicitly.
 
 {mcp_bundle_md}## Quick Start
 
@@ -12031,20 +12748,16 @@ concurrency.
 ## Customization
 
 ### Agent Code
-Edit `agent-code/agent.py` to customize agent behavior. The code reads all
-configuration from environment variables — no hardcoded credentials.
 
-Then re-run `./deploy.sh`. It hashes `agent-code/` and passes the result as the
-`AgentCodeDigest` parameter, which does two things: CloudFormation sees the change
-and actually repackages the code (without it, editing the code changed no template
-parameter, so the stack quietly kept serving the old code), and the packaging step
-verifies the zip in S3 against that digest before deploying it, so code written to
-the staging bucket by anything other than this deploy is refused instead of being
-run by the agent's runtime role.
+Generated files are integrity-bound to the authenticated export response. Editing
+`agent-code/agent.py` intentionally invalidates the manifest and every direct entrypoint
+refuses to continue. Make the source change in the factory and re-export, or use a separate,
+explicitly reviewed release process that regenerates artifact metadata and replaces the
+externally stored expected manifest digest. The bundle deliberately ships no self-resigning
+shortcut.
 
-If you deploy with `aws cloudformation deploy` directly rather than through
-`deploy.sh`, pass `AgentCodeDigest` yourself. Its default is the digest of the code
-as exported, so an edited upload fails the check instead of being deployed silently.
+If a reviewed external process stages different agent code directly, it must also supply the
+matching `AgentCodeDigest`; otherwise the code-packaging resource refuses the substitution.
 
 ### The Lambda Zips
 

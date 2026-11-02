@@ -6,6 +6,616 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — `deploy.sh` builds the frontend on a machine that has never seen the lock
+
+- `build_frontend` installed the frontend with `npm ci --offline`. On a machine whose npm
+  cache had never seen `frontend/package-lock.json` — every fresh clone — npm failed with
+  `ENOTCACHED` *after* the CloudFormation stack had been created, leaving a platform with
+  an API and no UI. Observed on the first us-east-1 production create of this candidate.
+  The install now uses `--prefer-offline`: a cached package is used without a registry
+  round-trip, a missing one is fetched, and npm verifies either against the lock's
+  integrity hash. The credential boundary is unchanged and now pinned by
+  `infra/tests/test_deploy_frontend_install_works_on_a_fresh_clone.py`: the install and the
+  build still run under `env -i` with no `AWS_*` name, user and global npm config disabled,
+  and `--ignore-scripts`. `--offline` was never that boundary.
+
+### Changed — release evidence is executed and receipt-backed; a pass can no longer be asserted
+
+- `scripts/release_evidence.py` no longer has a `record` command. The only writers are
+  `run-suite` and `run-scenario`, which execute the command arrays the traceability
+  contract declares (no shell, bounded by the declared timeout, child environment limited
+  to PATH-class names plus the suite's declared variables) and write a receipt: resolved
+  argv, every tool executable by absolute path and SHA-256 with its reported version, exit
+  statuses, timing, the JUnit report parsed, the live provenance emitted, and digests of
+  every artifact the command produced. Artifacts live under the run directory and are
+  re-digested on every load. An event's status is derived from the receipt when written and
+  re-derived on every read; a hand-edited `pass`, a pass with no artifacts, or a pass whose
+  receipt shows a non-zero exit is rejected on load.
+- Offline credit is per mapped selector: `pytest`/`javascript` suites must route JUnit to
+  `{junit_xml}` (the contract now does) and a `(control, kind)` is credited only when every
+  selector the traceability maps to that suite appears as a passed test case; command suites
+  credit their check ids only when every command exits 0. `required_tools` versions are
+  verified against the executables actually used.
+- Live credit is bound: `start --account-id` binds a run to one AWS account; a live
+  scenario must emit `provenance` naming that account, the requested Region, a stack, and
+  the deployed commit and project tree, which must equal the candidate's. Another account,
+  another Region, or a stale deployed build is refused before anything is recorded, and
+  finalization refuses a run whose live receipts name more than one account or build.
+- The run identity now includes the repository-root CI workflow: its committed blob hash
+  and content digest are recorded, its dirty state blocks `start` and every later operation,
+  and a changed blob fails `verify`.
+- Every non-offline scenario the traceability names now has an executable definition
+  (command, timeout, required artifacts, provenance flag); undefined or orphaned scenarios
+  fail contract validation. `release/scenarios/run_scenario.py` dispatches them: an
+  unimplemented scenario exits 3 and records `blocked`, never `pass`. The exact-commit
+  scenario is implemented and independently re-derives commit, tree, workflow blob, and
+  contract digests. The remaining 58 scenarios are blocked until reviewed implementations
+  are registered — which is the honest state of this candidate.
+
+### Fixed — the seven-Region envelope is enforced at every live admission point
+
+- One predicate, `region_capabilities.require_release_region`, now gates the shared
+  `DeployRequest` model (explicit `targetRegion`, every route and mode), the live deploy
+  handler's omitted-Region home fallback (before any deployment row or AWS call), admin
+  deploy-target registration (422 at the API boundary before any STS/S3/KMS call, and again
+  in `deploy_target.add_region`), target resolution (a legacy allowlist row or an
+  out-of-envelope platform home Region can no longer resolve), the deploy-panel options
+  endpoint (never offers an inadmissible target; reports `home_region_admissible` and
+  `release_regions`), and the prepared state-machine payload (`unsupported_release_region`).
+  Previously the allowlist was informational on these surfaces: an admin could register
+  `ap-southeast-2`, the panel would offer it, and the handler would deploy to it.
+- `infra/app.py` refuses an unselected `aws_region` at synth, reading the same
+  `release/agentcore-regions.json` that `scripts/deploy.sh` enforces, so a direct
+  `cdk synth`/`cdk deploy` no longer bypasses the script. Nothing is synthesized for a
+  refused Region.
+- The frontend mirrors the predicate (`isReleaseRegion`) to filter offered targets, to
+  refuse a submit before the request leaves the browser, and to show the refusal when the
+  platform's own home Region is outside the envelope. The backend remains the enforcement
+  point.
+- The evidence recorder's matrix contract now requires the exact `production_envelope`
+  key set with `gateway_provider: agentcore`, and admits only the reviewed capability
+  tuples per profile (full: all true; reduced: exactly "no Web Search, with Agent
+  Registry" or "neither"). The previous "not all true" rule accepted shapes nobody
+  reviewed, such as Web Search without Agent Registry.
+- A single test pins that every copy of the seven — backend, frontend, `deploy.sh`, the
+  CDK matrix, and the CI `strict-synth` matrix — is literally the same set. Every gate has
+  a removal mutation that fails the suite.
+- Documentation now says "selected certification candidate" Regions; "certified" is
+  reserved for a Region named by a finalized evidence run. The manual CDK steps name the
+  pinned `npm ci` / `infra/node_modules/.bin/cdk` path the deploy script actually uses.
+
+### Fixed — downloadable artifact verifiers resist import shadowing
+
+- Both shipped verifiers (`verify-artifact.py` and each bundle's `verify-integrity.py`)
+  now refuse to run unless the interpreter is in isolated mode, and check that before
+  importing anything but `sys`. Measured before the fix: a plain `python3` run placed
+  the unverified artifact directory first on `sys.path`, so an undeclared `hashlib.py`
+  dropped beside the verifier let a same-size tampered `agent.py` report "verified".
+  Every generated entrypoint (`deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`,
+  `run.sh`, `run-docker.sh`, `install-locked.sh`), every CI example, and the customer
+  documentation now invoke `python3 -I`. The exploit is a permanent mutation test for
+  both artifact types.
+- Export routes now refuse the write-only `ConnectorConfig.secretValue` by its typed
+  attribute. It is `exclude=True`, so a serialization-based scan could never see it;
+  the rejection names the field and never echoes the value.
+
+### Added — seven-Region downloadable artifact release contract
+
+- Replace the former regional control with `regional.certified_core` and bind schema-2
+  `release/agentcore-regions.json` to exactly seven production Runtime Regions:
+  `us-east-1`, `us-east-2`, `us-west-2`, `eu-central-1`, `eu-west-1`, `eu-west-2`,
+  and `eu-west-3`. N. Virginia, Ohio, Oregon, and Ireland use the full profile;
+  Frankfurt and London omit managed Web Search but retain AWS Agent Registry;
+  Paris omits both optional services; N. California remains excluded. Managed Harness
+  and A2A remain outside production.
+- Add `delivery.downloadable_assets` as a formal release control. It requires offline
+  positive/adversarial/removal-mutation, independent clean-clone, exact-commit,
+  authenticated live positive/adversarial, both artifact workflows in every selected
+  Region, real CloudFront UI, rollback, and direct-service zero-residual teardown
+  evidence. Live evidence must download from the deployed API/UI, verify response and
+  archive manifests, and operate from a clean recipient workspace rather than call a
+  generator directly.
+- Expand strict synthesis to all seven Regions and expand the export gate across the
+  downloadable contract, Python exporter, CloudFormation export/deployability,
+  staging/isolation, documentation, and workflow validation. Pin cfn-lint 1.57.0,
+  Checkov 3.3.1, Terraform 1.14.6, ShellCheck 0.11.0, and actionlint 1.7.12.
+- Document `artifact-manifest.json`, `SHA256SUMS`, `verify-artifact.py`, authenticated
+  response integrity metadata, inert CI examples, localhost-only Docker publication,
+  the immutable Python image, and exact lock plus `pip check`/installed-closure checks.
+  Distribution wheel bytes are not hash-locked, and the claim is bounded to the exact
+  commit, tools, Region profiles, and named scenarios rather than a guarantee about
+  future package indexes, AWS changes, or defect-free operation.
+
+### Security — frontend build tool
+
+- Pin Vite to 7.3.7, the first release outside the affected ranges for
+  GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, and GHSA-587h-7wmj-h5pm. The
+  high-severity npm audit finding invalidates earlier frontend evidence, so release
+  certification must be repeated from this fix-forward commit.
+
+### Fixed — reduced-region core Gateway and failure cleanup
+
+- `strands-gateway-agent` now remains a core Runtime/Gateway/Identity template in every
+  supported release Region. Only the dedicated `web-search-agent` template or an explicit
+  `web_search`/legacy `duckduckgo_search` tool ID requests the optional managed connector;
+  reduced-region UI and API paths continue to block those explicit requests loudly.
+- The status-update Lambda now receives the deployed triggers table name and exactly
+  `dynamodb:Query` on that table. Failed-deployment cleanup can therefore prove a trigger
+  partition empty and atomically release version/slot/name metadata instead of querying a
+  nonexistent literal `Triggers` table and leaving a resource-free deployment
+  `delete_retained`.
+
+### Fixed — tool-heavy browser turns escape the 30-second API limit
+
+- Non-OBO Runtime chat now starts one authenticated, owner-bound asynchronous
+  invocation, polls its result, and deletes the scratch row instead of sending a
+  buffered API Gateway request that times out while the agent continues running.
+- The async worker revalidates ownership and protocol, preserves policy promotion,
+  invocation-budget accounting, session IDs, and exact tool receipts, and caps the
+  AgentCore read at 540 seconds inside the Deployment Lambda's 600-second timeout.
+- Cross-tenant and missing job IDs remain indistinguishable, oversized queue payloads
+  fail before writes, OBO tokens are never queued, failures are generic, and every
+  result row carries a bounded recovery TTL. The live gallery harness uses this same
+  browser transport so managed Web Search's cold first turn is tested without a
+  duplicate retry.
+
+### Fixed — managed Web Search replaces unsupported HTML scraping
+
+- `web-search-agent` now uses the Amazon Bedrock AgentCore Gateway Web Search
+  Tool (`connectorId=web-search`) pinned to version `1.2.0`. Explicit
+  `web_search` requests use the same target; the generic `strands-gateway-agent`
+  remains connector-independent so the core template works in reduced Regions.
+  The managed target advertises `AmazonWebSearch___WebSearch`; live
+  response oracles require structured `title`, `text`, and HTTP(S) `url` fields,
+  and gallery prompts require source titles and links to remain as citations.
+- Live deployment and CloudFormation export both fail before side effects outside
+  `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1`, `ap-southeast-2`, and
+  `ap-northeast-1`. The dated schema-2 Region matrix therefore runs this scenario
+  in the four full-profile selected Regions (N. Virginia, Ohio, Oregon, and
+  Ireland), independently of core Runtime, Memory, and Agent Registry support.
+- CloudFormation uses `Custom::ManagedWebSearchTarget` because the current native
+  GatewayTarget connector schema exposes `ConnectorId` but not connector
+  `Version`. Its complete create/update/delete lifecycle adopts conflicts only
+  after exact ownership/configuration readback, synchronizes only its target ID,
+  polls `READY`/absence, and uses a stable Gateway/target physical ID. A dedicated
+  provider function guarantees rollback can run the new Delete handler before
+  removing its code.
+- The provider role receives only `Create/Get/List/Update/DeleteGatewayTarget` and
+  `SynchronizeGatewayTargets` on the stack's exact Gateway ARN. The live Gateway
+  execution role no longer grants `bedrock-agentcore:*`, Bedrock model access,
+  role passing, or secret writes; it has explicit invocation, policy, workload
+  token, credential-read, Lambda, and region-specific service-owned Web Search
+  permissions.
+- The legacy `duckduckgo_search` ID remains only as a saved-canvas migration alias
+  to managed search. DuckDuckGo HTML/Lite parsing and endpoints were removed from
+  generated agents, Gateway Lambda code, standalone MCP built-ins, exports, UI
+  labels, and AI canvas generation. A standalone MCP request for the legacy ID
+  now requires caller-supplied implementation code or fails with a migration
+  message.
+- Production-evaluation OTLP/HTTP requests to X-Ray are now SigV4-signed with
+  refreshable Runtime-role credentials and X-Ray-compatible epoch-prefixed trace
+  IDs. Promotion still fails closed unless Transaction Search is
+  `ACTIVE/CloudWatchLogs`; the reversible integration lease enables it, waits for
+  search readiness, and restores the exact prior regional state.
+- The live integration cleanup tracker now paginates and deletes only each
+  synthetic deployment's exact Runtime log-group prefix after the customer delete
+  tombstone is durably `deleted`, then requires two empty inventories. Real
+  customer deletion continues to retain bounded audit logs by design.
+
+### Fixed — live integration honors production admission and cleanup
+
+- Real CloudFront integration invocations now create a unique, owner-bound
+  agent budget before dispatch and delete and absence-check it afterward. The
+  tracker registers the key before the write, so a lost create response still
+  has deterministic cleanup; missing production capacity continues to return
+  exact HTTP 429.
+- The standalone `mcp-server-runtime` gallery entry is explicitly model-free.
+  Production admission no longer injects a Bedrock Guardrail, model evaluation
+  key, staging promotion gate, or generic-agent observability into that tool
+  server; caller-supplied model/Guardrail/agent settings remain rejected. Its
+  release gate is the real authenticated MCP protocol and complete tool matrix.
+- Hosted MCP Runtime targets now derive Cedar actions from the authenticated
+  `tools/list` plane after target synchronization. A partial or unreadable list
+  fails closed rather than creating a deny-all policy; a complete list carries
+  every qualified action into the Policy step.
+- Newly enabled CloudWatch Transaction Search waits AWS's documented ten-minute
+  search-readiness window before release sessions are generated. Recovery is
+  idempotent across credential expiry after either indexing or destination was
+  already restored, and keeps its 0600 state until destination, percentage, and
+  temporary policy absence are all reverified.
+- Failed-deployment cleanup now gives `StepStatusUpdateRole` the two ownership
+  reads it actually calls—`bedrock:GetGuardrail` and
+  `bedrock:ListTagsForResource`—on this account's Guardrails. They live in one
+  dedicated policy, while deletion stays separate and still requires live
+  `ManagedBy` and `AgentCoreStack` tags.
+
+### Fixed — production evaluation emits real AgentCore spans
+
+- Production-gated code deployments now run through the AWS-documented
+  `opentelemetry-instrument` entrypoint with exact `aws-opentelemetry-distro`
+  `0.21.0`. The gate forces framework-wide content redaction while the
+  owner-checked staging slot of an immutable production-gated version adds a
+  private marker that generated code strips
+  before execution and converts into one documented `invoke_agent` span with
+  `gen_ai.task.input/output`. Production-slot callers cannot set that marker;
+  the live matrix invokes a unique post-promotion canary and requires its prompt
+  and expected response phrase to remain absent from every correlated
+  `aws/spans` record. Trace export uses
+  the target Region's SigV4-protected X-Ray OTLP endpoint and shared `aws/spans`
+  without granting tenant runtimes account-wide `logs:PutResourcePolicy`.
+- Batch Evaluation now selects the documented
+  `<AgentCoreRuntimeName>.DEFAULT` service identity rather than the opaque
+  runtime ID, and reads the shared span group the platform IAM already governs.
+  A live Ireland job exposed both defects by failing all five sessions with
+  `JobProcessorCustomerException: No spans were found for the session`.
+- The real trigger matrix now waits for structured records with exact session,
+  service, trace, and span IDs—not any application-log mention—then observes the
+  documented indexing settle window. Its Transaction Search lease captures the
+  account's destination/indexing state, registers every cleanup before mutation,
+  enables 100% indexing for the run, and restores and verifies the original
+  state and temporary resource-policy absence on every exit path. A failed
+  restoration retains both its in-memory retry handle and 0600 durable state;
+  an explicit replacement-process recovery validates account, Region, schema,
+  ranges, flags, policy namespace, and exact policy ownership before mutating
+  any account-global setting.
+
+
+### Fixed — frozen promotion evidence survives DynamoDB persistence
+
+- Agent-version reads now restore integral DynamoDB numbers as Python `int` and
+  fractional numbers as `float`. The previous reader converted every `Decimal`
+  to `float`, silently changing canonical policy JSON (`5` to `5.0`) and making
+  an otherwise unchanged frozen policy fail its SHA-256 digest at Batch
+  Evaluation start with exact HTTP 409.
+- The same contract protects persisted evidence counts and expiry timestamps.
+  A real Moto DynamoDB write/read validates both policy and evidence digests,
+  checks their integer fields retain exact types, and an all-floats mutation
+  proves the old behavior fails closed.
+
+### Fixed — standard users can manage owned runtime triggers
+
+- `g-users-default` now includes `trigger:read` and `trigger:write`, matching the
+  Triggers panel shown to standard users who can deploy agents. Runtime and row
+  ownership checks remain authoritative; no admin or cross-tenant access is added.
+- A real `eu-west-1` customer-path run previously deployed the runtime, then
+  received exact HTTP 403 `Missing required scope(s): trigger:write` on its first
+  cron trigger. Backend/frontend parity, unauthorized type-only access, and a
+  scope-removal mutation now pin the persona contract.
+- Triggers intentionally resolve only the production slot. The UI now reads the
+  slot first and directs staging-only users to evaluate/promote instead of showing
+  controls that can only return 404. The real integration matrix creates
+  deterministic staging sessions, waits for their AgentCore logs, runs and attests
+  Batch Evaluation, promotes the exact version, and only then provisions triggers.
+- The same live run then proved production invocation admission fails closed with
+  exact HTTP 429 when no applicable monthly budget exists. The matrix now creates
+  one bounded agent-scoped budget through the product API. Its synthetic
+  `g-users-default` identity also receives the orthogonal `g-admins-cost` group
+  for the run because agent budgets are writer-owner-bound; that group grants no
+  trigger scope and cannot mask trigger RBAC. Cleanup is registered before the
+  write and deletion is absence-checked in `finally`, including failed promotion
+  paths.
+- A live staging call proved the old random `TRIGGER-RELEASE-<token>` exact-output
+  prompt was itself Guardrail-hostile and correctly returned `[Assistant output
+  redacted.]`. Release evaluation now uses a bounded inventory of ordinary factual
+  questions, low-entropy expected answers, and explicit semantic oracles. The
+  redaction placeholder fails the oracle, and a policy requiring more sessions
+  than the reviewed inventory fails before invocation; no Guardrail setting is
+  weakened for test convenience.
+
+### Fixed — runtime teardown can verify Guardrail ownership
+
+- `DeploymentLambdaRole` now grants `bedrock:ListTagsForResource` on this
+  account's Guardrails alongside its existing get/delete actions. Teardown still
+  fails closed unless the live `ManagedBy` and `AgentCoreStack` tags prove ownership.
+- A real `eu-west-1` teardown deleted its Runtime but retained the generated
+  Guardrail because the ownership read returned `AccessDeniedException`. The
+  synthesized-role contract covers the exact resource pattern, foreign-account
+  denial, and missing-read mutation.
+
+### Fixed — failed CDK updates cannot report deployment success
+
+- `cdk_deploy_pinned` now captures and returns the exact nonzero CDK status before
+  logging success. A real rollback exposed Bash's conditional-function behavior:
+  invoking the helper from `if ...` disables inherited `errexit`, so the old helper
+  continued after CDK failed and returned the later logging command's zero status.
+- The executable safety-gate harness now invokes the real function chain from a
+  shell conditional and forces `cdk deploy` to exit 73. The test requires that
+  exact status to reach the caller and prevents frontend publication after a
+  failed or rolled-back stack update.
+
+### Fixed — Guardrail PII filters use service-model enum values
+
+- The production baseline no longer sends legacy `SSN` to Bedrock. A real
+  `eu-west-1` deployment reached `CreateGuardrail` and returned
+  `ValidationException` because the service accepts
+  `US_SOCIAL_SECURITY_NUMBER`, not the shorthand alias.
+- Legacy caller input remains compatible: `SSN` is canonicalized before the
+  request, alias/canonical duplicates collapse to one entry, and `BLOCK` wins
+  over `ANONYMIZE`. Tests compare the complete supported set to the pinned
+  botocore `CreateGuardrail` model and include an alias-removal mutation.
+
+### Fixed — Guardrail creation can apply governed ownership tags
+
+- `StepGuardrailsRole` now grants the separately authorized
+  `bedrock:TagResource` action that `CreateGuardrail(tags=...)` requires. A real
+  `eu-west-1` deployment proved the create action alone is insufficient: AWS
+  denied `TagResource` atomically before returning a guardrail ID.
+- The grant is limited to `guardrail/*` in this account and pins
+  `ManagedBy=agentcore-flows`, the exact stack/Region owner value, and only the
+  ownership keys plus `platform:*` and `org:*` governance namespaces. The
+  documented cross-account role carries the same conditioned grant; positive,
+  adversarial-broadening, and removal-mutation tests protect both paths.
+
+### Fixed — control-plane APIs reject Cognito ID tokens
+
+- Every JWT-protected API Gateway route now requires Cognito's
+  `aws.cognito.signin.user.admin` scope, which is present on workforce access
+  tokens and absent from ID tokens. ID tokens are rejected before Lambda rather
+  than being accepted from issuer/audience alone.
+- `GET /health` and HMAC-authenticated webhook ingress remain the only intentional
+  unauthenticated routes. Synthesized-template tests cover every route and include
+  removal, wrong-scope, and unauthenticated-route mutation twins.
+- A real `eu-west-1` CloudFront probe discovered the gap: the same standard-user
+  session received HTTP 200 with an access token and, incorrectly, with its ID
+  token. The workflow fixture was deleted after the probe; the corrected revision
+  requires a fresh live 200/403 twin before certification. API Gateway returns
+  `403 Forbidden` for a valid JWT that lacks the route scope; `401` is reserved
+  for JWT validation failures such as a bad audience.
+
+### Fixed — fresh deploy recognizes current AWS CLI missing-stack errors
+
+- The Cognito carry-forward guard now accepts both exact AWS CLI v2 `GetTemplate`
+  missing-stack forms: the legacy `An error occurred ...` line and the current
+  `aws: [ERROR]: An error occurred ...` line. AWS CLI 2.33 otherwise made every
+  fresh deployment stop before synthesis even though the stack was provably absent.
+- Classification remains fail-closed: only one nonblank line with the exact
+  `ValidationError`, operation, and target stack is accepted. Wrong stacks, access
+  denials, transport failures, prefixes, suffixes, and extra diagnostics still abort.
+  Positive, adversarial, and fail-open mutation tests execute the real shell function.
+
+### Added — exact-commit release evidence and certified Region matrix
+
+- `release_evidence.py` starts only on a clean Git subtree, records one immutable bounded JSON event
+  per result, stores artifact digests rather than raw logs, and rechecks commit/tree/contract identity
+  before every append. Live/UI/rollback/teardown events require both a Region and the exact 12-digit
+  AWS account ID. Sensitive detail keys, credential-like values, symlinks, hard links, oversized
+  artifacts, and non-finite numbers are refused.
+- `production-readiness-traceability.json` binds every required kind to fixed argv command arrays,
+  existing committed test selectors, or named live scenarios. Offline events must name a mapped
+  suite; non-offline events must name a mapped scenario. Finalization requires every mapped suite
+  and scenario, so one generic pass cannot stand in for frontend, infrastructure, package, synth,
+  lifecycle, or per-Region proof. The plan includes `npm audit --audit-level=high`, a pinned
+  tracked-file `detect-secrets` wrapper, and the isolated cfn-lint/Checkov/Terraform/ShellCheck
+  exported-artifact gate in addition to tests, builds, and strict synthesis.
+- Failed and blocked attempts remain active until an explicit same-scope supersession. Finalization
+  requires every control/kind/suite/scenario tuple, every global lifecycle/UI gate, and an
+  independent pass for each selected certified Region; any active failure or missing tuple prevents a
+  seal.
+- Run, event, event-set, and final digests are independently verified from a detached clean clone.
+  Mutation tests remove a Region event and a required suite, alter event content, drift contract
+  bytes, dirty the source, resolve every committed selector, and exercise concurrent appends to prove
+  each guard fails closed.
+- The dated Region matrix cites AWS Documentation and bounds core, Memory, Agent Registry, and Web
+  Search scenarios independently. It is a release-input contract, not a claim that a live campaign
+  has already passed.
+
+### Fixed — deployment dependency artifacts reproduce byte-for-byte
+
+- The AgentCore bundle constraint contract now locks all 113 distributions across the
+  baseline and eight provider deltas, including boto3/botocore and each provider SDK.
+  Every installed tree is validated against the complete lock before packaging; an
+  unexpected transitive, version drift, duplicate version, symlink, or partial bundle set
+  fails before synthesis.
+- `package-agentcore-deps.py` writes sorted fixed-metadata archives and excludes console
+  scripts plus `dist-info/RECORD`, whose shebangs/hashes encoded the checkout path. Two
+  full 11-bundle rebuilds now produce identical bytes.
+- Lambda dependencies now compile from `requirements-lambda.in` to a 38-package,
+  target-specific hash lock and install with `--require-hashes`. Path-dependent console
+  scripts, RECORD files, bytecode, caches, and symlinks are excluded before CDK hashing.
+- Source distributions explicitly exclude the generated `backend/lib/` tree while
+  retaining all 11 Runtime ZIPs, and Hatchling is exact-pinned. A real mutation build
+  proves removing the exclusion reintroduces the build-order-dependent files.
+- Repeated validation produces identical Lambda tree digests, wheels, source
+  distributions, CloudFormation templates, and CDK asset manifests. Positive,
+  adversarial, and lock-mutation tests prevent weakening these controls.
+
+### Fixed — Gemini provider bundle resolves reproducibly
+
+- The live deploy bundle build exposed a new transitive conflict: the unconstrained Strands baseline
+  resolved `tenacity 9.2.1`, while every supported `google-genai` release requires
+  `tenacity>=8.2.3,<9.2.0`, so `provider-gemini.zip` failed with `ResolutionImpossible` before CDK.
+- `tenacity==9.1.2` is now synchronized across platform constraints, backend dev/lock state, and the
+  exported customer bundle recipe. No-write target-platform probes prove both baseline and latest
+  Gemini resolution; pin-parity tests make removal or drift fail closed.
+
+### Fixed — promotion evidence keys follow environment lifecycle
+
+- The promotion-evidence CMK now uses the same stateful removal policy as every table, pool,
+  bucket, queue, and flow-log group: production-like stacks synthesize
+  `RetainExceptOnCreate`/retained replacement, while dev/test/sandbox stacks delete the key.
+  Failed first creates no longer strand a CMK, and throwaway teardown leaves no project key.
+- The exhaustive stateful-resource oracle now includes `AWS::KMS::Key`; a dedicated test pins
+  rotation, 30-day pending window, API wiring, and destroy semantics in a test environment.
+
+### Fixed — deployment summaries expose one explicit runtime key
+
+- `GET /api/deploy/{id}` and `GET /api/deployments` now share one response serializer. Both expose
+  the derived, tenant-facing `runtime_name` required by production-slot chat while excluding the
+  persisted `friendly_runtime_name`, teardown authority, and credential leaves. A central derived-
+  field classification prevents the value from becoming an unreviewed persistence field.
+- Response-shape tests pin identical status/list values and preserve byte-for-byte modern Gateway
+  references. Export-isolation mutation tests now inspect the shared audit middleware introduced by
+  append-only auditing, including phase/correlation fields, and still fail if response content is read.
+
+### Added — Guardrails enforce every generated tool boundary
+
+- Guardrail-enabled Runtime agents apply the same deployed Guardrail to canonical tool arguments
+  (`source=INPUT`) before execution and tool results (`source=OUTPUT`) before model consumption.
+  Strands uses production `BeforeToolCallEvent`/`AfterToolCallEvent`; hand-rolled Converse and
+  forced code-interpreter paths use an equivalent wrapper.
+- `GUARDRAIL_INTERVENED`, dependency failure, malformed action, content over 64 KiB, and unavailable
+  hook APIs fail closed with generic error results; no input/result or assessment detail is logged.
+  Guardrail hooks run before HITL and pre-cancelled calls are not copied into approval records.
+- The request shape is validated against the pinned real `ApplyGuardrail` botocore model. Tests
+  cover allowed input/output, blocked input preventing execution, blocked output suppression,
+  outage, oversize, every generator/export path, hook composition, and a removed-hook mutation.
+- Production refuses managed Harness before side effects. The current Harness model exposes hooks
+  but no native model Guardrail configuration; documented after-tool deny retains the completed
+  result and after-invocation cannot retract streamed output. Harness remains available in
+  development until that support envelope can be enforced honestly.
+
+### Added — versioned external browser delivery
+
+- `POST /api/runtimes/{name}/invoke` is a stable production-only alias over the existing exact
+  slot/version/deployment target resolver. Request bodies accept conversational input only;
+  staging, Runtime id/ARN, account, Region, endpoint, warmup, and simulation fields are `422`
+  before resolution or dispatch.
+- Every CloudFront frontend ships dependency-free `agentcore-chat-v1.js` and TypeScript
+  declarations. `AgentCoreClient` and `<agentcore-chat>` accept only a host callback for a current
+  JWT, use no cookies/storage, omit credentials, never auto-retry a POST, expose typed
+  401/403/409/429/503 metadata, and render model output through `textContent`.
+- CloudFront's shared response policy now permits non-credentialed cross-origin module/API use,
+  explicitly allows `Authorization`/`Content-Type`, and exposes `Retry-After`; CSP
+  `frame-ancestors 'none'` remains because the integration is a Web Component, not an iframe.
+  Production build verification fails when either artifact is missing, the client leaves the
+  stable alias, or widget code reads an access-token HTML attribute.
+
+### Fixed — JIT approval cannot race a recorded rejection
+
+- Approval conditionally leases `PENDING → APPLYING` before IAM, applies the deterministic
+  `JIT-{request_id}` policy, and finalizes `APPROVED` only with the same token. Rejection is a
+  conditional `PENDING → REJECTED`, so it cannot win after permission application starts.
+- Definitive IAM refusals release the lease back to `PENDING`. Timeout/transport ambiguity remains
+  `APPLYING`, returns `Retry-After: 300`, stays visible in the admin queue, and can be reclaimed
+  after expiry to idempotently reapply/finalize; it is never mislabeled rejected.
+- JIT validation now rejects exact or wildcard Gateway, Gateway-target, and Cedar Policy mutation
+  actions in addition to existing IAM/STS/shared-role/resource guards. Positive, concurrent
+  reject, stale-token, lease-takeover, definitive-failure, ambiguous-retry, and old-sequence
+  mutation tests pin the state machine.
+
+### Added — signed webhook ingress is durably idempotent
+
+- After HMAC/timestamp validation and required production audit, webhook ingress conditionally
+  claims the delivery ID in the trigger table before SQS enqueue. A successful send atomically
+  becomes a seven-day `QUEUED` marker bound to the request-body SHA-256; byte-identical replay
+  returns `202 duplicate=true` without another send, while delivery-ID reuse with different
+  authenticated bytes returns `409`.
+- Concurrent requests receive retryable `409`/`Retry-After: 1`. A 60-second `CLAIMING` lease can
+  be taken over after a crash, while a known enqueue failure conditionally releases its token for
+  immediate retry. The existing worker-side transactional delivery claim remains the second
+  idempotency layer when SQS send outcome is ambiguous.
+- Ingress rows share the trigger's delivery partition, so trigger deletion purges both ingress and
+  worker evidence. Tests cover unique, duplicate, concurrent, failed-send, crash takeover,
+  delete-race, audit ordering, and a no-dedup mutation. The live trigger matrix now replays the
+  exact timestamp/delivery/body/HMAC tuple and requires first `duplicate=false`, then
+  `duplicate=true`; a newly signed different body under that ID must return exact `409`, with
+  one completed worker delivery.
+
+### Added — production invocation operations use atomic authorization capacity
+
+- One DynamoDB transaction condition-checks every applicable owner/agent/tag limit, increments
+  monthly reserved/authorized counters, and creates a correlated reservation before each
+  platform-mediated slot, direct, stream, MCP, or trigger invocation operation. A bounded MCP
+  handshake and tool call are one operation. Production requires at
+  least one applicable definition. Exhaustion returns `429` plus `Retry-After: 3600`; storage
+  uncertainty returns `503` before dispatch.
+- Dispatch, not response success, decides settlement: successful and failed Runtime responses
+  commit because both may incur charges; proven pre-dispatch failures release; one-hour unknowns
+  commit conservatively. Settled reservation rows receive 90-day TTL and monthly counters 400-day
+  TTL, while definitions persist.
+- `budget_reservation_usd` configures one USD-denominated authorization unit. UI/API/docs explicitly
+  distinguish this admission capacity from actual AWS cost and exclude downstream vendor/tool
+  charges or separately credentialed calls. Production A2A is refused before side effects until
+  inbound/nested reservation propagation exists; development A2A remains available.
+- The hard-limit condition and A2A admission guard have mutation twins proving removal reopens
+  oversubscription/bypass. True concurrent transaction behavior remains a mandatory live DynamoDB
+  gate because Moto's transaction backend is not thread-safe.
+
+### Added — production safety controls are mandatory and non-bypassable
+
+- Production-like deploy admission injects the platform-managed `production-v1` Bedrock Guardrail
+  when none is supplied and raises caller settings to `HIGH` content/prompt-attack filtering plus
+  credential/common-PII anonymization. Custom topics, words, regexes, and stronger PII blocking
+  remain additive. Unattested `existing` Guardrails are refused before persistence or AWS work.
+- Generated Strands agents disable Guardrail trace while retaining input and output redaction,
+  preventing original matched sensitive text or blocked output from being returned in traces.
+- Production tool Gateways now receive a managed Cedar profile with `ENFORCE` and fail-closed
+  behavior at API admission and again inside the Policy step. Missing Policy nodes are injected;
+  disabled, `LOG_ONLY`, and `on_enforce_failure=log_only` inputs cannot weaken production. The
+  production tool-plane support envelope requires AgentCore Gateway because LiteLLM cannot attach
+  AgentCore Policy; model-only deployments do not create a policy engine.
+- Dynamic Runtime, per-agent Runtime, managed Harness, shared CDK Runtime, and exported
+  CloudFormation Runtime execution roles now carry the same explicit deny for Gateway, target,
+  and Policy control-plane mutations. A Policy canvas node grants agent code no control-plane
+  authority. Policy builders reject exact or wildcard allows matching the denied actions before
+  IAM publication, so adding `bedrock-agentcore:*` fails closed rather than silently reopening the
+  Cedar detach path.
+- `production_evaluation_gate=false` is valid only in development-like environments. Production
+  now rejects the bypass both during CDK synthesis and at deploy admission; malformed values also
+  fail closed.
+
+### Added — production audit is append-only and fail-closed before mutation
+
+- Both FastAPI applications now classify every write route. Production appends a correlated
+  `attempt` before route execution and refuses the request if that evidence cannot be created;
+  public webhooks append only after HMAC/replay validation and before queue side effects, so
+  unauthenticated traffic cannot amplify audit writes. Outcomes are separate rows; missing
+  outcomes remain visible as incomplete attempts.
+- Audit rows use conditional creates plus canonical SHA-256 integrity digests verified on read.
+  Production audit events omit TTL, the table remains retained/deletion-protected, and both Lambda roles
+  are explicitly denied update/delete/batch-write access. Development keeps its 90-day TTL.
+- The admin API no longer fabricates an empty production history on storage/integrity failure, and
+  the UI highlights incomplete attempts. The documented claim is append-only/tamper-evident inside
+  the platform IAM boundary, not account-administrator-resistant Object Lock/WORM.
+
+### Fixed — OBO connectors now carry the authenticated workforce identity end to end
+
+- End-user chat invokes the server-resolved production slot, which freezes the immutable
+  version, deployment, account, Region, Runtime ARN, and recorded endpoint qualifier before any
+  token crosses the Runtime boundary. After caller validation and budget reservation, the platform
+  invokes Runtime with target-account SigV4 and signs the request-local JWT into AgentCore's
+  restricted custom-header namespace.
+- Gateway alone uses the owner-bound custom JWT authorizer. Runtime is IAM-only and allowlists only
+  `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token`, so a user bearer cannot invoke it
+  directly and bypass platform admission. The API rechecks subject, issuer, client, access-token
+  type, and expiry; returned identity evidence must match that token. Generated agents use a fresh
+  MCP client per invocation and close it even when startup or discovery fails. They never cache,
+  persist, log, or return the JWT, and requested OBO cannot fall back to shared client credentials.
+- Safe `identityEvidence` hooks correlate issuer/subject/expiry/trace with tool receipts. The
+  downstream principal remains a live `whoami`-style attestation gate on the first authenticated
+  tool call, recorded as `delegated_identity_live_gate`; no deploy-time machine probe impersonates
+  that evidence. Non-OBO agents retain their existing M2M/static path.
+
+### Added — production promotion requires immutable AgentCore batch-evaluation evidence
+
+- Production-like environments now default deployments to staging and reject direct production
+  before any persistence, credential staging, or AWS mutation. Dev-like environments preserve
+  their existing direct-production loop.
+- A version carries a frozen, digest-bound evaluator policy. The release UI starts a target-bound
+  AgentCore Batch Evaluation from representative session IDs and ground truth; the backend checks
+  the runtime/account/Region binding, terminal status, session completeness, evaluator failures,
+  thresholds, timestamps, and freshness. The browser cannot supply a verdict or score.
+- A passing result is written once to the version row. Production promotion condition-checks the
+  evidence digest, policy digest, expiry, owner, deployment, runtime, status, and creation identity
+  in the same DynamoDB transaction that moves the slot. Emergency rollback is separately limited
+  to the exact previous-production pointer.
+- Batch inputs and results use a dedicated rotating KMS key retained independently from the UI
+  stack. Caller crypto permissions are scoped by the batch-evaluation encryption context; the
+  AgentCore service-principal grant is scoped by source account and batch-evaluation ARN.
+- Standard agent owners now receive `eval:read` and `eval:write` for their own versions. Cross-
+  account target policies include only `StartBatchEvaluation` and `GetBatchEvaluation` on the
+  target account's `batch-evaluate/*` resources.
+- Cross-account and same-account cross-Region target registration now requires an enabled,
+  symmetric customer-managed evaluation key in the exact target account and Region. Registration
+  validates `DescribeKey` metadata and the default key policy's scoped AgentCore service grant,
+  without reading key material, before persisting the ARN.
+- The selected key is frozen on target, deployment, and version authority. Promotion batch startup
+  uses the home stack key only for home-Region versions and the exact registered key everywhere
+  else; missing legacy authority or deployment/version disagreement fails closed. Admin APIs and
+  forms expose the registered ARN, while the read-only deployer catalog exposes only a capability
+  boolean. The cross-account role template now includes least-privilege key metadata/crypto grants,
+  required key policy, support guidance, and customer-owned cleanup semantics.
+
 ### Changed — every account id in the repository is an AWS documentation placeholder
 
 - Comments, docstrings, test fixtures and one catalog note carried the account the platform was

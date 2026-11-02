@@ -38,6 +38,7 @@ SUPPORTED_PATHS = [
     pytest.param(["code_interpreter"], None, None, None, id="code-interpreter"),
     pytest.param(["knowledge_base"], None, None, {}, id="knowledge-base"),
     pytest.param([], "strands-gateway-agent", {}, None, id="gateway-template"),
+    pytest.param([], "web-search-agent", {}, None, id="managed-web-search-template"),
     pytest.param([], "mcp-server-gateway-target", {}, None, id="mcp-gateway-template"),
     pytest.param([], "customer-support-assistant", {}, None, id="customer-template"),
     pytest.param(["a2a"], None, None, None, id="a2a"),
@@ -72,22 +73,22 @@ def test_every_supported_path_emits_the_selected_provider(
     compile(code, f"<{provider}:{template_id or ','.join(tools) or 'default'}>", "exec")
 
 
-def test_direct_bedrock_template_refuses_a_different_provider():
-    with pytest.raises(CodeGenerationUnsupportedError, match="refusing to silently substitute Bedrock"):
-        generate_agent_code(
-            config=_config("openai"),
-            template_id="web-search-agent",
-            portable=True,
-        )
+def test_managed_web_search_template_accepts_a_non_bedrock_provider():
+    config = _config("openai")
+    code = generate_agent_code(
+        config=config,
+        template_id="web-search-agent",
+        portable=True,
+    )
+    request = DeployRequest(
+        nodeId="provider-matrix",
+        config=config,
+        templateId="web-search-agent",
+    )
 
-
-def test_api_boundary_refuses_bedrock_only_template_before_deploy():
-    with pytest.raises(ValidationError, match="will not silently substitute Bedrock"):
-        DeployRequest(
-            nodeId="provider-matrix",
-            config=_config("openai"),
-            templateId="web-search-agent",
-        )
+    assert "OpenAIModel" in code
+    assert "MCPClient" in code
+    assert request.config.model_provider == "openai"
 
 
 def test_model_free_mcp_template_refuses_a_provider_instead_of_ignoring_it():

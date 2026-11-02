@@ -39,11 +39,13 @@ Manager with an owner-scoped name (mirror ``observability.store_credentials``:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -59,18 +61,22 @@ from app.services.agent_versions_store import (
     get_slots_store,
     get_versions_store,
 )
+from app.services.audit_store import AuditEvent, get_audit_store
 from app.services.auth import assert_owner, get_caller_sub
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
     _validate_outbound_url,
 )
+from app.services.production_safety import is_production_like_environment
 from app.services.rbac import require_scopes
 from app.services.runtime_target_context import (
     resolve_owned_deployment_runtime_target,
 )
 from app.services.trigger_runtime import (
     MAX_TRIGGER_EVENT_BYTES,
+    TRIGGER_DELIVERY_RETENTION_SECONDS,
+    WEBHOOK_INGRESS_LEASE_SECONDS,
     TriggerCleanupRefused,
     TriggerDispatchError,
     TriggerProvisioningError,
@@ -93,7 +99,10 @@ from app.services.trigger_store import (
     Trigger,
     TriggerClaimConflict,
     TriggerDeleteBusy,
+    TriggerDeliveryInactive,
     TriggerSecretDeletionRefused,
+    WebhookIngressBusy,
+    WebhookIngressConflict,
     get_trigger_store,
 )
 
@@ -124,6 +133,15 @@ _CRON_RE = re.compile(
 
 # Cap the serialized event pattern so a tenant can't store an oversized blob.
 _MAX_PATTERN_BYTES = 4096
+
+# Enqueue-once under contention: when a concurrent signed delivery of the SAME id and body finds
+# another request mid-claim (CLAIMING, not yet QUEUED), wait briefly for that claimant to reach a
+# durable QUEUED state (then this request is the idempotent duplicate) or for its lease to lapse
+# (then this request takes the claim over) instead of rejecting an identical payload as a conflict.
+# The budget (attempts x interval) stays well under a webhook sender's request timeout; only after
+# it is spent do we return 409 Retry-After. A genuinely different body is still an immediate 409.
+WEBHOOK_INGRESS_BUSY_MAX_ATTEMPTS = 48
+WEBHOOK_INGRESS_BUSY_RETRY_SECONDS = 0.25
 
 
 def _validate_runtime_name(name: str) -> str:
@@ -767,6 +785,50 @@ async def delete_trigger(
     )
 
 
+def _record_webhook_audit(
+    trigger: Trigger,
+    *,
+    runtime_name: str,
+    trigger_id: str,
+    phase: str,
+    status_code: int,
+    correlation_id: str,
+) -> None:
+    get_audit_store().record(
+        AuditEvent(
+            org_id="default",
+            actor_sub=trigger.owner_sub,
+            action="trigger.invoke",
+            method="POST",
+            path=f"/hooks/{runtime_name}/{trigger_id}",
+            status_code=status_code,
+            phase=phase,
+            correlation_id=correlation_id,
+        )
+    )
+
+
+def _record_webhook_outcome_best_effort(
+    trigger: Trigger,
+    *,
+    runtime_name: str,
+    trigger_id: str,
+    status_code: int,
+    correlation_id: str,
+) -> None:
+    try:
+        _record_webhook_audit(
+            trigger,
+            runtime_name=runtime_name,
+            trigger_id=trigger_id,
+            phase="outcome",
+            status_code=status_code,
+            correlation_id=correlation_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Webhook outcome audit append failed (%s)", type(exc).__name__)
+
+
 @webhook_router.post("/{runtime_name}/{trigger_id}")
 async def receive_webhook(
     runtime_name: str,
@@ -801,7 +863,8 @@ async def receive_webhook(
             status_code=413,
             detail="Webhook payload exceeds the size limit",
         )
-    trigger = get_trigger_store().get(
+    store = get_trigger_store()
+    trigger = store.get(
         runtime_name,
         trigger_id,
         consistent=True,
@@ -825,6 +888,95 @@ async def receive_webhook(
             detail="Webhook authentication failed",
         ) from None
 
+    correlation_id = "webhook-" + hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
+    if is_production_like_environment():
+        try:
+            _record_webhook_audit(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                phase="attempt",
+                status_code=0,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Required authenticated webhook audit append failed (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Webhook audit evidence is unavailable; delivery was not queued",
+            ) from exc
+
+    ingress_busy_attempts = 0
+    while True:
+        try:
+            ingress_claim = store.acquire_webhook_ingress(
+                trigger=trigger,
+                delivery_id=delivery_id,
+                payload_sha256=hashlib.sha256(body).hexdigest(),
+                lease_seconds=WEBHOOK_INGRESS_LEASE_SECONDS,
+                retention_seconds=TRIGGER_DELIVERY_RETENTION_SECONDS,
+            )
+            break
+        except TriggerDeliveryInactive:
+            _record_webhook_outcome_best_effort(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                status_code=401,
+                correlation_id=correlation_id,
+            )
+            raise HTTPException(status_code=401, detail="Webhook authentication failed") from None
+        except WebhookIngressConflict:
+            _record_webhook_outcome_best_effort(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                status_code=409,
+                correlation_id=correlation_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Webhook delivery ID was already used for a different payload",
+            ) from None
+        except WebhookIngressBusy:
+            # Same id and body as an in-flight claim: this is the idempotent duplicate, not a
+            # conflict. Wait for the claimant to durably reach QUEUED (acquire then returns None
+            # and we record the duplicate below) or for its lease to lapse (acquire then takes the
+            # claim over). Only once the bounded budget is spent do we ask the sender to retry.
+            ingress_busy_attempts += 1
+            if ingress_busy_attempts >= WEBHOOK_INGRESS_BUSY_MAX_ATTEMPTS:
+                _record_webhook_outcome_best_effort(
+                    trigger,
+                    runtime_name=runtime_name,
+                    trigger_id=trigger_id,
+                    status_code=409,
+                    correlation_id=correlation_id,
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail="Webhook delivery is already being accepted; retry shortly",
+                    headers={"Retry-After": "1"},
+                ) from None
+            time.sleep(WEBHOOK_INGRESS_BUSY_RETRY_SECONDS)
+
+    if ingress_claim is None:
+        _record_webhook_outcome_best_effort(
+            trigger,
+            runtime_name=runtime_name,
+            trigger_id=trigger_id,
+            status_code=202,
+            correlation_id=correlation_id,
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "accepted": True,
+                "duplicate": True,
+                "trigger_id": trigger_id,
+                "delivery_id": delivery_id,
+            },
+        )
+
     delivery_event = webhook_delivery_event(
         body=body,
         delivery_id=delivery_id,
@@ -836,14 +988,47 @@ async def receive_webhook(
             delivery_event=delivery_event,
         )
     except TriggerDispatchError:
+        try:
+            store.release_webhook_ingress(ingress_claim)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed webhook ingress claim could not be released (%s)", type(exc).__name__)
+        _record_webhook_outcome_best_effort(
+            trigger,
+            runtime_name=runtime_name,
+            trigger_id=trigger_id,
+            status_code=503,
+            correlation_id=correlation_id,
+        )
         raise HTTPException(
             status_code=503,
             detail="Webhook delivery could not be queued",
         ) from None
+
+    try:
+        ingress_confirmed = store.complete_webhook_ingress(
+            ingress_claim,
+            retention_seconds=TRIGGER_DELIVERY_RETENTION_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        ingress_confirmed = False
+        logger.error("Webhook queue acceptance marker could not be confirmed (%s)", type(exc).__name__)
+    if not ingress_confirmed:
+        # SQS already accepted the event. Return 202 rather than invite an immediate
+        # replay; worker-side delivery claims still suppress any later duplicate.
+        logger.error("Webhook delivery was queued without a confirmed ingress marker")
+
+    _record_webhook_outcome_best_effort(
+        trigger,
+        runtime_name=runtime_name,
+        trigger_id=trigger_id,
+        status_code=202,
+        correlation_id=correlation_id,
+    )
     return JSONResponse(
         status_code=202,
         content={
             "accepted": True,
+            "duplicate": False,
             "trigger_id": trigger_id,
             "delivery_id": delivery_id,
         },

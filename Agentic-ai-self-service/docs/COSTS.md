@@ -13,13 +13,13 @@ The CDK stack (`infra/stacks/platform_stack.py`) creates:
 - **Deployment Lambda** -- Handles deploy initiation, status polling, runtime testing, runtime deletion (full cleanup), AI tool generation via Claude Sonnet on Bedrock, and CloudFormation template generation/export. 120s timeout for LLM calls.
 - **Step Functions State Machine** -- Orchestrates multi-step deployments: validate -> [mcp_server?] -> [knowledge_base?] -> [gateway?] -> [memory?] -> [policy?] -> codegen -> IAM -> runtime configure -> runtime launch -> [evaluation?] -> [auth?] -> status update. 3 retries with exponential backoff per step.
 - **Step Lambdas** -- Individual Lambda functions for each deployment step (validate, codegen, IAM, gateway, knowledge_base, mcp_server, memory, policy, evaluation, runtime_configure, runtime_launch, auth, status_update).
-- **DynamoDB Tables** -- Workflows + Deployments (TTL + GSI on workflow_id/runtime_id), plus the enterprise-feature stores: `agent-versions`, `runtime-slots`, `agent-registry`, `prompt-library`, `hitl-requests` (24h TTL), `triggers`, `usage-events` (90d TTL), `budget`, `audit` (90d TTL), `permission-requests`, the shared org-config table (tag policies + VPC profiles + approval policies), and `flows`. Each user-data table carries an `owner_sub` GSI for owner-scoped list queries.
+- **DynamoDB Tables** -- Workflows + Deployments (TTL + GSI on workflow_id/runtime_id), plus the enterprise-feature stores: `agent-versions`, `runtime-slots`, `agent-registry`, `prompt-library`, `hitl-requests` (24h TTL), `triggers`, `usage-events` (90d TTL), `budget` (persistent definitions, 400d monthly counters, 90d settled reservations), `audit` (90d TTL in development; no TTL in production), `permission-requests`, the shared org-config table (tag policies + VPC profiles + approval policies), and `flows`. Each user-data table carries an `owner_sub` GSI for owner-scoped list queries.
 - **Cognito User Pool Groups** -- `registry-admin` / `registry-developer` for the registry two-persona approval model, plus the RBAC groups `t-admin`/`t-user` (tenant role) and `g-admins-*`/`g-users-*` (resource scopes). See [Registry & RBAC](REGISTRY_AND_RBAC.md).
-- **EventBridge Rules** -- `policy-sweep` (rate 5 min — converges pending Cedar `ENFORCE` permits to `ACTIVE`) and `cost-reconcile` (rate 24 h — sweeps budgets for month-to-date breaches). Both invoke the Deployment Lambda with a sentinel payload.
+- **EventBridge Rules** -- `policy-sweep` (rate 5 min — converges pending Cedar `ENFORCE` permits to `ACTIVE`) and `cost-reconcile` (rate 24 h — commits unknown stale invocation reservations conservatively, then evaluates month-to-date estimated-cost thresholds). Both invoke the Deployment Lambda with a sentinel payload.
 - **S3 Bucket** -- Frontend static assets (CloudFront OAI access only) + AgentCore dependency bundles + deployment code artifacts.
 - **CloudFront Distribution** -- HTTPS, SPA routing (404/403 -> index.html), API Gateway as additional origin for `/api/*`.
 - **SSM Parameters** -- CORS origins, AWS region, DynamoDB table name under `/agentcore-workflow/{env}/`.
-- **IAM Roles** -- Least-privilege per function: Workflow Lambda gets DynamoDB workflows + SSM read; Deployment Lambda gets DynamoDB deployments + bedrock-agentcore + `bedrock:ListFoundationModels`/`ListInferenceProfiles` (live model catalog) + `cloudwatch:PutMetricData` (budget breach) + JIT `iam:PutRolePolicy` scoped to `AgentCore*` roles + cleanup permissions (Cognito, Lambda, STS); Step Lambdas get full deployment permissions (IAM, Lambda, Cognito, S3, bedrock-agentcore).
+- **IAM Roles** -- Least-privilege per function: Workflow Lambda gets DynamoDB workflows + SSM read; Deployment and long-running stream Lambdas get budget definition reads, conditional counter/reservation writes, and `dynamodb:TransactWriteItems` only on the budget table; Deployment Lambda also gets deployments + bedrock-agentcore + `bedrock:ListFoundationModels`/`ListInferenceProfiles` (live model catalog) + `cloudwatch:PutMetricData` (budget breach) + JIT `iam:PutRolePolicy` scoped to `AgentCore*` roles + cleanup permissions (Cognito, Lambda, STS); Step Lambdas get deployment permissions required by their exact phase.
 - **CloudWatch Log Groups** -- Lambda and Step Functions execution logs.
 
 All resources are tagged with `environment` and `project` for cost tracking.
@@ -69,6 +69,7 @@ Estimates assume all agent deployment activity flows through Step Functions (the
 The table above covers **platform infrastructure only**. The following are billed separately by AWS and depend on your agent usage:
 
 - **Amazon Bedrock model inference** — per-token pricing varies by model (e.g., Claude Sonnet, Nova)
+- **Bedrock Guardrails** — production tool calls add one `ApplyGuardrail` input screen before execution and one output screen before model consumption; policy-unit charges vary by configured filters
 - **AgentCore Runtime compute** — billed per-second while the runtime is active
 - **AgentCore Gateway invocations** — per-request to the MCP gateway
 - **AgentCore Memory storage** — per-GB for conversation memory
@@ -78,3 +79,26 @@ The table above covers **platform infrastructure only**. The following are bille
 - **Custom tool Lambda functions** — same Lambda pricing as above, billed per invocation
 
 Refer to the [Amazon Bedrock AgentCore pricing page](https://aws.amazon.com/bedrock/agentcore/pricing/) for current rates.
+
+## Invocation authorization versus actual spend
+
+Production invocation routes require an applicable owner/agent/tag limit. For one
+top-level operation (including a bounded MCP handshake plus tool call), one DynamoDB
+transaction reserves the configured `budget_reservation_usd` unit across every
+matching limit before the first Runtime dispatch; a concurrent request
+cannot push an aggregate counter above the current definition. Exhaustion returns
+HTTP `429` with `Retry-After: 3600`; storage uncertainty returns `503` before
+dispatch. Any request that reached the Runtime network boundary commits its unit,
+even if Runtime returned an error. Calls proven not dispatched release it, while
+unknown stale reservations commit after one hour.
+
+These USD-denominated units are **admission capacity**, not metered charges and not
+a bill guarantee. The actual-cost panel separately prices observed Bedrock token
+telemetry, and AWS billing can also include Runtime duration, Gateway, Memory,
+Browser, Code Interpreter, Knowledge Bases, custom tools, and third-party vendor
+charges. Calls made with separately granted AWS or SaaS credentials are outside the
+ledger. Production A2A is therefore refused until inbound and nested peer calls can
+propagate reservations; OBO Runtime remains supported because only the platform's
+SigV4 role can invoke it after reservation. Use AWS Budgets/Cost Anomaly Detection,
+service quotas, least-privilege IAM, and vendor-side limits for account-level spend
+control.

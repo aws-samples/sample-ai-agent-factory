@@ -95,7 +95,7 @@ describe('ChatPage when the agent list fails', () => {
 
   it('lists the agents on success', async () => {
     listMyAgentsApi.mockResolvedValue([
-      { deployment_id: 'd-1', runtime_id: 'rt-1', status: 'succeeded' },
+      { deployment_id: 'd-1', runtime_id: 'rt-1', runtime_name: 'orders_agent', status: 'succeeded' },
     ]);
     render(<ChatPage />);
 

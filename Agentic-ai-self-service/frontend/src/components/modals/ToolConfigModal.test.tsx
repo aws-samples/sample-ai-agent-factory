@@ -81,8 +81,8 @@ describe('ToolConfigModal', () => {
         onClose={() => {}}
         onSave={() => {}}
         initialConfig={{
-          name: 'Web Search',
-          toolId: 'duckduckgo_search',
+          name: 'Amazon Web Search',
+          toolId: 'web_search',
           description: 'Search the web.',
           enabled: true,
           isCustom: false,

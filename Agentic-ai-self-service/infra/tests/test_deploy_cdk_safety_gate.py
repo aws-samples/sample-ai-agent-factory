@@ -8,7 +8,9 @@
   3. run `cdk diff` on the frozen assembly and, if diff itself FAILS (non-zero
      exit), abort BEFORE deploy -- a real regression: with `|| true` a diff that
      exited 42 still reached deploy;
-  4. on success, invoke synth -> diff -> deploy in that order, with diff and
+  4. propagate a non-zero `cdk deploy` status even when a caller invokes the
+     helper from an `if` condition (where Bash disables inherited `errexit`);
+  5. on success, invoke synth -> diff -> deploy in that order, with diff and
      deploy consuming the IDENTICAL `--app` assembly and context applied ONLY to
      the synth (so synth/diff/deploy cannot drift).
 
@@ -33,7 +35,13 @@ STACK = "teststack"
 
 
 def _run_gate(
-    tmp_path: Path, *, synth_mode: str, diff_rc: int, hasher_mode: str = "real", run_tag: str = "r1"
+    tmp_path: Path,
+    *,
+    synth_mode: str,
+    diff_rc: int,
+    deploy_rc: int = 0,
+    hasher_mode: str = "real",
+    run_tag: str = "r1",
 ) -> tuple[int, str, list[str]]:
     """Drive the real run_cdk_deploy with a stubbed npx.
 
@@ -43,6 +51,7 @@ def _run_gate(
                 "symlink" (synth 0, the template is a SYMLINK to a real file),
                 "hardlink" (synth 0, a second hard link to the assets manifest).
     diff_rc:    exit code the stub returns for `cdk diff`.
+    deploy_rc:  exit code the stub returns for `cdk deploy`.
     hasher_mode: kept for call compatibility; the receipts are produced by the Python
                 stable-reader now, so a degenerate PATH hasher cannot influence them.
     run_tag:    distinguishes the calls file when two runs share one project dir.
@@ -80,6 +89,7 @@ def _run_gate(
             CALLS={calls_file}
             SYNTH_MODE={synth_mode}
             DIFF_RC={diff_rc}
+            DEPLOY_RC={deploy_rc}
             HASHER_MODE={hasher_mode}
 
             # --- optional degenerate hasher, first on PATH (the gate prefers sha256sum) ---
@@ -120,17 +130,22 @@ if [ "${{1:-}}" = "synth" ]; then
   exit 0
 fi
 if [ "${{1:-}}" = "diff" ]; then exit "$DIFF_RC"; fi
-if [ "${{1:-}}" = "deploy" ]; then echo "DEPLOY_CALLED" >> "$CALLS"; exit 0; fi
+if [ "${{1:-}}" = "deploy" ]; then echo "DEPLOY_CALLED" >> "$CALLS"; exit "$DEPLOY_RC"; fi
 exit 0
 STUB
             chmod +x "{tmp_path}/cdkbin/cdk"
-            export CALLS SYNTH_MODE DIFF_RC
+            export CALLS SYNTH_MODE DIFF_RC DEPLOY_RC
             export CDK_BIN="{tmp_path}/cdkbin/cdk"
 
             # import ONLY the function definition (not main) from the real script
             source <(awk '/^(pinned_payload_tool|verify_pinned_assembly|cdk_synth_pinned|cdk_diff_pinned|cdk_deploy_pinned|run_cdk_deploy)\\(\\)/,/^}}/' "{DEPLOY_SH}")
 
-            run_cdk_deploy
+            if run_cdk_deploy; then
+              exit 0
+            else
+              rc=$?
+              exit "$rc"
+            fi
             """
         ).lstrip()
     )
@@ -206,6 +221,19 @@ def test_diff_failure_aborts_before_deploy(tmp_path):
     joined = "\n".join(calls)
     assert "cdk synth" in joined and "cdk diff" in joined
     assert "DEPLOY_CALLED" not in joined, "deploy must NOT run after a diff failure"
+
+
+def test_deploy_failure_propagates_through_a_conditional_caller(tmp_path):
+    # A function invoked by `if function; then` does not inherit Bash errexit.
+    # The helper must therefore inspect and return CDK's status explicitly.
+    rc, _text, calls = _run_gate(
+        tmp_path,
+        synth_mode="ok",
+        diff_rc=0,
+        deploy_rc=73,
+    )
+    assert rc == 73, "the exact CDK deploy failure must reach the caller"
+    assert sum("DEPLOY_CALLED" in line for line in calls) == 1
 
 
 def test_success_runs_synth_then_diff_then_deploy_sharing_one_assembly(tmp_path):

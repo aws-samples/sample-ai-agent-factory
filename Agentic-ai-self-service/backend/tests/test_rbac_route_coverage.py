@@ -45,6 +45,9 @@ PINNED = {
     ("deployment", "GET", "/api/deployments"): {"agent:read"},
     ("deployment", "POST", "/api/test-runtime"): {"invoke"},
     ("deployment", "POST", "/api/test-runtime-stream"): {"invoke"},
+    ("deployment", "POST", "/api/test-runtime-async"): {"invoke"},
+    ("deployment", "GET", "/api/test-runtime-async/{test_id}"): {"invoke"},
+    ("deployment", "DELETE", "/api/test-runtime-async/{test_id}"): {"invoke"},
     ("deployment", "POST", "/api/runtime/import"): {"agent:write"},
     ("deployment", "DELETE", "/api/runtime/{runtime_id}"): {"agent:write"},
     ("deployment", "POST", "/api/generate-tool"): {"agent:write"},
@@ -54,6 +57,26 @@ PINNED = {
     ("deployment", "POST", "/api/generate-canvas"): {"agent:write"},
     ("deployment", "POST", "/api/generate-cfn-template"): {"agent:write"},
     ("deployment", "POST", "/api/export-python"): {"agent:write"},
+    (
+        "deployment",
+        "POST",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+    ): {"eval:write"},
+    (
+        "deployment",
+        "GET",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_evaluation_id}",
+    ): {"eval:read"},
+    (
+        "deployment",
+        "POST",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+    ): {"eval:write"},
+    (
+        "deployment",
+        "GET",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evidence",
+    ): {"eval:read"},
     ("main", "POST", "/api/flows"): {"agent:write"},
     ("main", "GET", "/api/flows"): {"agent:read"},
     ("main", "GET", "/api/flows/{flow_id}"): {"agent:read"},
@@ -62,6 +85,17 @@ PINNED = {
     ("main", "POST", "/api/workflows/{workflow_id}/git-token"): {"agent:write"},
     ("main", "POST", "/api/workflows/{workflow_id}/git-sync"): {"agent:write"},
 }
+
+STANDARD_TRIGGER_ROUTES = {
+    ("deployment", "GET", "/api/runtimes/{runtime_name}/triggers"): {"trigger:read"},
+    ("deployment", "POST", "/api/runtimes/{runtime_name}/triggers"): {"trigger:write"},
+    ("deployment", "DELETE", "/api/runtimes/{runtime_name}/triggers/{trigger_id}"): {"trigger:write"},
+}
+STANDARD_TRIGGER_SCOPES = {"trigger:read", "trigger:write"}
+
+
+def _standard_trigger_scope_violations(held: set[str]) -> list[str]:
+    return [f"missing {scope}" for scope in sorted(STANDARD_TRIGGER_SCOPES - held)]
 
 
 def _declared_scopes(dependant) -> set[str]:
@@ -115,13 +149,32 @@ def test_formerly_unguarded_routes_require_their_scope(mounted, key):
     assert mounted[key] == PINNED[key]
 
 
-def test_a_standard_user_can_build_deploy_and_invoke_but_not_administer(mounted):
-    """docs/PERSONAS.md: a standard user builds, deploys and invokes their own agents."""
+def test_a_standard_user_can_build_deploy_invoke_and_schedule_but_not_administer(mounted):
+    """Standard users can operate their own agents; ownership still limits rows."""
     held = rbac.GROUP_SCOPES["g-users-default"]
     for key in [k for k, scopes in PINNED.items() if k[1] != "GET"]:
         assert mounted[key] <= held, key
+    assert _standard_trigger_scope_violations(held) == []
+    for key, required in STANDARD_TRIGGER_ROUTES.items():
+        assert mounted[key] == required
+        assert required <= held
     assert "admin" not in held
     assert mounted[("deployment", "GET", "/api/admin/audit")] - held
+
+
+def test_a_type_group_alone_cannot_manage_runtime_triggers(mounted):
+    """A UI type label grants no capability without a resource-scope group."""
+    held = rbac.GROUP_SCOPES.get("t-user", set())
+    assert held == set()
+    for key, required in STANDARD_TRIGGER_ROUTES.items():
+        assert mounted[key] == required
+        assert required - held
+
+
+def test_removing_standard_trigger_write_scope_is_caught():
+    mutated = set(rbac.GROUP_SCOPES["g-users-default"])
+    mutated.remove("trigger:write")
+    assert _standard_trigger_scope_violations(mutated) == ["missing trigger:write"]
 
 
 # ---------------------------------------------------------------------------

@@ -7,8 +7,10 @@ vi.mock('aws-amplify/auth', () => ({ signOut: vi.fn() }));
 
 function HeaderHarness({
   onChange,
+  onOpenAudit = () => undefined,
 }: {
   onChange: (mode: 'visual' | 'harness') => void;
+  onOpenAudit?: () => void;
 }) {
   const [mode, setMode] = useState<'visual' | 'harness'>('visual');
   return (
@@ -27,10 +29,12 @@ function HeaderHarness({
       onOpenRegistry={vi.fn()}
       onPreviewAsEndUser={vi.fn()}
       onOpenHitlInbox={vi.fn()}
+      onOpenAudit={onOpenAudit}
       canDeploy={false}
       canOpenRegistry
       showAdminControls
       canOpenHitlInbox
+      canOpenAudit
     />
   );
 }
@@ -93,6 +97,15 @@ describe('AppHeader authoring-mode tabs', () => {
     );
   });
 
+  it('opens the audit dashboard from the admin control', () => {
+    const onOpenAudit = vi.fn();
+    render(<HeaderHarness onChange={vi.fn()} onOpenAudit={onOpenAudit} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open audit dashboard' }));
+
+    expect(onOpenAudit).toHaveBeenCalledOnce();
+  });
+
   it('does not render registry or type-admin controls without their capabilities', () => {
     render(
       <AppHeader
@@ -107,10 +120,12 @@ describe('AppHeader authoring-mode tabs', () => {
         onOpenRegistry={vi.fn()}
         onPreviewAsEndUser={vi.fn()}
         onOpenHitlInbox={vi.fn()}
+      onOpenAudit={vi.fn()}
         canDeploy={false}
         canOpenRegistry={false}
         showAdminControls={false}
         canOpenHitlInbox={false}
+        canOpenAudit={false}
       />,
     );
 
@@ -119,6 +134,7 @@ describe('AppHeader authoring-mode tabs', () => {
     expect(
       screen.queryByRole('button', { name: 'Human-in-the-loop approvals inbox' }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open audit dashboard' })).not.toBeInTheDocument();
   });
 });
 
@@ -133,10 +149,12 @@ describe('AppHeader readiness badge follows the validator', () => {
     onOpenRegistry: vi.fn(),
     onPreviewAsEndUser: vi.fn(),
     onOpenHitlInbox: vi.fn(),
+    onOpenAudit: vi.fn(),
     canDeploy: true,
     canOpenRegistry: false,
     showAdminControls: false,
     canOpenHitlInbox: false,
+    canOpenAudit: false,
   };
 
   it('never says "Ready to deploy" over a red canvas, and counts the errors instead', () => {

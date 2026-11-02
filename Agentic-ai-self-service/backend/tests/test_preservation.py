@@ -176,21 +176,15 @@ class TestCodeGeneratorFrameworkLogicPreservation:
     Each template function MUST contain its framework-specific logic.
     """
 
-    def test_langchain_web_search_has_langgraph_imports(self):
-        """**Validates: Requirements 3.1**
-
-        _generate_langchain_web_search MUST contain web search + tool-calling logic.
-        Uses lightweight boto3 Converse API loop instead of LangChain/LangGraph.
-        """
-        code = code_generator._generate_langchain_web_search(
-            "You are a search agent.",
-            "us.anthropic.claude-sonnet-5",
-            "us-east-1",
-        )
-        assert "duckduckgo_search" in code
-        assert "fetch_webpage" in code
-        assert "_converse_loop" in code
-        assert "BedrockAgentCoreApp" in code
+    def test_managed_web_search_has_gateway_mcp_client(self):
+        """web-search-agent must discover the managed connector through Gateway."""
+        config = _make_runtime_config()
+        code = code_generator.generate_agent_code(config, template_id="web-search-agent")
+        assert "MCPClient" in code
+        assert "get_full_tools_list" in code
+        assert "GATEWAY_URL" in code
+        assert "_do_duckduckgo_search" not in code
+        assert "duckduckgo.com" not in code
 
     # Removed: test_customer_support_has_gateway_mcp and test_gateway_agent_has_mcp_protocol
     # asserted the legacy `_mcp_request` / `_get_gateway_token` JSON-RPC helpers.
@@ -471,14 +465,13 @@ class TestTemplateRoutingPreservation:
     **Validates: Requirements 3.5**
     """
 
-    def test_routes_langchain_web_search(self):
-        """**Validates: Requirements 3.5**
-
-        template_id="web-search-agent" MUST route to _generate_langchain_web_search.
-        """
+    def test_routes_managed_web_search_through_gateway(self):
+        """web-search-agent routes to the provider-aware Strands MCP client."""
         config = _make_runtime_config()
         code = code_generator.generate_agent_code(config, template_id="web-search-agent")
-        assert "Web Search Agent" in code or "duckduckgo_search" in code
+        assert "MCPClient" in code
+        assert "GATEWAY_URL" in code
+        assert "duckduckgo.com" not in code
 
     # Removed: test_routes_strands_gateway asserted the legacy `_mcp_request` /
     # `_to_bedrock_tools` JSON-RPC helpers. The strands-gateway-agent template

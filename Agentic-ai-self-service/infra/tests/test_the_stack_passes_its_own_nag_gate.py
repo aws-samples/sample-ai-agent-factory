@@ -23,8 +23,10 @@ Two traps, both hit while writing this file, both now pinned by
      nag checks at all and reports a clean result forever. The fixture below adds
      the Aspect exactly as ``app.py:59`` does.
   2. The findings are NOT in ``artifact.manifest.metadata`` — that attribute is
-     ``None`` here. They are in ``artifact.messages``, as ``SynthesisMessage``
-     objects carrying a ``SynthesisMessageLevel``.
+     ``None`` here. The CLI stores them in the stack artifact's
+     ``additionalMetadataFile``. Read that JSON directly: ``artifact.messages``
+     converts through jsii and is sensitive to which of two overlapping generated
+     schema distributions populated ``aws_cdk.cloud_assembly_schema`` last.
 
 Either mistake produces an empty finding list, which is indistinguishable from a
 clean stack. Hence the vacuity probe: it synthesizes a deliberately non-compliant
@@ -56,10 +58,58 @@ ACCOUNT = "123456789012"
 CDK_CONTEXT = json.loads((Path(__file__).resolve().parents[1] / "cdk.json").read_text())["context"]
 
 
-def _findings(assembly, stack_name: str, level: SynthesisMessageLevel) -> list[str]:
-    """cdk-nag findings at *level*, from where the CDK CLI actually reads them."""
-    art = assembly.get_stack_by_name(stack_name)
-    return [f"{m.id}: {m.entry.data}" for m in art.messages if m.level == level]
+def _load_artifact_metadata(assembly: cdk.cx_api.CloudAssembly, stack_name: str) -> dict[str, list[dict[str, object]]]:
+    """Read the metadata files the CDK CLI consumes, without jsii conversion."""
+    assembly_dir = Path(assembly.directory).resolve()
+    manifest = json.loads((assembly_dir / "manifest.json").read_text())
+    artifact_id = assembly.get_stack_by_name(stack_name).id
+    artifact = manifest["artifacts"][artifact_id]
+    sources = [artifact.get("metadata") or {}]
+
+    additional_file = artifact.get("additionalMetadataFile")
+    if additional_file is not None:
+        if not isinstance(additional_file, str) or not additional_file:
+            raise AssertionError("additionalMetadataFile must be a non-empty relative path")
+        additional_path = (assembly_dir / additional_file).resolve()
+        if not additional_path.is_relative_to(assembly_dir):
+            raise AssertionError("additionalMetadataFile escapes the cloud assembly")
+        sources.append(json.loads(additional_path.read_text()))
+
+    combined: dict[str, list[dict[str, object]]] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            raise AssertionError("artifact metadata must map construct paths to entries")
+        for construct_path, entries in source.items():
+            if not isinstance(construct_path, str) or not isinstance(entries, list):
+                raise AssertionError("artifact metadata has an invalid construct-path entry")
+            if not all(isinstance(entry, dict) for entry in entries):
+                raise AssertionError("artifact metadata entries must be objects")
+            combined.setdefault(construct_path, []).extend(entries)
+    return combined
+
+
+def _findings(
+    assembly: cdk.cx_api.CloudAssembly,
+    stack_name: str,
+    level: SynthesisMessageLevel,
+) -> list[str]:
+    """Return cdk-nag findings from the exact metadata files read by the CLI."""
+    if level == SynthesisMessageLevel.ERROR:
+        message_type = "aws:cdk:error"
+    elif level == SynthesisMessageLevel.WARNING:
+        message_type = "aws:cdk:warning"
+    else:
+        raise AssertionError(f"unsupported synthesis message level: {level}")
+
+    findings = []
+    for construct_path, entries in _load_artifact_metadata(assembly, stack_name).items():
+        for entry in entries:
+            if entry.get("type") != message_type:
+                continue
+            if "data" not in entry:
+                raise AssertionError(f"{message_type} entry at {construct_path} has no data")
+            findings.append(f"{construct_path}: {entry['data']}")
+    return findings
 
 
 def _synth_with_nag(

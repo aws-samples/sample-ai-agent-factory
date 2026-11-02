@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CostPanel } from './CostPanel';
 
 const getCost = vi.fn();
+const upsertOwnerBudget = vi.fn();
 
 vi.mock('../../services/api', () => ({
-  getApiClient: () => ({ getCost }),
+  getApiClient: () => ({ getCost, upsertOwnerBudget }),
   getErrorMessage: (error: unknown) =>
     error instanceof Error ? error.message : String(error),
   isNotReadyError: (error: unknown) =>
@@ -15,6 +16,12 @@ vi.mock('../../services/api', () => ({
 describe('CostPanel cache accounting', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    upsertOwnerBudget.mockResolvedValue({
+      scope: 'owner',
+      key: 'self',
+      limit_usd: 100,
+      warn_pct: 80,
+    });
   });
 
   it('shows every billed input category and warns when cache telemetry is incomplete', async () => {
@@ -97,5 +104,53 @@ describe('CostPanel cache accounting', () => {
     );
     expect(screen.queryByText('Cache reads:')).not.toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('lets a user set the required owner budget before any usage exists', async () => {
+    getCost.mockResolvedValue({
+      total_cost: 0,
+      total_in: 0,
+      total_out: 0,
+      by_model: {},
+    });
+
+    render(<CostPanel runtimeName="new-agent" />);
+    await screen.findByText(/No usage recorded yet/i);
+    fireEvent.change(screen.getByLabelText('Monthly invocation authorization limit'), {
+      target: { value: '50' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Set budget' }));
+
+    await waitFor(() => expect(upsertOwnerBudget).toHaveBeenCalledWith(50, 80));
+    expect(await screen.findByText('Monthly invocation authorization set to $50.00.')).toBeInTheDocument();
+    expect(screen.getByText(/not an actual AWS bill cap/i)).toBeInTheDocument();
+    expect(screen.getByText(/downstream tool\/vendor charges/i)).toBeInTheDocument();
+  });
+
+  it('shows authorized, reserved, committed, and remaining capacity', async () => {
+    getCost.mockResolvedValue({
+      total_cost: 1,
+      total_in: 10,
+      total_out: 5,
+      by_model: {},
+      owner_budget: {
+        spend: 1,
+        limit: 10,
+        used_pct: 10,
+        status: 'ok',
+        authorized: 4,
+        reserved: 1,
+        committed: 3,
+        remaining_authorization: 6,
+        reservation_unit: 1,
+      },
+    });
+
+    render(<CostPanel runtimeName="budgeted-agent" />);
+
+    expect(await screen.findByText('Authorized units: $4.00')).toBeInTheDocument();
+    expect(screen.getByText('Reserved now: $1.00')).toBeInTheDocument();
+    expect(screen.getByText('Committed units: $3.00')).toBeInTheDocument();
+    expect(screen.getByText('Remaining: $6.00')).toBeInTheDocument();
   });
 });

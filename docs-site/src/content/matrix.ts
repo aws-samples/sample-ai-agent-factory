@@ -133,11 +133,11 @@ export const capabilityMatrix: CapabilityRow[] = [
       },
       'self-service': {
         posture: 'enforced',
-        text: 'Selected tools deploy as a single Lambda behind an AgentCore Gateway with Cognito OAuth2; agents discover them at runtime via tools/list.',
+        text: 'Managed search deploys as a pinned connector target; Wikipedia, weather, fetch and demo tools use scoped Lambda targets behind AgentCore Gateway with Cognito OAuth2.',
         source: {
           file: SELF_SERVICE_README,
           heading: 'Key Features',
-          quote: 'Selected tools deploy as a single Lambda behind an MCP Gateway with Cognito OAuth2',
+          quote: 'Managed search deploys as a pinned AWS connector target',
         },
       },
       'mcp-gateway': {
@@ -296,7 +296,7 @@ export const capabilityMatrix: CapabilityRow[] = [
         source: {
           file: SELF_SERVICE_README,
           heading: 'Key Features',
-          quote: 'agent registry with approval workflow, versioning & rollback',
+          quote: 'agent registry with approval workflow',
         },
       },
       'mcp-gateway': {
@@ -662,10 +662,10 @@ export const securityMatrix: SecurityRow[] = [
       },
       'self-service': {
         posture: 'enforced',
-        text: 'An audit table stores one row per control-plane write (actor sub, action, path, status) with a 90-day TTL; readable by super-admins only.',
+        text: 'An append-only audit table stores correlated attempt and outcome rows for control-plane writes. Production rows have no TTL; legacy and development rows expire after 90 days; super-admins alone can read them.',
         source: {
           file: SELF_SERVICE_RETENTION,
-          quote: 'one row per auditable control-plane WRITE action',
+          quote: 'A missing correlated outcome remains visible as an incomplete attempt.',
         },
       },
       'mcp-gateway': {

@@ -10,10 +10,12 @@ Validates: Requirements 7.1, 7.4
 """
 
 import json
+from fnmatch import fnmatchcase
 
 import aws_cdk as cdk
 import pytest
 from aws_cdk.assertions import Match, Template
+from stacks.platform.lambdas import RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS
 from stacks.platform_stack import PlatformStack
 
 from tests.iam_attachment import statements_by_role
@@ -60,6 +62,33 @@ def _statements_for_role_prefix(template_json: dict, prefix: str) -> list[dict]:
         if any(isinstance(role, dict) and role.get("Ref") == role_id for role in roles):
             statements.extend(resource["Properties"].get("PolicyDocument", {}).get("Statement", []) or [])
     return statements
+
+
+def test_shared_agent_execution_roles_cannot_mutate_gateway_or_policy(template_json):
+    forbidden = set(RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS)
+    for role_prefix in ("SharedRuntimeExecRole", "SharedMcpRuntimeExecRole"):
+        statements = _statements_for_role_prefix(template_json, role_prefix)
+        denies = [
+            statement for statement in statements if statement.get("Sid") == "NeverMutateGatewayOrPolicyControlPlane"
+        ]
+        assert len(denies) == 1
+        assert denies[0]["Effect"] == "Deny"
+        actions = denies[0]["Action"]
+        assert set(actions if isinstance(actions, list) else [actions]) == forbidden
+        allowed = {
+            action
+            for statement in statements
+            if statement.get("Effect") == "Allow"
+            for action in (
+                [statement.get("Action")] if isinstance(statement.get("Action"), str) else statement.get("Action") or []
+            )
+        }
+        assert not {
+            forbidden_action
+            for forbidden_action in forbidden
+            for allowed_pattern in allowed
+            if fnmatchcase(forbidden_action.lower(), str(allowed_pattern).lower())
+        }
 
 
 # ---------------------------------------------------------------

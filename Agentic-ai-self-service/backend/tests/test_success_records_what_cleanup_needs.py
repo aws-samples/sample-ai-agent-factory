@@ -30,6 +30,10 @@ import pytest
 _ALLOWED_TO_DIFFER = {
     # Meaningless on success; it is the failure description itself.
     "error_details",
+    # The rich nonterminal write persists cleanup inputs before version/slot
+    # publication. The final terminal SUCCEEDED write adds completed_at only
+    # after those publications complete.
+    "completed_at",
 }
 
 

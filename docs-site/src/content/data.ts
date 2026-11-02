@@ -179,7 +179,7 @@ export const projects: Project[] = [
       'AWS CLI v2 configured for the target account',
       'Node.js 20+ (CI runs on 22)',
       'Python 3.12+',
-      'Any AWS region; us-east-1 is the default and the only region with a CloudFront-scoped WAF',
+      'One of seven selected release Regions (us-east-1 default; eu-central-1, eu-west-2, eu-west-3 run with reduced features); only us-east-1 gets a CloudFront-scoped WAF',
       'No Docker required; CDK runs through npx',
     ],
     sources: {

@@ -10,6 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.services.auth import get_caller_sub
+from app.services.invocation_budget import (
+    reserve_invocation_budget,
+    settle_invocation_budget,
+)
 from app.services.rbac import require_scopes
 from app.services.runtime_mcp import (
     McpInputError,
@@ -140,6 +144,20 @@ def _mcp_client(deployment_id: str, caller_sub: str):
     return target, client
 
 
+def _reserve_target_invocation(target: Any, caller_sub: str):
+    deployment_state = target.deployment_dict() if target.deployment is not None else {}
+    runtime_name = str(
+        deployment_state.get("friendly_runtime_name")
+        or deployment_state.get("agentcore_runtime_name")
+        or target.runtime_id
+    )
+    return reserve_invocation_budget(
+        owner_sub=caller_sub,
+        runtime_name=runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
+    )
+
+
 @router.post(
     "/tools",
     response_model=McpToolsResponse,
@@ -151,14 +169,27 @@ async def discover_runtime_tools(
     caller_sub: str = Depends(get_caller_sub),
 ) -> McpToolsResponse:
     target, client = _mcp_client(request.deployment_id, caller_sub)
+    reservation = _reserve_target_invocation(target, caller_sub)
+    dispatched = False
+
+    def _mark_dispatched() -> None:
+        nonlocal dispatched
+        dispatched = True
+
     try:
         result = list_tools(
             client,
             runtime_arn=target.runtime_arn,
             runtime_user_id=caller_sub,
+            on_dispatch=_mark_dispatched,
         )
     except (McpInputError, McpPermissionError, McpProtocolError, McpRemoteError, McpRuntimeUnavailable) as exc:
+        settle_invocation_budget(reservation, dispatched=dispatched)
         raise _mcp_http_error("tool discovery", exc) from exc
+    except Exception:
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        raise
+    settle_invocation_budget(reservation, dispatched=dispatched)
     return McpToolsResponse(
         protocolVersion=result.protocol_version,
         sessionId=result.session_id,
@@ -178,6 +209,13 @@ async def call_runtime_tool(
     caller_sub: str = Depends(get_caller_sub),
 ) -> McpToolCallResponse:
     target, client = _mcp_client(request.deployment_id, caller_sub)
+    reservation = _reserve_target_invocation(target, caller_sub)
+    dispatched = False
+
+    def _mark_dispatched() -> None:
+        nonlocal dispatched
+        dispatched = True
+
     try:
         result = call_tool(
             client,
@@ -186,9 +224,15 @@ async def call_runtime_tool(
             tool_name=request.tool_name,
             arguments=request.arguments,
             session_id=request.session_id,
+            on_dispatch=_mark_dispatched,
         )
     except (McpInputError, McpPermissionError, McpProtocolError, McpRemoteError, McpRuntimeUnavailable) as exc:
+        settle_invocation_budget(reservation, dispatched=dispatched)
         raise _mcp_http_error("tool call", exc) from exc
+    except Exception:
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        raise
+    settle_invocation_budget(reservation, dispatched=dispatched)
     return McpToolCallResponse(
         protocolVersion=result.protocol_version,
         sessionId=result.session_id,

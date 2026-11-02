@@ -166,22 +166,27 @@ class TestTemplate1Metadata:
 
 
 class TestCodeGeneratorTemplateRouting:
-    """Defect 4: code_generator.py should route template_id='web-search-agent'
-    to _generate_langchain_web_search(), not 'langchain-web-search'.
+    """The web-search gallery template must route through the unified Gateway generator.
 
     **Validates: Requirements 1.4**
     """
 
     def test_code_generator_routes_web_search_agent(self):
-        """generate_agent_code() must check for 'web-search-agent' template_id."""
         from app.services import code_generator
 
         source = inspect.getsource(code_generator.generate_agent_code)
-        assert '"web-search-agent"' in source, (
-            "code_generator.generate_agent_code() does not check for "
-            "'web-search-agent' template_id. Currently checks 'langchain-web-search' "
-            "which is the stale ID."
+        assert '"web-search-agent"' in source
+        assert not hasattr(code_generator, "_generate_langchain_web_search")
+        from app.models.deployment_models import RuntimeConfig
+
+        config = RuntimeConfig(
+            name="managed-search-test",
+            model={"modelId": "us.anthropic.claude-sonnet-5"},
+            systemPrompt="Use managed search.",
         )
+        code = code_generator.generate_agent_code(config, template_id="web-search-agent")
+        assert "MCPClient" in code
+        assert "duckduckgo.com" not in code
 
 
 class TestBundleKeyForWebSearch:

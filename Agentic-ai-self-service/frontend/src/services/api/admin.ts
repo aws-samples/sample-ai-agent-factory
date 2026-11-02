@@ -15,6 +15,7 @@ export interface DeployTargetsConfig {
     region: string;
     account_id?: string | null;
     artifact_bucket?: string | null;
+    evaluation_kms_key_arn?: string | null;
   }>;
   accounts: Array<{
     account_id: string;
@@ -23,6 +24,7 @@ export interface DeployTargetsConfig {
     mcp_runtime_role_arn: string;
     harness_role_arn: string;
     artifact_bucket: string;
+    evaluation_kms_key_arn: string;
     region: string;
   }>;
 }
@@ -47,11 +49,13 @@ export async function enableDeployTargets(enabled: boolean): Promise<{ enabled: 
 /** Phase 7 — register an allowlisted region and validate its code bucket. */
 export async function addDeployRegion(
   region: string,
+  evaluationKmsKeyArn: string,
   artifactBucket?: string,
 ): Promise<{
   region: string;
   account_id: string;
   artifact_bucket: string;
+  evaluation_kms_key_arn: string;
   validated: boolean;
   regions: string[];
 }> {
@@ -59,6 +63,7 @@ export async function addDeployRegion(
     method: 'POST',
     body: JSON.stringify({
       region,
+      evaluation_kms_key_arn: evaluationKmsKeyArn,
       ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
     }),
   });
@@ -69,6 +74,7 @@ export async function addDeployAccount(
   accountId: string,
   roleArn: string,
   region: string,
+  evaluationKmsKeyArn: string,
   runtimeRoleArn?: string,
   mcpRuntimeRoleArn?: string,
   harnessRoleArn?: string,
@@ -79,6 +85,7 @@ export async function addDeployAccount(
   mcp_runtime_role_arn: string;
   harness_role_arn: string;
   artifact_bucket: string;
+  evaluation_kms_key_arn: string;
   validated: boolean;
 }> {
   return apiRequest(`/api/admin/deploy-targets/accounts`, {
@@ -87,6 +94,7 @@ export async function addDeployAccount(
       account_id: accountId,
       role_arn: roleArn,
       region,
+      evaluation_kms_key_arn: evaluationKmsKeyArn,
       ...(runtimeRoleArn ? { runtime_role_arn: runtimeRoleArn } : {}),
       ...(mcpRuntimeRoleArn
         ? { mcp_runtime_role_arn: mcpRuntimeRoleArn }

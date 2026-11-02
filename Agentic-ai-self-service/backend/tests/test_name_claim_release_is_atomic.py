@@ -140,6 +140,7 @@ def test_an_observed_absent_slot_is_pinned_during_complete_release(stores):
     succeed against the real moto-backed DynamoDB API rather than making every release conflict.
     """
     vstore, sstore = stores
+    assert vstore.name_claim_exists(NAME, consistent=True) is False
     vstore.put(
         AgentVersion(
             runtime_name=NAME,
@@ -171,6 +172,7 @@ def test_an_observed_absent_slot_is_pinned_during_complete_release(stores):
         ).get("Item")
         is None
     )
+    assert vstore.name_claim_exists(NAME, consistent=True) is False
 
 
 def test_a_slot_created_after_an_absent_read_cancels_the_whole_release(stores):

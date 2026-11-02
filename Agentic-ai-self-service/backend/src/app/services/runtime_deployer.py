@@ -33,6 +33,10 @@ from app.services.resource_ownership import (
     resource_is_missing,
 )
 from app.services.resource_tagging import governed_tag_list, governed_tags
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +158,9 @@ def _merge_deps_into_zip(
     *seen* makes the merge idempotent across MORE THAN ONE bundle, which is what a
     provider-extras bundle needs: it is a delta on top of the base bundle and the two
     still share ``strands-agents``' own dist-info and any package pip pulled into
-    both. ``zipfile`` does not reject a duplicate name — it appends a second member
+    both. ``ZipInfo`` metadata is retained so executable entrypoints survive into
+    the final code ZIP; copying only member names silently removed their execute
+    bits. ``zipfile`` does not reject a duplicate name — it appends a second member
     with the same path, warns, and leaves the reader to take whichever it finds — so
     without this the zip would carry two copies of every shared file and which one
     gets extracted would be an implementation detail of the unzip. Pass the same set
@@ -165,14 +171,19 @@ def _merge_deps_into_zip(
     if seen is None:
         seen = set()
     with zipfile.ZipFile(io.BytesIO(bundle_bytes), "r") as bundle_zf:
-        for item in bundle_zf.namelist():
+        for info in bundle_zf.infolist():
+            item = info.filename
             if "__pycache__" in item or item.endswith(".pyc"):
                 continue
             if item in seen:
                 continue
             seen.add(item)
-            data = bundle_zf.read(item)
-            target_zf.writestr(item, data)
+            data = bundle_zf.read(info)
+            # Preserve the deterministic packager's Unix mode and archive
+            # metadata. Rewriting only the filename resets executable members
+            # (notably opentelemetry-instrument) to a non-executable default in
+            # the final code.zip even though the dependency bundle is correct.
+            target_zf.writestr(info, data)
 
 
 def _create_code_zip(
@@ -418,6 +429,7 @@ def create_runtime_iam_role(
     gateway_key_secret_arn: str | None = None,
     return_provenance: bool = False,
     model_free: bool = False,
+    trace_export_enabled: bool = False,
 ) -> str | tuple[str, bool]:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
@@ -434,9 +446,12 @@ def create_runtime_iam_role(
     the model provider's API key and a LiteLLM gateway's virtual key, which stopped
     being injected as plaintext ``PROVIDER_API_KEY`` / ``GATEWAY_API_KEY`` env vars for
     exactly that reason. Each is scoped to its one ARN; omit them and nothing is
-    granted. Kept in sync with ``per_agent_identity.build_scoped_runtime_policy`` and
-    the CDK shared role (``infra/stacks/platform/lambdas.build_shared_runtime_role``,
-    which can only grant the two namespaces because it has no per-deploy ARN).
+    granted. ``trace_export_enabled`` adds the four account-level X-Ray actions only
+    for a Runtime that the same deployment launches under AWS ADOT; ordinary model
+    runtimes and model-free MCP runtimes receive no X-Ray authority. Kept in sync
+    with ``per_agent_identity.build_scoped_runtime_policy`` and the CDK shared role
+    (``infra/stacks/platform/lambdas.build_shared_runtime_role``, which is reused by
+    production-evaluation runtimes and therefore carries the bounded trace policy).
     """
     trust_policy = {
         "Version": "2012-10-17",
@@ -516,10 +531,9 @@ def create_runtime_iam_role(
     # must NOT carry bedrock model access. Reusing the model-capable statement for
     # a tool-only runtime is the model-free contract violation the dedicated MCP
     # role guards against.
-    _model_access_statements = (
-        []
-        if model_free
-        else [
+    _model_access_statements: list[dict] = []
+    if not model_free:
+        _model_access_statements.append(
             {
                 "Sid": "BedrockModelAccess",
                 "Effect": "Allow",
@@ -529,8 +543,21 @@ def create_runtime_iam_role(
                 ],
                 "Resource": "*",
             }
-        ]
-    )
+        )
+        if trace_export_enabled:
+            _model_access_statements.append(
+                {
+                    "Sid": "AgentCoreObservabilityTraceExport",
+                    "Effect": "Allow",
+                    "Action": [
+                        "xray:PutTraceSegments",
+                        "xray:PutTelemetryRecords",
+                        "xray:GetSamplingRules",
+                        "xray:GetSamplingTargets",
+                    ],
+                    "Resource": "*",
+                }
+            )
     core_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -637,23 +664,6 @@ def create_runtime_iam_role(
                     "Resource": "*",
                 }
             )
-        elif tool == "policy":
-            core_policy["Statement"].append(
-                {
-                    "Sid": "PolicyAccess",
-                    "Effect": "Allow",
-                    "Action": [
-                        "bedrock-agentcore:CreatePolicyEngine",
-                        "bedrock-agentcore:GetPolicyEngine",
-                        "bedrock-agentcore:ListPolicyEngines",
-                        "bedrock-agentcore:CreatePolicy",
-                        "bedrock-agentcore:GetPolicy",
-                        "bedrock-agentcore:ListPolicies",
-                        "bedrock-agentcore:UpdateGateway",
-                    ],
-                    "Resource": "*",
-                }
-            )
 
     # Scoped Secrets Manager access for OTLP auth header (Langfuse,
     # Honeycomb, etc.). Bug 9 reminder: keep this in sync with the SFN path.
@@ -714,6 +724,8 @@ def create_runtime_iam_role(
             }
         )
 
+    core_policy["Statement"].append(runtime_control_plane_deny_statement())
+    assert_runtime_policy_is_data_plane_only(core_policy)
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="AgentCoreRuntimePolicy",
@@ -764,9 +776,11 @@ def create_agent_runtime(
     protocol: str = "HTTP",
     env_vars: dict | None = None,
     authorizer_config: dict | None = None,
+    request_header_config: dict | None = None,
     vpc_config: dict | None = None,
     region: str | None = None,
     resource_tags: dict | None = None,
+    instrument_observability: bool = False,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
 
@@ -783,6 +797,13 @@ def create_agent_runtime(
     resources. Previously networkMode was HARDCODED to PUBLIC and the modeled
     vpc_config field was read by no deployer (dead config). Falls back to PUBLIC
     when absent.
+
+    ``instrument_observability`` means the generated Python module contains the
+    in-process ADOT bootstrap. Python direct-code runtimes must keep the Python
+    file as their sole ``entryPoint``. Live AgentCore validation rejects the
+    Node.js-style ``["opentelemetry-instrument", entrypoint]`` prefix even when
+    the ZIP contains the Python console script; the bootstrap initializes the
+    packaged AWS distro before Strands binds its provider instead.
 
     Returns dict with runtime_id, arn, status.
     """
@@ -815,6 +836,8 @@ def create_agent_runtime(
 
     if authorizer_config:
         create_params["authorizerConfiguration"] = authorizer_config
+    if request_header_config:
+        create_params["requestHeaderConfiguration"] = request_header_config
 
     def _create_with_transient_retry():
         """Retry create_agent_runtime on two known transient ValidationExceptions.
@@ -968,6 +991,8 @@ def create_agent_runtime(
                     # carry exactly what the create would.
                     if authorizer_config:
                         update_params["authorizerConfiguration"] = authorizer_config
+                    if request_header_config:
+                        update_params["requestHeaderConfiguration"] = request_header_config
                     agentcore_ctrl.update_agent_runtime(**update_params)
                 except Exception as update_err:
                     raise RuntimeError(

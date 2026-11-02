@@ -13,13 +13,18 @@
  * the shared accessible dialog primitives below.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { m } from 'motion/react';
 import { popIn, tween } from '../../lib/motion';
 import type { WorkflowTemplate, TemplateDifficulty } from '../../types/templates';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
+import {
+  getDeploymentRegion,
+  getRegionFeatureProfile,
+  templateUnavailableReason,
+} from '../../utils/awsRegion';
 
 // ============================================================================
 // Props
@@ -68,6 +73,8 @@ const COMPONENT_LABELS: Record<string, string> = {
 // ============================================================================
 
 export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExistingNodes }: TemplateGalleryProps) {
+  const deploymentRegion = getDeploymentRegion();
+  const regionProfile = getRegionFeatureProfile(deploymentRegion);
   const [pendingTemplate, setPendingTemplate] = useState<WorkflowTemplate | null>(null);
   const [lastIsOpen, setLastIsOpen] = useState(isOpen);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -77,31 +84,26 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
     if (!isOpen && pendingTemplate) setPendingTemplate(null);
   }
 
-  const closeGallery = useCallback(() => {
+  const closeGallery = () => {
     setPendingTemplate(null);
     onClose();
-  }, [onClose]);
+  };
   useDialogFocusTrap(isOpen, dialogRef, undefined, closeGallery);
 
-  const selectAndClose = useCallback(
-    (template: WorkflowTemplate) => {
-      setPendingTemplate(null);
-      onSelectTemplate(template);
-      onClose();
-    },
-    [onSelectTemplate, onClose],
-  );
+  const selectAndClose = (template: WorkflowTemplate) => {
+    setPendingTemplate(null);
+    onSelectTemplate(template);
+    onClose();
+  };
 
-  const handleSelect = useCallback(
-    (template: WorkflowTemplate) => {
-      if (hasExistingNodes) {
-        setPendingTemplate(template);
-        return;
-      }
-      selectAndClose(template);
-    },
-    [hasExistingNodes, selectAndClose],
-  );
+  const handleSelect = (template: WorkflowTemplate) => {
+    if (templateUnavailableReason(template.id, deploymentRegion)) return;
+    if (hasExistingNodes) {
+      setPendingTemplate(template);
+      return;
+    }
+    selectAndClose(template);
+  };
 
   if (!isOpen) return null;
 
@@ -158,7 +160,16 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
 
           {/* Template Cards */}
           <div className="flex-1 overflow-y-auto p-6 space-y-4">
-            {WORKFLOW_TEMPLATES.map((template) => (
+            {regionProfile.unsupportedFeatures.length > 0 && (
+              <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                <strong>{regionProfile.displayName} ({deploymentRegion}) regional profile:</strong>{' '}
+                {regionProfile.unsupportedFeatures.join(' and ')} are not available from AWS here.
+                Core Runtime, Gateway, Identity, Memory, Policy, Evaluations, and Observability remain supported.
+              </div>
+            )}
+            {WORKFLOW_TEMPLATES.map((template) => {
+              const unavailableReason = templateUnavailableReason(template.id, deploymentRegion);
+              return (
               <div
                 key={template.id}
                 className="rounded-lg border border-[#e9ebed] hover:border-[#0972d3]/40 hover:shadow-md transition-all overflow-hidden"
@@ -173,6 +184,11 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
                         <DifficultyBadge difficulty={template.difficulty} />
                       </div>
                       <p className="text-sm text-gray-600 mb-3">{template.longDescription}</p>
+                      {unavailableReason && (
+                        <p role="note" className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                          {unavailableReason}
+                        </p>
+                      )}
 
                       {/* Built-in Tools */}
                       {template.builtInTools.length > 0 && (
@@ -227,14 +243,17 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
                     {/* Right: Action */}
                     <button
                       onClick={() => handleSelect(template)}
-                      className="flex-shrink-0 px-4 py-2 bg-[#0972d3] text-white rounded-md font-medium text-sm hover:bg-[#0961b9] transition-colors"
+                      disabled={unavailableReason !== null}
+                      title={unavailableReason ?? undefined}
+                      className="flex-shrink-0 px-4 py-2 bg-[#0972d3] text-white rounded-md font-medium text-sm hover:bg-[#0961b9] transition-colors disabled:cursor-not-allowed disabled:bg-gray-400"
                     >
-                      Use Template
+                      {unavailableReason ? 'Unavailable in this Region' : 'Use Template'}
                     </button>
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Footer */}

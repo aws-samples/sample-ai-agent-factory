@@ -21,6 +21,8 @@ const mcpRuntimeRoleArn =
 const harnessRoleArn =
   `arn:aws:iam::${accountId}:role/AgentCoreFlowsHarnessRole`;
 const artifactBucket = 'customer-agent-runtime-artifacts';
+const evaluationKmsKeyArn =
+  `arn:aws:kms:eu-west-1:${accountId}:key/12345678-1234-1234-1234-1234567890ab`;
 
 function successfulRegistration(): Response {
   return new Response(
@@ -30,6 +32,7 @@ function successfulRegistration(): Response {
       mcp_runtime_role_arn: mcpRuntimeRoleArn,
       harness_role_arn: harnessRoleArn,
       artifact_bucket: artifactBucket,
+      evaluation_kms_key_arn: evaluationKmsKeyArn,
       validated: true,
     }),
     {
@@ -60,6 +63,7 @@ describe('cross-account deployment target registration', () => {
       accountId,
       deploymentRoleArn,
       'eu-west-1',
+      evaluationKmsKeyArn,
       runtimeRoleArn,
       mcpRuntimeRoleArn,
       harnessRoleArn,
@@ -73,6 +77,7 @@ describe('cross-account deployment target registration', () => {
       account_id: accountId,
       role_arn: deploymentRoleArn,
       region: 'eu-west-1',
+      evaluation_kms_key_arn: evaluationKmsKeyArn,
       runtime_role_arn: runtimeRoleArn,
       mcp_runtime_role_arn: mcpRuntimeRoleArn,
       harness_role_arn: harnessRoleArn,
@@ -87,6 +92,7 @@ describe('cross-account deployment target registration', () => {
       accountId,
       deploymentRoleArn,
       'eu-west-1',
+      evaluationKmsKeyArn,
       runtimeRoleArn,
       mcpRuntimeRoleArn,
       harnessRoleArn,
@@ -100,6 +106,7 @@ describe('cross-account deployment target registration', () => {
       account_id: accountId,
       role_arn: deploymentRoleArn,
       region: 'eu-west-1',
+      evaluation_kms_key_arn: evaluationKmsKeyArn,
       runtime_role_arn: runtimeRoleArn,
       mcp_runtime_role_arn: mcpRuntimeRoleArn,
       harness_role_arn: harnessRoleArn,

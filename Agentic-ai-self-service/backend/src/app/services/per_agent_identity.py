@@ -37,6 +37,10 @@ from __future__ import annotations
 import re
 
 from app.services.naming import regional_iam_role_name
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 # ---------------------------------------------------------------------------
 # Trust policy — bedrock-agentcore assumes the per-agent execution role.
@@ -252,23 +256,6 @@ def _evaluation_statement() -> dict:
     }
 
 
-def _policy_statement() -> dict:
-    return {
-        "Sid": "PolicyAccess",
-        "Effect": "Allow",
-        "Action": [
-            "bedrock-agentcore:CreatePolicyEngine",
-            "bedrock-agentcore:GetPolicyEngine",
-            "bedrock-agentcore:ListPolicyEngines",
-            "bedrock-agentcore:CreatePolicy",
-            "bedrock-agentcore:GetPolicy",
-            "bedrock-agentcore:ListPolicies",
-            "bedrock-agentcore:UpdateGateway",
-        ],
-        "Resource": "*",
-    }
-
-
 # Map a connected-tool key -> a builder. Builders that scope to an ARN accept
 # the relevant arn; the rest ignore their argument. Keeping this dict keyed on
 # the SAME tool strings as runtime_deployer.create_runtime_iam_role makes the
@@ -282,7 +269,6 @@ _TOOL_BUILDERS = {
     "code_interpreter": lambda arns: _code_interpreter_statement(),
     "evaluation": lambda arns: _evaluation_statement(),
     "observability": lambda arns: _evaluation_statement(),
-    "policy": lambda arns: _policy_statement(),
 }
 
 
@@ -298,13 +284,15 @@ def build_scoped_runtime_policy(
     provider_key_secret_arn: str | None = None,
     gateway_key_secret_arn: str | None = None,
     model_free: bool = False,
+    trace_export_enabled: bool = False,
 ) -> dict:
     """Build a least-privilege IAM policy document for a per-agent runtime role.
 
     Args:
         connected_tools: tool keys wired on the canvas (gateway, memory,
             knowledge_base, guardrails, browser, code_interpreter, evaluation,
-            observability, policy). Unknown keys are ignored.
+            observability). A ``policy`` marker grants nothing: Cedar is managed
+            by deployment principals, never by agent code. Unknown keys are ignored.
         kb_arn: knowledge-base ARN to scope ``knowledge_base`` to. ``"*"``
             fallback if omitted.
         gateway_arn: gateway ARN to scope ``gateway`` to. ``"*"`` fallback.
@@ -345,11 +333,16 @@ def build_scoped_runtime_policy(
             This is where ``per_agent`` mode beats the shared role, which can only
             grant the whole ``agentcore-connector/`` namespace because it has no
             per-deploy ARN at synth time.
+        trace_export_enabled: Whether this exact Runtime is launched under AWS
+            ADOT and therefore needs the four X-Ray trace/sampling actions. False
+            leaves ordinary model runtimes without account-level X-Ray authority;
+            model-free runtimes never receive it even when true.
 
     Returns:
-        A deterministic IAM policy document (dict) with the three baseline
-        statements first, then one statement per wired tool (in the order the
-        tools were supplied, deduplicated), then the OTEL secret statement.
+        A deterministic IAM policy document (dict) with the model/S3/log
+        baseline first, then one statement per wired data-plane tool (in supplied
+        order, deduplicated), scoped secret reads, and the mandatory
+        Gateway/Policy control-plane mutation Deny.
     """
     # ----- Baseline (always present) -------------------------------------
     if artifacts_bucket:
@@ -379,6 +372,20 @@ def build_scoped_runtime_policy(
                 "Resource": "*",
             }
         )
+        if trace_export_enabled:
+            statements.append(
+                {
+                    "Sid": "AgentCoreObservabilityTraceExport",
+                    "Effect": "Allow",
+                    "Action": [
+                        "xray:PutTraceSegments",
+                        "xray:PutTelemetryRecords",
+                        "xray:GetSamplingRules",
+                        "xray:GetSamplingTargets",
+                    ],
+                    "Resource": "*",
+                }
+            )
     statements += [
         {
             "Sid": "S3CodeAccess",
@@ -478,4 +485,6 @@ def build_scoped_runtime_policy(
             }
         )
 
-    return {"Version": "2012-10-17", "Statement": statements}
+    statements.append(runtime_control_plane_deny_statement())
+    policy = {"Version": "2012-10-17", "Statement": statements}
+    return assert_runtime_policy_is_data_plane_only(policy)

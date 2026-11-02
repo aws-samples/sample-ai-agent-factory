@@ -273,7 +273,12 @@ def test_the_presigned_url_is_only_ever_returned(sources, route):
 
 
 _URL_ANCHOR = 'url = _stage_export_bundle(\n                owner_hash, "python-export", deployment_name, zip_bytes, f"{deployment_name}-python.zip"\n            )\n'
-_URL_RETURN = 'return {"download_url": url, "filename": f"{deployment_name}-python.zip"}\n'
+_URL_RETURN = """return {
+                "download_url": url,
+                "filename": f"{deployment_name}-python.zip",
+                **integrity,
+            }
+"""
 
 
 def _mutate_export_route(text: str, *, rename: str | None = None, extra: str = "", ret: str | None = None) -> str:
@@ -360,6 +365,10 @@ _BUCKET = "bucket-level call on an operator-registered bucket; addresses no obje
 _WRITE = "writes under deployments/ or connector-specs/ with a server-built key; never an export prefix"
 _KB = "reads the BUCKET's tags to authorize a caller-supplied KB source; addresses no object"
 _INTERNAL = "inside the DeploymentId-gated delete, on the key it was given"
+_STATIC_SCHEMA = (
+    "reads at most 10 MiB from the deployment-bound artifact bucket; the URI comes "
+    "from exact AgentCore target read-back and ExpectedBucketOwner is mandatory"
+)
 
 # One row per CALL SITE: (module, innermost function, op, the call's own arguments) -> (count, why).
 # The arguments are part of the key, so a new call inside an already-reviewed function is a
@@ -371,8 +380,12 @@ S3_CALL_INVENTORY = {
         (1, "the stager: presigns a read of the key it just wrote for this caller; the response disposition names the "
             "download after the reported filename (a browser saves a cross-origin download under the object's name)"),
     ('deployment_handler.py', '_stage_export_bundle', 'put_object',
-     'Bucket=bucket, Key=key, Body=body, Tagging=urllib.parse.urlencode(tags)'):
-        (1, "the stager: writes under the CALLER's own hash prefix with a fresh 128-bit suffix"),
+     "Bucket=bucket, Key=key, Body=body, Tagging=urllib.parse.urlencode(tags), "
+     "Metadata={'archive-sha256': str(integrity['archive_sha256']), 'archive-bytes': "
+     "str(integrity['archive_bytes']), 'artifact-manifest-sha256': "
+     "str(integrity['artifact_manifest_sha256'])}, ChecksumSHA256=_export_s3_checksum(body)"):
+        (1, "the stager: writes under the CALLER's own hash prefix with a fresh 128-bit suffix and binds the exact "
+            "bytes to S3's SHA-256 checksum plus non-secret digest/size metadata"),
     ('services/cfn_provider/handler.py', '_delete_every_version', 'delete_object',
      'Bucket=bucket, Key=key, VersionId=version_id, **owner'):
         (1, _CUSTOMER),
@@ -404,6 +417,9 @@ S3_CALL_INVENTORY = {
     ('services/gateway_deployer.py', '_build_openapi_schema', 'put_object',
      '**put_kwargs'):
         (1, _WRITE + "; key is connector-specs/<safe id>/<uuid12>.json, built in this function"),
+    ('services/gateway_deployer.py', '_read_static_schema_text', 'get_object',
+     'Bucket=parsed.netloc, Key=key, ExpectedBucketOwner=expected_owner'):
+        (1, _STATIC_SCHEMA),
     ('services/resource_ownership.py', '_exact_key_versions', 'list_object_versions',
      'Bucket=bucket, Prefix=key, **owner, **token'):
         (1, _TEARDOWN),
@@ -685,6 +701,7 @@ S3_HELPERS = {
     "validate_artifact_bucket": "services/deploy_target.py",
     "_authorize_s3_uri": "step_handlers/knowledge_base_step.py",
     "_build_openapi_schema": "services/gateway_deployer.py",
+    "_read_static_schema_text": "services/gateway_deployer.py",
     "_handle_code_package_create_update": "services/cfn_provider/handler.py",
     "_iter_versions": "services/cfn_provider/handler.py",
     "_delete_every_version": "services/cfn_provider/handler.py",
@@ -733,6 +750,12 @@ S3_HELPER_CALLER_INVENTORY = {
     ('services/gateway_deployer.py', '_deploy_connector_targets_inner', '_build_openapi_schema',
      "spec_inline, connector_id=connector_id or 'generic', region=region, deployment_id=deployment_id"):
         (1, _WRITE + "; the helper builds its own key"),
+    ('services/gateway_deployer.py', '_static_schema_tool_names', '_read_static_schema_text',
+     "mcp['openApiSchema'], region=region"):
+        (1, _STATIC_SCHEMA),
+    ('services/gateway_deployer.py', '_static_schema_tool_names', '_read_static_schema_text',
+     "mcp['smithyModel'], region=region"):
+        (1, _STATIC_SCHEMA),
     ('services/resource_ownership.py', 'delete_owned_s3_object', 'assert_s3_object_owned',
      'client, bucket, key, region=region, deployment_id=deployment_id, expected_bucket_owner=expected_bucket_owner, version_id=version_id'):
         (1, _INTERNAL),
@@ -995,7 +1018,7 @@ def audit_middleware_response_uses(text: str) -> list[str]:
     assignment from ``await call_next(request)``, ``getattr(response, "status_code", 0)``,
     and ``return response``. Any other use (a ``.json()``, a ``.body``, a helper call)
     could read the response body into the audit record."""
-    fn = _function(text, "_audit_middleware")
+    fn = _function(text, "audit_http_request")
     parents = {id(c): n for n in ast.walk(fn) for c in ast.iter_child_nodes(n)}
     uses = []
     for n in ast.walk(fn):
@@ -1017,12 +1040,13 @@ _ALLOWED_RESPONSE_USES = ["assigned from call_next", "returned", "status_code re
 
 
 def test_the_audit_middleware_records_no_response_content(sources):
-    text = sources["deployment_handler.py"]
-    fn = _function(text, "_audit_middleware")
+    text = sources["services/audit_middleware.py"]
+    fn = _function(text, "_event")
     events = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "AuditEvent"]
     assert len(events) == 1
     assert {k.arg for k in events[0].keywords} == {
         "org_id", "actor_sub", "action", "method", "path", "status_code", "session_uuid",
+        "phase", "correlation_id",
     }  # fmt: skip
     assert audit_middleware_response_uses(text) == _ALLOWED_RESPONSE_USES
 
@@ -1032,10 +1056,10 @@ def test_the_audit_middleware_records_no_response_content(sources):
     ["_b = await response.json()", "_b = response.body", "_b = response.render({})", "_record_body(response)"],
 )
 def test_positive_control_a_response_body_read_is_caught(sources, extra):
-    text = sources["deployment_handler.py"]
-    anchor = "    response = await call_next(request)\n"
+    text = sources["services/audit_middleware.py"]
+    anchor = "        response = await call_next(request)\n"
     assert text.count(anchor) == 1
-    mutated = text.replace(anchor, anchor + "    " + extra + "\n")
+    mutated = text.replace(anchor, anchor + "        " + extra + "\n")
     uses = audit_middleware_response_uses(mutated)
     assert uses != _ALLOWED_RESPONSE_USES and any(u.startswith("OTHER") for u in uses), uses
 

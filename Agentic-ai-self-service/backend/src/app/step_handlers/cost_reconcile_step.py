@@ -124,10 +124,23 @@ def handler(event: dict, context: object = None) -> dict:  # noqa: ARG001
     from_ts, to_ts = month_window(now_epoch)
 
     try:
-        budgets = get_budget_store().list_all(org_id)
+        budget_store = get_budget_store()
+        committed_stale_reservations = budget_store.commit_expired_reservations(
+            org_id,
+            now_epoch=now_epoch,
+            limit=100,
+        )
+        budgets = budget_store.list_all(org_id)
     except Exception:  # noqa: BLE001
-        logger.exception("cost-reconcile: list_all budgets failed")
-        return {"reconciled": 0, "breached": 0, "skipped": 0, "failed": 0, "error": "list_failed"}
+        logger.exception("cost-reconcile: budget state read/release failed")
+        return {
+            "reconciled": 0,
+            "breached": 0,
+            "skipped": 0,
+            "failed": 0,
+            "committed_stale_reservations": 0,
+            "error": "list_failed",
+        }
 
     reconciled = 0
     breached = 0
@@ -165,6 +178,12 @@ def handler(event: dict, context: object = None) -> dict:  # noqa: ARG001
             failed += 1
             logger.warning("cost-reconcile: reconcile failed for %s/%s (retry next tick)", b.scope, b.key)
 
-    summary = {"reconciled": reconciled, "breached": breached, "skipped": skipped, "failed": failed}
+    summary = {
+        "reconciled": reconciled,
+        "breached": breached,
+        "skipped": skipped,
+        "failed": failed,
+        "committed_stale_reservations": committed_stale_reservations,
+    }
     logger.info("cost-reconcile sweep complete: %s", summary)
     return summary

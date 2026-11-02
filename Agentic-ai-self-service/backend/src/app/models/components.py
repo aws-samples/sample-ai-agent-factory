@@ -721,7 +721,7 @@ class A2AConfiguration(BaseModel):
 
 
 class ToolConfiguration(BaseModel):
-    """Configuration for tool nodes (DuckDuckGo, Weather, custom tools, etc.)."""
+    """Configuration for tool nodes (managed search, weather, custom tools, etc.)."""
 
     component_type: Literal["tool"] = "tool"
     name: str = Field(min_length=1, max_length=200)

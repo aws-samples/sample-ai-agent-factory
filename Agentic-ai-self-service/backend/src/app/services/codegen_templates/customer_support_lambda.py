@@ -66,45 +66,44 @@ def lambda_handler(event, context):
         return {"statusCode": 200, "body": json.dumps(order)}
 
     elif "lookup_customer" in tool_name:
+        customer_id = event.get("customer_id", "").upper()
         email = event.get("email", "").lower()
         customers = {
-            "john@example.com": {
+            "CUST-001": {
                 "name": "John Smith",
                 "customer_id": "CUST-001",
-                "email": "john@example.com",
                 "membership_tier": "Gold",
                 "member_since": "2022-03-15",
                 "orders": ["ORD-12345", "ORD-11111"],
                 "total_spent": "$1,797.99",
             },
-            "jane@example.com": {
+            "CUST-002": {
                 "name": "Jane Doe",
                 "customer_id": "CUST-002",
-                "email": "jane@example.com",
                 "membership_tier": "Silver",
                 "member_since": "2023-06-20",
                 "orders": ["ORD-67890"],
                 "total_spent": "$119.98",
             },
-            "bob@example.com": {
+            "CUST-003": {
                 "name": "Bob Wilson",
                 "customer_id": "CUST-003",
-                "email": "bob@example.com",
                 "membership_tier": "Platinum",
                 "member_since": "2021-01-10",
                 "orders": ["ORD-22222"],
                 "total_spent": "$4,599.00",
             },
         }
-        customer = customers.get(email)
+        email_to_id = {
+            "john@example.com": "CUST-001",
+            "jane@example.com": "CUST-002",
+            "bob@example.com": "CUST-003",
+        }
+        customer = customers.get(customer_id or email_to_id.get(email, ""))
         if not customer:
             return {
                 "statusCode": 200,
-                "body": json.dumps(
-                    {
-                        "error": f"No customer found with email {email}. Try: john@example.com, jane@example.com, bob@example.com"
-                    }
-                ),
+                "body": json.dumps({"error": "Customer not found. Use a valid demo customer ID."}),
             }
         return {"statusCode": 200, "body": json.dumps(customer)}
 

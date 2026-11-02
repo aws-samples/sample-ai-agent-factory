@@ -28,6 +28,7 @@ import boto3
 from app.services import codegen_templates
 from app.services.aws_errors import error_code, is_error
 from app.services.aws_pagination import list_all
+from app.services.delegated_identity import obo_requested, workforce_gateway_identity
 from app.services.deletion_confirmation import DeletionFailedAfterAccept, wait_until_absent
 from app.services.error_sanitizer import redact_secrets
 from app.services.gateway_mutation_lock import (
@@ -38,6 +39,14 @@ from app.services.gateway_mutation_lock import (
 )
 from app.services.gateway_update import NO_CLIENT_ALLOWED, preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
+from app.services.managed_web_search import (
+    MANAGED_WEB_SEARCH_TARGET_NAME,
+    MANAGED_WEB_SEARCH_TOOL_IDS,
+    managed_web_search_requested,
+    managed_web_search_target_params,
+    require_managed_web_search_region,
+    without_managed_web_search_tools,
+)
 from app.services.mcp_gateway_protocol import pinned_protocol_configuration
 from app.services.naming import (
     deployment_scope_suffix,
@@ -442,22 +451,215 @@ def _list_all_gateway_targets(agentcore_ctrl, gateway_id: str) -> list[dict]:
     )
 
 
-def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int = 180) -> tuple[list, int]:
-    """Return (qualified Cedar action names, expected_tool_count) for a gateway,
-    waiting up to *timeout*s for EACH target to be truly SYNCED into the gateway's
-    servable MCP tool plane.
+_STATIC_SCHEMA_MAX_BYTES = 10 * 1024 * 1024
+_OPENAPI_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
 
-    Bug 134/race-A: `inlinePayload` is the CONFIGURED schema (echoed back the
-    instant the target exists) — it does NOT prove the gateway has synced those
-    tools into the plane the agent discovers via tools/list. The authoritative
-    per-target signal is `lastSynchronizedAt` (only on get_gateway_target, not on
-    list_gateway_targets items). We synchronize, then poll each target until
-    status==READY AND lastSynchronizedAt has advanced past its pre-sync value, so
-    the manifest the Cedar policy is built from == the plane the agent will
-    discover. We also return how many tools the gateway CONFIGURED so the policy
-    step can fail-closed on a partial (synced < configured) plane.
+
+def _read_static_schema_text(schema: dict, *, region: str | None) -> str:
+    """Read one exact API schema union with a bounded, owner-pinned S3 path."""
+    if not isinstance(schema, dict):
+        raise RuntimeError("Gateway static schema configuration is not an object")
+    has_inline = "inlinePayload" in schema
+    has_s3 = "s3" in schema
+    if has_inline == has_s3:
+        raise RuntimeError("Gateway static schema must contain exactly one of inlinePayload or s3")
+    if has_inline:
+        value = schema.get("inlinePayload")
+        if not isinstance(value, str):
+            raise RuntimeError("Gateway static schema inlinePayload is not text")
+        payload = value.encode("utf-8")
+    else:
+        s3_config = schema.get("s3")
+        if not isinstance(s3_config, dict):
+            raise RuntimeError("Gateway static schema s3 configuration is not an object")
+        uri = s3_config.get("uri")
+        parsed = urllib.parse.urlparse(uri if isinstance(uri, str) else "")
+        key = parsed.path.lstrip("/")
+        if parsed.scheme != "s3" or not parsed.netloc or not key or parsed.query or parsed.fragment:
+            raise RuntimeError("Gateway static schema has an invalid S3 URI")
+        configured_bucket = _GATEWAY_ARTIFACT_BUCKET.get()
+        if configured_bucket and parsed.netloc != configured_bucket:
+            raise RuntimeError("Gateway static schema S3 bucket differs from this deployment's artifact bucket")
+        expected_owner = str(s3_config.get("bucketOwnerAccountId") or _GATEWAY_ARTIFACT_OWNER.get() or "")
+        if not expected_owner and region:
+            expected_owner = str(_aws_client("sts", region_name=region).get_caller_identity().get("Account") or "")
+        if not re.fullmatch(r"[0-9]{12}", expected_owner):
+            raise RuntimeError("Gateway static schema S3 owner is absent or invalid")
+        if not region:
+            raise RuntimeError("Gateway static schema S3 region is unavailable")
+        response = _aws_client("s3", region_name=region).get_object(
+            Bucket=parsed.netloc,
+            Key=key,
+            ExpectedBucketOwner=expected_owner,
+        )
+        if int(response.get("ContentLength", _STATIC_SCHEMA_MAX_BYTES + 1)) > _STATIC_SCHEMA_MAX_BYTES:
+            raise RuntimeError("Gateway static schema exceeds the 10 MiB read limit")
+        body = response.get("Body")
+        if body is None:
+            raise RuntimeError("Gateway static schema S3 response has no body")
+        try:
+            payload = body.read(_STATIC_SCHEMA_MAX_BYTES + 1)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+    if not payload or len(payload) > _STATIC_SCHEMA_MAX_BYTES:
+        raise RuntimeError("Gateway static schema is empty or exceeds the 10 MiB limit")
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("Gateway static schema is not UTF-8") from exc
+
+
+def _load_static_schema_document(text: str, label: str) -> dict:
+    """Parse a JSON/YAML API schema without accepting ambiguous duplicate keys."""
+
+    def _unique_json_object(pairs: list[tuple[object, object]]) -> dict:
+        value: dict = {}
+        for key, item in pairs:
+            if key in value:
+                raise RuntimeError(f"Gateway {label} schema contains a duplicate key")
+            value[key] = item
+        return value
+
+    try:
+        document = json.loads(text, object_pairs_hook=_unique_json_object)
+    except json.JSONDecodeError:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise RuntimeError("Gateway YAML schema parsing requires the pinned PyYAML dependency") from exc
+
+        class _UniqueSafeLoader(yaml.SafeLoader):
+            pass
+
+        def _construct_mapping(loader, node, deep=False):
+            loader.flatten_mapping(node)
+            value = {}
+            for key_node, value_node in node.value:
+                key = loader.construct_object(key_node, deep=deep)
+                try:
+                    duplicate = key in value
+                except TypeError as exc:
+                    raise RuntimeError(f"Gateway {label} schema contains an invalid mapping key") from exc
+                if duplicate:
+                    raise RuntimeError(f"Gateway {label} schema contains a duplicate key")
+                value[key] = loader.construct_object(value_node, deep=deep)
+            return value
+
+        _UniqueSafeLoader.add_constructor(
+            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+            _construct_mapping,
+        )
+        try:
+            document = yaml.load(text, Loader=_UniqueSafeLoader)
+        except yaml.YAMLError as exc:
+            raise RuntimeError(f"Gateway {label} schema is not valid JSON or YAML") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError(f"Gateway {label} schema is not an object")
+    return document
+
+
+def _static_schema_tool_names(detail: dict, target_name: str, *, region: str | None = None) -> list[str]:
+    """Derive exact MCP tool names from a static OpenAPI or Smithy schema.
+
+    AWS defines an OpenAPI operationId as its MCP tool name and qualifies every
+    Gateway tool as ``target___tool``. Smithy JSON AST service operations use the
+    operation shape's simple name. Static schemas cannot be synchronized, so this
+    creation-time schema is the only control-plane action manifest available before
+    an OBO user's first authenticated tools/list call.
+    """
+    mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+    if "openApiSchema" in mcp:
+        label = "OpenAPI"
+        text = _read_static_schema_text(mcp["openApiSchema"], region=region)
+        document = _load_static_schema_document(text, "OpenAPI")
+        if not str(document.get("openapi", "")).startswith("3."):
+            raise RuntimeError("Gateway OpenAPI schema is not an OpenAPI 3 document")
+        paths = document.get("paths")
+        if not isinstance(paths, dict):
+            raise RuntimeError("Gateway OpenAPI schema has no paths object")
+        names: list[str] = []
+        missing = 0
+        for path_item in paths.values():
+            if not isinstance(path_item, dict):
+                continue
+            for method in _OPENAPI_METHODS:
+                operation = path_item.get(method)
+                if not isinstance(operation, dict):
+                    continue
+                operation_id = operation.get("operationId")
+                if not isinstance(operation_id, str) or not operation_id:
+                    missing += 1
+                else:
+                    names.append(operation_id)
+        if missing:
+            raise RuntimeError(f"Gateway OpenAPI schema has {missing} operation(s) without operationId")
+    elif "smithyModel" in mcp:
+        label = "Smithy"
+        text = _read_static_schema_text(mcp["smithyModel"], region=region)
+        document = _load_static_schema_document(text, "Smithy")
+        shapes = document.get("shapes")
+        if not isinstance(shapes, dict):
+            raise RuntimeError("Gateway Smithy model has no shapes object")
+        operation_targets: list[str] = []
+        for shape in shapes.values():
+            if not isinstance(shape, dict) or shape.get("type") != "service":
+                continue
+            for operation in shape.get("operations") or []:
+                target = operation.get("target") if isinstance(operation, dict) else None
+                if isinstance(target, str) and target:
+                    operation_targets.append(target)
+        names = []
+        for target in operation_targets:
+            operation_shape = shapes.get(target)
+            if not isinstance(operation_shape, dict) or operation_shape.get("type") != "operation":
+                raise RuntimeError("Gateway Smithy service references a missing non-operation shape")
+            names.append(target.rsplit("#", 1)[-1])
+    else:
+        return []
+
+    if not names:
+        raise RuntimeError(f"Gateway {label} static schema exposes no named tools")
+    if len(set(names)) != len(names):
+        raise RuntimeError(f"Gateway {label} static schema has duplicate tool names")
+    for name in names:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise RuntimeError(f"Gateway {label} static schema has an invalid tool name")
+        if len(f"{target_name}___{name}") > 64:
+            raise RuntimeError(f"Gateway {label} qualified tool name exceeds 64 characters")
+    return names
+
+
+def _resolve_gateway_tool_actions(
+    agentcore_ctrl,
+    gateway_id: str,
+    timeout: int = 180,
+    *,
+    region: str | None = None,
+) -> tuple[list, int]:
+    """Return ``(qualified Cedar actions, configured known-tool count)``.
+
+    Target readiness is family-specific:
+
+    * inline Lambda targets expose their exact inline tool schema after
+      ``READY``/``ACTIVE`` read-back;
+    * static OpenAPI and Smithy targets expose operation names derived from their
+      exact supplied schema after ``READY``/``ACTIVE`` read-back; they cannot be
+      sent to ``SynchronizeGatewayTargets``;
+    * dynamic MCP-server targets require an exact-ID synchronization call and a
+      fresh synchronization receipt;
+    * AWS-managed connector targets do not support synchronization and have no
+      locally readable action manifest, so the served MCP plane supplies them.
+
+    Every static schema is parsed and validated before the dynamic synchronization
+    mutation. Unknown, unreadable, empty, or changing target families fail closed.
     """
     import time as _t
+
+    if region is None:
+        meta_region = getattr(getattr(agentcore_ctrl, "meta", None), "region_name", None)
+        region = meta_region if isinstance(meta_region, str) else None
 
     def _list_target_ids() -> list:
         try:
@@ -471,80 +673,116 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
             logger.warning("list_gateway_targets failed (will retry): %s", e)
             return []
 
-    def _configured_tools(detail: dict) -> list:
-        tc = detail.get("targetConfiguration", {}) or {}
-        mcp = tc.get("mcp", {}) or {}
-        schema = (mcp.get("lambda", {}) or {}).get("toolSchema", {}) or {}
-        return schema.get("inlinePayload", []) or []
+    def _configured_tool_names(detail: dict, target_name: str) -> list[str]:
+        mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+        if "lambda" in mcp:
+            schema = (mcp.get("lambda", {}) or {}).get("toolSchema", {}) or {}
+            tools = schema.get("inlinePayload", []) or []
+            if not isinstance(tools, list):
+                raise RuntimeError("Gateway Lambda tool schema inlinePayload is not a list")
+            return [tool["name"] for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
+        if set(mcp) & {"openApiSchema", "smithyModel"}:
+            return _static_schema_tool_names(detail, target_name, region=region)
+        return []
 
-    # Snapshot pre-sync timestamps so we can require lastSynchronizedAt to ADVANCE
-    # (a target may carry a stale sync time from a prior deploy of a reused gw).
-    pre_sync = {}
-    for _tname, tid in _list_target_ids():
+    def _target_family(detail: dict) -> str:
+        mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+        if not isinstance(mcp, dict):
+            return "unknown"
+        if "lambda" in mcp:
+            return "inline"
+        if "connector" in mcp:
+            return "managed_connector"
+        if set(mcp) & {"openApiSchema", "smithyModel"}:
+            return "static_schema"
+        if "mcpServer" in mcp:
+            return "dynamic_mcp"
+        return "unknown"
+
+    pre_sync: dict[str, object] = {}
+    target_families: dict[str, str] = {}
+    configured_names: dict[str, tuple[str, ...]] = {}
+    dynamic_target_ids: list[str] = []
+    initial_ids = _list_target_ids()
+    if not initial_ids:
+        return [], 0
+    for target_name, target_id in initial_ids:
         try:
-            d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            pre_sync[tid] = d.get("lastSynchronizedAt")
-        except Exception:  # noqa: BLE001
-            pre_sync[tid] = None
+            detail = agentcore_ctrl.get_gateway_target(
+                gatewayIdentifier=gateway_id,
+                targetId=target_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Gateway target {target_id} could not be read before readiness admission") from exc
+        family = _target_family(detail)
+        if family == "unknown":
+            raise RuntimeError(f"Gateway target {target_id} has an unsupported target family")
+        names = tuple(_configured_tool_names(detail, target_name))
+        if family == "static_schema" and not names:
+            raise RuntimeError(f"Gateway static target {target_id} exposes no named tools")
+        target_families[target_id] = family
+        configured_names[target_id] = names
+        if family == "dynamic_mcp":
+            pre_sync[target_id] = detail.get("lastSynchronizedAt")
+            dynamic_target_ids.append(target_id)
 
-    try:
-        agentcore_ctrl.synchronize_gateway_targets(gatewayIdentifier=gateway_id)
-    except Exception as e:  # noqa: BLE001
-        logger.info("synchronize_gateway_targets (non-fatal) for %s: %s", gateway_id, e)
+    if dynamic_target_ids:
+        agentcore_ctrl.synchronize_gateway_targets(
+            gatewayIdentifier=gateway_id,
+            targetIdList=sorted(set(dynamic_target_ids)),
+        )
 
     deadline = _t.time() + timeout
-    actions = []
+    actions: list[str] = []
     expected = 0
     while _t.time() < deadline:
         actions = []
         expected = 0
-        all_synced = True
+        all_ready = True
         ids = _list_target_ids()
-        if not ids:
-            all_synced = False
-        for tname, tid in ids:
+        if not ids or {target_id for _name, target_id in ids} != set(target_families):
+            all_ready = False
+        for target_name, target_id in ids:
             try:
-                detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            except Exception:  # noqa: BLE001
-                all_synced = False
-                continue
-            tools = _configured_tools(detail)
-            expected += len(tools)
-            tstatus = (detail.get("status") or "").upper()
-            synced_at = detail.get("lastSynchronizedAt")
-            # Readiness depends on the target TYPE:
-            #  - INLINE-payload Lambda targets declare their tools inline, so they
-            #    are servable as soon as status==READY. They NEVER get a
-            #    lastSynchronizedAt (that timestamp is only set for targets whose
-            #    tool list is CRAWLED — OpenAPI specs / external MCP servers).
-            #    Requiring lastSynchronizedAt here was the bug: an inline-Lambda
-            #    target stays READY with lastSynchronizedAt=None forever, so the
-            #    poll always timed out at 0/N (verified live).
-            #  - CRAWLED targets (no inlinePayload) ARE only servable once
-            #    lastSynchronizedAt is present and (for reused gateways) advanced.
-            is_inline = bool(tools)
-            if is_inline:
-                target_synced = tstatus == "READY"
-            else:
-                target_synced = (
-                    tstatus in ("READY", "ACTIVE") and synced_at is not None and synced_at != pre_sync.get(tid)
+                detail = agentcore_ctrl.get_gateway_target(
+                    gatewayIdentifier=gateway_id,
+                    targetId=target_id,
                 )
-            if not target_synced:
-                all_synced = False
+            except Exception:  # noqa: BLE001
+                all_ready = False
                 continue
-            for tool in tools:
-                nm = tool.get("name")
-                if nm:
-                    actions.append(f"{tname}___{nm}")
-        # Done when every configured target is synced AND every configured tool
-        # is present in the action list.
-        if ids and all_synced and len(actions) == expected and expected > 0:
-            logger.warning("Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected)
+            family = _target_family(detail)
+            if family != target_families.get(target_id):
+                raise RuntimeError(f"Gateway target {target_id} changed target family during readiness admission")
+            names = tuple(_configured_tool_names(detail, target_name))
+            if names != configured_names.get(target_id):
+                raise RuntimeError(f"Gateway target {target_id} tool schema changed during readiness admission")
+            expected += len(names)
+            status = (detail.get("status") or "").upper()
+            if family in {"inline", "managed_connector", "static_schema"}:
+                target_ready = status in {"READY", "ACTIVE"}
+            else:
+                synchronized_at = detail.get("lastSynchronizedAt")
+                target_ready = (
+                    status in {"READY", "ACTIVE"}
+                    and synchronized_at is not None
+                    and synchronized_at != pre_sync.get(target_id)
+                )
+            if not target_ready:
+                all_ready = False
+                continue
+            actions.extend(f"{target_name}___{name}" for name in names)
+        if ids and all_ready and len(actions) == expected:
+            logger.warning(
+                "Gateway %s target control plane ready: %d schema-bound tools; static schemas and managed connectors verified without synchronization",
+                gateway_id,
+                expected,
+            )
             return actions, expected
         _t.sleep(5)
 
     logger.warning(
-        "Gateway %s tool plane not fully synced within %ds; %d/%d tools synced",
+        "Gateway %s target control plane not ready within %ds; %d/%d schema-bound tools ready",
         gateway_id,
         timeout,
         len(actions),
@@ -1642,11 +1880,13 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
         },
         {
             "name": "lookup_customer",
-            "description": "Look up customer information by email address.",
+            "description": "Look up customer information by customer ID.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"email": {"type": "string", "description": "Customer email address"}},
-                "required": ["email"],
+                "properties": {
+                    "customer_id": {"type": "string", "description": "Customer ID"},
+                },
+                "required": ["customer_id"],
             },
         },
         {
@@ -1675,21 +1915,11 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     ]
 }
 
-# Dynamic tools Lambda (search/wikipedia/weather/fetch + customer-support demo
-# handlers + dispatcher). Canonical source lives in app/services/codegen_templates/
-# (dynamic_tools_impl.py + customer_support_impl.py + dynamic_tools_handler.py).
+# Dynamic tools Lambda (Wikipedia/weather/fetch + customer-support demo
+# handlers + dispatcher). Managed full-web search is a connector target.
 DYNAMIC_TOOLS_LAMBDA_CODE = codegen_templates.dynamic_tools_lambda_source()
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
-    "duckduckgo_search": {
-        "name": "duckduckgo_search",
-        "description": "Search the web using DuckDuckGo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-    },
     "wikipedia_search": {
         "name": "wikipedia_search",
         "description": "Search Wikipedia and return an article summary.",
@@ -4545,7 +4775,7 @@ class GatewayTargetFamilyConflict(RuntimeError):
 #: creates. The family is the one field in the shape that our own code NEVER changes for a
 #: given target: a redeploy can move a Lambda ARN, a schema or an endpoint, but a canvas node
 #: that produced an ``openApiSchema`` target keeps producing one.
-_TARGET_FAMILY_KEYS = ("lambda", "openApiSchema", "smithyModel", "mcpServer")
+_TARGET_FAMILY_KEYS = ("lambda", "openApiSchema", "smithyModel", "mcpServer", "connector")
 
 #: Exactly the configuration fields ``UpdateGatewayTarget`` replaces, and therefore exactly
 #: what has to match before an update can be reported as applied. ``name`` and ``description``
@@ -5054,57 +5284,123 @@ def _update_existing_gateway_target(agentcore_ctrl, gateway_id: str, target_name
     )
 
 
-def _build_gateway_role_policy() -> dict:
-    """Build the IAM policy document for gateway roles with scoped permissions."""
-    return {
-        "Version": "2012-10-17",
-        "Statement": [
+def _build_gateway_role_policy(
+    *,
+    region: str,
+    account_id: str,
+    gateway_name: str,
+    managed_web_search: bool = False,
+    obo_required: bool = False,
+    owner_sub: str = "",
+    partition: str = "aws",
+) -> dict:
+    """Build the least-privilege runtime policy for one Gateway service role.
+
+    This is an execution role, not the deployer's resource-management role. It
+    may invoke targets, mint outbound-authorization tokens, and evaluate an
+    attached policy engine; it may not create/delete AgentCore resources, pass
+    roles, invoke models, or write credential secrets.
+    """
+
+    gateway_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:gateway/{gateway_name}-*"
+    policy_engine_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:policy-engine/*"
+    identity_directory_arn = (
+        f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default"
+    )
+    workload_identity_arn = f"{identity_directory_arn}/workload-identity/{gateway_name}-*"
+    token_vault_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:token-vault/default"
+    token_resources = [
+        token_vault_arn,
+        f"{token_vault_arn}/oauth2credentialprovider/*",
+        f"{token_vault_arn}/apikeycredentialprovider/*",
+        identity_directory_arn,
+        workload_identity_arn,
+    ]
+    secret_prefix = connector_secret_owner_prefix(owner_sub)
+    workload_identity_actions = ["bedrock-agentcore:GetWorkloadAccessToken"]
+    if obo_required:
+        # Gateway automatically performs this JWT-specific first leg before
+        # GetResourceOauth2Token. The generic action does not authorize it.
+        workload_identity_actions.append("bedrock-agentcore:GetWorkloadAccessTokenForJWT")
+
+    statements = [
+        {
+            "Sid": "GatewayInvocation",
+            "Effect": "Allow",
+            "Action": ["bedrock-agentcore:InvokeGateway"],
+            "Resource": gateway_arn,
+        },
+        {
+            "Sid": "PolicyAuthorization",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetPolicyEngine",
+                "bedrock-agentcore:AuthorizeAction",
+                "bedrock-agentcore:PartiallyAuthorizeActions",
+            ],
+            "Resource": [policy_engine_arn, gateway_arn],
+        },
+        {
+            "Sid": "WorkloadIdentityToken",
+            "Effect": "Allow",
+            "Action": workload_identity_actions,
+            "Resource": [identity_directory_arn, workload_identity_arn],
+        },
+        {
+            "Sid": "OutboundCredentialTokens",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetResourceOauth2Token",
+                "bedrock-agentcore:GetResourceApiKey",
+            ],
+            "Resource": token_resources,
+        },
+        {
+            "Sid": "CredentialSecretRead",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue"],
+            "Resource": f"arn:{partition}:secretsmanager:{region}:{account_id}:secret:{secret_prefix}*",
+        },
+        {
+            "Sid": "InvokeGatewayToolLambdas",
+            "Effect": "Allow",
+            "Action": ["lambda:InvokeFunction"],
+            "Resource": f"arn:{partition}:lambda:{region}:{account_id}:function:AgentCore*",
+        },
+    ]
+    if managed_web_search:
+        statements.append(
             {
+                "Sid": "ManagedWebSearch",
                 "Effect": "Allow",
-                "Action": [
-                    # `agent-credential-provider` is not an AWS service, so the
-                    # entry that used to sit here authorized nothing -- and it was
-                    # the only grant that made this role look like it could reach
-                    # the credential providers. It can: the real actions are
-                    # bedrock-agentcore:GetResourceOauth2Token and
-                    # GetResourceApiKey, covered by the wildcard below. See the
-                    # prefix note in services/per_agent_identity.py.
-                    "bedrock-agentcore:*",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                    "bedrock:ListFoundationModels",
-                    "bedrock:GetFoundationModel",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": "iam:PassRole",
-                "Resource": "arn:aws:iam::*:role/AgentCore*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "secretsmanager:CreateSecret",
-                    "secretsmanager:GetSecretValue",
-                    "secretsmanager:PutSecretValue",
-                    "secretsmanager:DeleteSecret",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": "lambda:InvokeFunction",
-                "Resource": "arn:aws:lambda:*:*:function:AgentCore*",
-            },
-        ],
-    }
+                "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                "Resource": f"arn:{partition}:bedrock-agentcore:{region}:aws:tool/web-search.v1",
+            }
+        )
+    return {"Version": "2012-10-17", "Statement": statements}
+
+
+def _gateway_role_policy_for(
+    role_arn: str,
+    *,
+    region: str,
+    gateway_name: str,
+    managed_web_search: bool,
+    owner_sub: str,
+    obo_required: bool = False,
+) -> dict:
+    parts = str(role_arn or "").split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam" or not parts[4]:
+        raise ValueError("IAM returned an invalid Gateway role ARN; refusing to emit an unscoped execution policy")
+    return _build_gateway_role_policy(
+        region=region,
+        account_id=parts[4],
+        gateway_name=gateway_name,
+        managed_web_search=managed_web_search,
+        obo_required=obo_required,
+        owner_sub=owner_sub,
+        partition=parts[1],
+    )
 
 
 def _fetch_openapi_spec(spec_url: str, allowlist_hosts: list | None = None) -> str:
@@ -5941,6 +6237,13 @@ def deploy_gateway(
         custom_tools = custom_tools or []
         connectors = connectors or []
         external_mcp_servers = external_mcp_servers or []
+        managed_web_search = managed_web_search_requested(template_id, gateway_tools)
+        if managed_web_search:
+            require_managed_web_search_region(region)
+            # Saved canvases may still carry duckduckgo_search. It is a
+            # migration alias for the managed connector, never a Lambda
+            # tool backed by unsupported HTML scraping.
+            gateway_tools = without_managed_web_search_tools(gateway_tools)
 
         # Fail closed on a tool set this deployer cannot faithfully serve, BEFORE any
         # AWS side effect (no client is created yet, so refused_before_side_effects is
@@ -6019,44 +6322,55 @@ def deploy_gateway(
         if claim_gateway_name is not None:
             claim_gateway_name(gateway_name)
 
-        # Step 1: Create authorizer (Cognito or external IDP)
+        # Step 1: Create authorizer (workforce JWT for OBO; otherwise Cognito or
+        # an explicitly configured external IdP).  OBO must never silently fall
+        # back to the machine client: that would make a successful call run as
+        # the deployment rather than the authenticated user.
         identity_config = identity_config or {}
-        # Treat empty credentials as "auto-create Cognito" (e.g. template 3 sends empty clientId)
-        if identity_config and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip():
-            identity_config = {}
-        provider = identity_config.get("provider", "cognito")
-        if provider and provider != "cognito":
-            logger.info(
-                "Creating external %s authorizer for gateway '%s'",
-                provider,
-                gateway_name,
-            )
-            cognito_response = _create_external_oauth_config(identity_config, region)
+        obo_required = obo_requested(connectors)
+        if obo_required:
+            logger.info("Using the platform workforce JWT authorizer for an OBO gateway")
+            cognito_response = workforce_gateway_identity(region, owner_sub)
         else:
-            logger.info("Creating Cognito authorizer for gateway '%s'", gateway_name)
-            # owner_sub + deployment_id are passed so the minted client-secret
-            # reference is BOUND to this tenant and this deploy, not merely placed in
-            # the product's shared secret namespace where a prefix match would claim it.
-            cognito_response = _create_cognito_oauth(
-                cognito_client,
-                gateway_name,
-                region,
-                owner_sub,
-                deployment_id or "",
-                resource_tags=resource_tags,
-            )
-            # A gateway in any account or region reuses the platform's warm
-            # HOME-region pool. Conflict adoption and stale-client retirement happen
-            # later in this function, so route those operations to that pool's
-            # account (platform credentials) and region too. Dedicated pools stay on
-            # the original target client, moved only to the pool's own region.
-            _auth_pool_id = (cognito_response.get("client_info") or {}).get("user_pool_id", "")
-            if _auth_pool_id:
-                _auth_pool_region = _pool_region(_auth_pool_id)
-                if is_platform_owned_user_pool(_auth_pool_id):
-                    cognito_client = _create_platform_cognito_client(_auth_pool_region)
-                elif _auth_pool_region != region:
-                    cognito_client = _create_cognito_client(_auth_pool_region)
+            # Treat empty credentials as "auto-create Cognito" (e.g. template 3 sends empty clientId)
+            if (
+                identity_config
+                and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip()
+            ):
+                identity_config = {}
+            provider = identity_config.get("provider", "cognito")
+            if provider and provider != "cognito":
+                logger.info(
+                    "Creating external %s authorizer for gateway '%s'",
+                    provider,
+                    gateway_name,
+                )
+                cognito_response = _create_external_oauth_config(identity_config, region)
+            else:
+                logger.info("Creating Cognito authorizer for gateway '%s'", gateway_name)
+                # owner_sub + deployment_id are passed so the minted client-secret
+                # reference is BOUND to this tenant and this deploy, not merely placed in
+                # the product's shared secret namespace where a prefix match would claim it.
+                cognito_response = _create_cognito_oauth(
+                    cognito_client,
+                    gateway_name,
+                    region,
+                    owner_sub,
+                    deployment_id or "",
+                    resource_tags=resource_tags,
+                )
+                # A gateway in any account or region reuses the platform's warm
+                # HOME-region pool. Conflict adoption and stale-client retirement happen
+                # later in this function, so route those operations to that pool's
+                # account (platform credentials) and region too. Dedicated pools stay on
+                # the original target client, moved only to the pool's own region.
+                _auth_pool_id = (cognito_response.get("client_info") or {}).get("user_pool_id", "")
+                if _auth_pool_id:
+                    _auth_pool_region = _pool_region(_auth_pool_id)
+                    if is_platform_owned_user_pool(_auth_pool_id):
+                        cognito_client = _create_platform_cognito_client(_auth_pool_region)
+                    elif _auth_pool_region != region:
+                        cognito_client = _create_cognito_client(_auth_pool_region)
 
         # Step 1b: Create gateway IAM role
         iam_client = _create_iam_client()
@@ -6115,9 +6429,14 @@ def deploy_gateway(
             gw_role_confirmed = gw_role_name
             # SECURITY: Scope Lambda invoke to AgentCore-prefixed functions only,
             # and limit bedrock-agentcore actions to gateway-specific operations.
-            sts_client = _aws_client("sts")
-            sts_client.get_caller_identity()  # validate credentials
-            _gw_policy_doc = _build_gateway_role_policy()
+            _gw_policy_doc = _gateway_role_policy_for(
+                gw_role_arn,
+                region=region,
+                gateway_name=gateway_name,
+                managed_web_search=managed_web_search,
+                owner_sub=owner_sub,
+                obo_required=obo_required,
+            )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,
                 PolicyName="GatewayLambdaInvoke",
@@ -6146,7 +6465,14 @@ def deploy_gateway(
             # that first created it had no manifest row either, so no run ever named it.
             gw_role_confirmed = gw_role_name
             # Update the policy to ensure it has latest permissions (critical for MCP patterns)
-            _gw_policy_doc = _build_gateway_role_policy()
+            _gw_policy_doc = _gateway_role_policy_for(
+                gw_role_arn,
+                region=region,
+                gateway_name=gateway_name,
+                managed_web_search=managed_web_search,
+                owner_sub=owner_sub,
+                obo_required=obo_required,
+            )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,
                 PolicyName="GatewayLambdaInvoke",
@@ -6401,7 +6727,9 @@ def deploy_gateway(
                 update_existing=True,  # F-74: repoint an existing target to this deploy's function
             )
 
-        elif template_id in ("strands-gateway-agent", "customer-support-blueprint") or gateway_tools:
+        elif (
+            template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-blueprint") or gateway_tools
+        ):
             # Deploy the DynamicTools Lambda with tool schemas. It executes the web
             # tools AND the canonical order tools, so the blueprint (canonical) and
             # strands (web + canonical) templates both land here.
@@ -6428,14 +6756,17 @@ def deploy_gateway(
                 schemas = [
                     GATEWAY_TOOL_SCHEMAS[tid] for tid in ("get_order", "get_customer", "list_orders", "process_refund")
                 ]
+            elif template_id == "web-search-agent":
+                # Search itself is the managed connector. Keep only the
+                # adjacent weather and bounded page-fetch Lambda tools.
+                schemas = [GATEWAY_TOOL_SCHEMAS[tid] for tid in ("weather_api", "web_page_fetcher")]
             else:
-                # strands-gateway-agent with no explicit tools: the 8 executable
-                # web + canonical tools (everything the dispatcher can answer),
-                # never the 9th knowledge_base entry.
+                # strands-gateway-agent: seven core Lambda-backed
+                # encyclopedia/weather/fetch/order tools. Managed Web Search is
+                # a dedicated template or an explicit tool request.
                 schemas = [
                     GATEWAY_TOOL_SCHEMAS[tid]
                     for tid in (
-                        "duckduckgo_search",
                         "wikipedia_search",
                         "weather_api",
                         "web_page_fetcher",
@@ -6472,6 +6803,17 @@ def deploy_gateway(
                     "No predefined tool schemas matched gateway_tools=%s, skipping DynamicTools target",
                     gateway_tools,
                 )
+
+        if managed_web_search:
+            web_search_params = managed_web_search_target_params(gateway["gatewayId"])
+            _create_gateway_target_with_retry(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                MANAGED_WEB_SEARCH_TARGET_NAME,
+                web_search_params,
+                update_existing=True,
+            )
+            logger.info("AWS-managed Web Search target deployed")
 
         # Step 3b: Create MCP Server Runtime target (if provided)
         if mcp_server_runtime_arn:
@@ -6910,8 +7252,6 @@ def deploy_gateway(
         # name. mcp_server entries present in `targets` are skipped by the helper
         # (already handled) to avoid double-deploy.
         config_targets = gateway_config.get("targets") or []
-        _config_target_families = {(t or {}).get("type") for t in config_targets}
-        _has_crawled_config_target = bool(_config_target_families & {"openapi", "smithy"})
         if config_targets:
             _deploy_config_targets(
                 agentcore_ctrl,
@@ -6923,41 +7263,12 @@ def deploy_gateway(
                 resource_tags=resource_tags,
             )
 
-        # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
-        # tools are crawled into the servable MCP plane. Bug 134:
-        # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
-        # it → silent failure) AND rejects LAMBDA targets ("Target type LAMBDA is
-        # not supported for synchronization") — Lambda targets serve their inline
-        # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
-        # the semantic-search toggle, so we always sync the non-lambda set whenever
-        # any crawled target exists (or semantic search was explicitly requested).
-        if (
-            connectors
-            or external_mcp_servers
-            or mcp_server_runtime_arn
-            or _has_crawled_config_target
-            or gateway_config.get("semanticSearchEnabled")
-        ):
-            try:
-                _sync_ids = []
-                for _t in _list_all_gateway_targets(
-                    agentcore_ctrl,
-                    gateway["gatewayId"],
-                ):
-                    _tid = _t.get("targetId") or _t.get("gatewayTargetId")
-                    _tc = (_t.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
-                    # crawled targets = NOT lambda (openApiSchema / mcpServer)
-                    if _tid and "lambda" not in _tc:
-                        _sync_ids.append(_tid)
-                if _sync_ids:
-                    logger.warning(
-                        "Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"]
-                    )
-                    agentcore_ctrl.synchronize_gateway_targets(
-                        gatewayIdentifier=gateway["gatewayId"], targetIdList=_sync_ids
-                    )
-            except Exception as sync_err:
-                logger.warning("Gateway target sync (non-fatal): %s", sync_err)
+        # Step 5 readiness is performed once, authoritatively, by
+        # _resolve_gateway_tool_actions below. It synchronizes only dynamic
+        # MCP-server target IDs and requires fresh receipts. Static OpenAPI/Smithy
+        # schemas and AWS-managed connector targets reject synchronization, so
+        # their exact READY read-back is followed by the served MCP tools/list
+        # proof where deployment-time authentication permits it.
 
         # Bug 138: if the caller asked for tools (built-in and/or custom) but the
         # gateway ended up with ZERO targets, the agent would deploy against an
@@ -6966,7 +7277,7 @@ def deploy_gateway(
         # passes an unknown built-in toolId (no schema match → DynamicTools target
         # skipped) or every custom tool failed validation. FAIL LOUDLY here with a
         # message the user can act on, instead of silently shipping a dead gateway.
-        tools_requested = bool(gateway_tools) or bool(custom_tools)
+        tools_requested = bool(gateway_tools) or bool(custom_tools) or managed_web_search
         if tools_requested:
             try:
                 _existing_targets = _list_all_gateway_targets(
@@ -6976,8 +7287,12 @@ def deploy_gateway(
             except Exception:  # noqa: BLE001
                 _existing_targets = []
             if not _existing_targets:
-                _known = sorted(GATEWAY_TOOL_SCHEMAS.keys())
-                _unknown = [t for t in (gateway_tools or []) if t not in GATEWAY_TOOL_SCHEMAS]
+                _known = sorted(set(GATEWAY_TOOL_SCHEMAS) | MANAGED_WEB_SEARCH_TOOL_IDS)
+                _unknown = [
+                    t
+                    for t in (gateway_tools or [])
+                    if t not in GATEWAY_TOOL_SCHEMAS and t not in MANAGED_WEB_SEARCH_TOOL_IDS
+                ]
                 detail = ""
                 if _unknown:
                     detail = (
@@ -7003,26 +7318,42 @@ def deploy_gateway(
                 gateway_arn = _gw.get("gatewayArn", "")
             except Exception:  # noqa: BLE001 — optional enrichment; policy_step tolerates a missing ARN
                 logger.debug("Could not resolve gateway ARN for %s", gateway["gatewayId"], exc_info=True)
-        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(agentcore_ctrl, gateway["gatewayId"])
+        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(
+            agentcore_ctrl,
+            gateway["gatewayId"],
+            region=region,
+        )
 
         gateway_url = gateway.get("gatewayUrl", "")
         client_info = cognito_response["client_info"]
 
-        # Connectors (OpenAPI targets) declare NO inline tools and CANNOT be synced
-        # (verified live: SynchronizeGatewayTargets rejects OPEN_API_SCHEMA), so
-        # _resolve_gateway_tool_actions reports expected_tool_count==0 for them even
-        # though the gateway crawls the spec and DOES serve operations. The
-        # control-plane is silent here, so the authoritative readiness signal is the
-        # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
-        # fail closed otherwise (never ship a connector gateway that serves nothing).
-        if connectors and expected_tool_count == 0:
-            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected=1, timeout=120)
-            if served < 1:
-                # Surface the REAL reason: a FAILED OpenAPI target carries an
-                # actionable statusReason (e.g. "Invalid OpenAPI schema: ...items
-                # is missing"). Without this the user only sees the generic
-                # "0 tools" message and can't fix their spec. (Verified live: an
-                # array schema missing `items` FAILs the target silently.)
+        # Dynamic MCP servers and managed connectors have no locally readable
+        # action manifest, so each must contribute at least one tool to the served
+        # MCP plane. Static OpenAPI/Smithy actions are already counted exactly from
+        # their immutable schemas by _resolve_gateway_tool_actions and must not be
+        # double-counted here.
+        declared_served_only_target_count = (
+            len(external_mcp_servers) + int(bool(mcp_server_runtime_arn)) + int(managed_web_search)
+        )
+        served_only_targets = declared_served_only_target_count > 0
+        served_only_plane_verified = False
+        if served_only_targets and obo_required:
+            raise RuntimeError(
+                "An OBO gateway cannot combine static schema-bound tools with targets "
+                "whose Cedar action names are available only from authenticated tools/list. "
+                "Deploy dynamic MCP or managed connector targets on a separate gateway."
+            )
+        if served_only_targets and not obo_required:
+            minimum_served = expected_tool_count + declared_served_only_target_count
+            probe: dict = {}
+            served = _wait_for_gateway_to_serve_tools(
+                gateway_url,
+                client_info,
+                minimum_served,
+                timeout=120,
+                probe=probe,
+            )
+            if served < minimum_served:
                 target_reasons = []
                 try:
                     for _t in _list_all_gateway_targets(
@@ -7032,32 +7363,51 @@ def deploy_gateway(
                         _tid = _t.get("targetId") or _t.get("gatewayTargetId")
                         if not _tid:
                             continue
-                        _d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway["gatewayId"], targetId=_tid)
+                        _d = agentcore_ctrl.get_gateway_target(
+                            gatewayIdentifier=gateway["gatewayId"],
+                            targetId=_tid,
+                        )
                         if (_d.get("status") or "").upper() == "FAILED":
                             _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
                             target_reasons.append(f"{_tid}: {_r}")
-                except Exception:  # noqa: BLE001 — diagnostics enrichment only; the deploy still fails below
+                except Exception:  # noqa: BLE001 — diagnostics only; failure remains closed
                     logger.debug("Could not collect FAILED-target reasons", exc_info=True)
-                detail = (
-                    f" Target failure(s): {target_reasons}"
-                    if target_reasons
-                    else " No target reported FAILED — likely the AgentCore empty-tool-plane "
-                    "provisioning flake (retry the deploy)."
+                if target_reasons:
+                    raise RuntimeError(
+                        f"Gateway {gateway['gatewayId']} serves {served}/{minimum_served} required tools over MCP "
+                        f"after deploying crawled target(s). Target failure(s): {target_reasons}"
+                    )
+                # No target reports a terminal failure: this is the same
+                # service-side short-plane condition as an inline target whose
+                # schema is READY but absent from tools/list. Preserve the full
+                # mixed-plane minimum and let the bounded reprobe/recreation block
+                # below decide whether a fresh Gateway repairs it. Keeping this as
+                # a fall-through also preserves connector/external-MCP/owner args
+                # on recursion; raising here bypassed that proven recovery path.
+                expected_tool_count = minimum_served
+                logger.warning(
+                    "Gateway %s serves %d/%d required mixed-plane tools; no target "
+                    "reported FAILED, so applying the bounded Gateway plane recovery",
+                    gateway["gatewayId"],
+                    served,
+                    minimum_served,
                 )
-                # Raise into the common failure handler instead of returning a
-                # connector-only fragment. The common handler carries the gateway,
-                # role, Cognito client, providers, secrets, and staged specs to both
-                # abort cleanup and the durable manifest. The old early return lost
-                # the gateway/role/client handles, so an abort-cleanup failure made
-                # those resources permanently undiscoverable.
-                raise RuntimeError(
-                    f"Gateway {gateway['gatewayId']} serves 0 tools over MCP after "
-                    f"deploying connector OpenAPI target(s)." + detail
+            else:
+                served_tools = _qualified_tools_from_served(gateway_url, client_info)
+                if len(served_tools) != served:
+                    raise RuntimeError(
+                        f"Gateway {gateway['gatewayId']} reported {served} served tools but "
+                        f"only {len(served_tools)} qualified actions could be read. Refusing "
+                        "to build a partial Cedar permit."
+                    )
+                qualified_tools = served_tools
+                expected_tool_count = served
+                served_only_plane_verified = True
+                logger.warning(
+                    "Served-only-target gateway %s confirmed serving %d tool(s) over MCP",
+                    gateway["gatewayId"],
+                    served,
                 )
-            # Backfill qualified_tools from the live plane so the policy step (if any)
-            # has the connector's tool actions.
-            qualified_tools = _qualified_tools_from_served(gateway_url, client_info)
-            logger.warning("Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served)
 
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY
@@ -7072,8 +7422,14 @@ def deploy_gateway(
         # Whether the MCP tools/list probe actually CONFIRMED the tool plane, as
         # opposed to being unable to reach it. Travels in the result so a caller
         # never has to infer verification from success alone.
-        tool_plane_verified = True
-        if expected_tool_count > 0:
+        tool_plane_verified = not obo_required
+        if expected_tool_count > 0 and obo_required:
+            logger.warning(
+                "Gateway %s has %d schema-bound OBO tool(s); deployment-time tools/list is deferred to the required first authenticated user call",
+                gateway["gatewayId"],
+                expected_tool_count,
+            )
+        if expected_tool_count > 0 and not served_only_plane_verified and not obo_required:
             # `probe` records HOW the probe ended, because the count alone cannot
             # tell an empty tool plane apart from a probe that never got a usable
             # answer: _count_served_tools returns -1 for a non-200 or a transport
@@ -7278,6 +7634,24 @@ def deploy_gateway(
             # Servable plane confirmed — qualified_tools should reflect it.
             logger.warning("Gateway %s confirmed serving %d tools over MCP", gateway["gatewayId"], served)
 
+        if served_only_targets and expected_tool_count > 0 and not served_only_plane_verified and not obo_required:
+            if not tool_plane_verified:
+                raise RuntimeError(
+                    f"Gateway {gateway['gatewayId']} has served-only targets but its complete "
+                    "served action list could not be verified. Refusing to build Cedar "
+                    "from only the inline subset."
+                )
+            served_tools = _qualified_tools_from_served(gateway_url, client_info)
+            if len(served_tools) != served:
+                raise RuntimeError(
+                    f"Gateway {gateway['gatewayId']} reported {served} served tools but "
+                    f"only {len(served_tools)} qualified actions could be read. Refusing "
+                    "to build a partial Cedar permit."
+                )
+            qualified_tools = served_tools
+            expected_tool_count = served
+            served_only_plane_verified = True
+
         result = {
             "success": True,
             "gateway_url": gateway_url,
@@ -7290,6 +7664,10 @@ def deploy_gateway(
             "gateway_role_name": gw_role_confirmed,
             "gateway_role_created_by_deployment": gw_role_created,
             "client_info": client_info,
+            # Durable authorization contract.  Invocation and generated code read
+            # this exact marker; neither may infer OBO from a mutable UI request.
+            "obo_required": obo_required,
+            "delegated_identity_live_gate": ("first_authenticated_user_tool_call" if obo_required else None),
             "lambda_function_name": lambda_function_name,
             "custom_tool_lambdas": custom_tool_lambdas,
             "custom_tool_roles": custom_tool_roles,

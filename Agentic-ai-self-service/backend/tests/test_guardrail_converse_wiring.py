@@ -1,10 +1,8 @@
 """Regression: guardrailConfig must reach boto3 ``converse()`` templates as a
 VALID single-brace dict splat — never literal ``{{`` double braces.
 
-Bug (brace doubling): the converse host generators
-(``_generate_langchain_web_search`` and ``_generate_default_agent``) are
-f-strings, so their ``{{``/``}}`` already
-collapse to single braces in the RETURNED code. ``_inject_guardrails`` then
+Bug (brace doubling): the boto3 converse host generator
+(``_generate_default_agent``) is an f-string, so its ``{{``/``}}`` already collapses to single braces in the RETURNED code. ``_inject_guardrails`` then
 splices ``guardrailConfig`` via a plain ``str.replace`` — NOT ``.format`` — so a
 double-braced replacement string lands LITERAL ``{{...}}`` in the deployed file.
 Python parses ``{{...}}`` as a *set literal containing a dict*, which raises
@@ -26,8 +24,6 @@ from __future__ import annotations
 import ast
 import sys
 
-import pytest
-
 sys.path.insert(0, "src")
 
 from app.models.deployment_models import RuntimeConfig  # noqa: E402
@@ -43,9 +39,6 @@ _VALID_SPLAT = (
     '"guardrailVersion": GUARDRAIL_VERSION}} if GUARDRAIL_ID else {})'
 )
 
-# Converse-based templates routed through generate_agent_code().
-_CONVERSE_TEMPLATES = ["web-search-agent"]
-
 
 def _cfg() -> RuntimeConfig:
     return RuntimeConfig.model_validate(
@@ -60,47 +53,16 @@ def _cfg() -> RuntimeConfig:
     )
 
 
-@pytest.mark.parametrize("template_id", _CONVERSE_TEMPLATES)
-def test_converse_template_emits_valid_single_brace_splat(template_id):
-    """A guardrail render of a converse template must compile, must NOT contain
-    literal ``{{`` (the set-of-dict crash), and must carry the valid splat."""
-    code = generate_agent_code(_cfg(), tools=["guardrails"], template_id=template_id)
+def test_managed_web_search_uses_strands_guardrail_hooks_not_converse_splats():
+    """The gallery search template migrated from hand-rolled Converse to Gateway."""
+    code = generate_agent_code(_cfg(), tools=["guardrails"], template_id="web-search-agent")
 
-    # (a) No literal OPENING double braces (the set-of-dict crash signature),
-    # and the code compiles. NOTE: ``}}`` legitimately appears in the valid
-    # splat (two dicts closing back-to-back), so we only forbid ``{{``.
-    assert "{{" not in code, (
-        f"{template_id}: literal '{{{{' double braces landed in deployed code — "
-        "Python would parse this as a set of an unhashable dict and crash"
-    )
-    ast.parse(code)
-    compile(code, f"<{template_id}>", "exec")
-
-    # (b) The valid single-brace guardrailConfig splat is present, exactly once.
-    assert _VALID_SPLAT in code, f"{template_id}: valid guardrailConfig splat missing"
-    assert code.count("guardrailConfig") == 1
-
-
-@pytest.mark.parametrize("template_id", _CONVERSE_TEMPLATES)
-def test_converse_template_without_guardrail_is_unchanged(template_id):
-    """A no-guardrail render must carry no guardrail wiring at all."""
-    code = generate_agent_code(_cfg(), template_id=template_id)
+    assert "MCPClient" in code
+    assert 'hooks=globals().get("_GUARDRAIL_HOOKS", [])' in code
     assert "guardrailConfig" not in code
-    assert "GUARDRAIL_ID" not in code
     assert "{{" not in code
     ast.parse(code)
-
-
-@pytest.mark.parametrize("template_id", _CONVERSE_TEMPLATES)
-def test_converse_injection_is_idempotent(template_id):
-    """Re-running _inject_guardrails must not double-inject the env block or the
-    guardrailConfig splat."""
-    once = generate_agent_code(_cfg(), tools=["guardrails"], template_id=template_id)
-    twice = _inject_guardrails(once)
-    assert twice.count("guardrailConfig") == 1
-    assert twice.count('GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID"') == 1
-    assert "{{" not in twice
-    ast.parse(twice)
+    compile(code, "<web-search-agent>", "exec")
 
 
 def test_no_tool_converse_template_also_wires_guardrail():

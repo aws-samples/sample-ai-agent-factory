@@ -23,10 +23,12 @@ interface AppHeaderProps {
   onOpenRegistry: () => void;
   onPreviewAsEndUser: () => void;
   onOpenHitlInbox: () => void;
+  onOpenAudit: () => void;
   canDeploy: boolean;
   canOpenRegistry: boolean;
   showAdminControls: boolean;
   canOpenHitlInbox: boolean;
+  canOpenAudit: boolean;
 }
 
 export function AppHeader({
@@ -41,10 +43,12 @@ export function AppHeader({
   onOpenRegistry,
   onPreviewAsEndUser,
   onOpenHitlInbox,
+  onOpenAudit,
   canDeploy,
   canOpenRegistry,
   showAdminControls,
   canOpenHitlInbox,
+  canOpenAudit,
 }: AppHeaderProps) {
   const [focusedAuthoringMode, setFocusedAuthoringMode] = useState(authoringMode);
 
@@ -233,6 +237,21 @@ export function AppHeader({
               <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
             </svg>
             View as user
+          </button>
+        )}
+
+        {canOpenAudit && (
+          <button
+            onClick={onOpenAudit}
+            className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+            style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+            title="Inspect append-only control-plane audit evidence"
+            aria-label="Open audit dashboard"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 4h16v16H4z" /><path d="M8 9h8M8 13h8M8 17h5" />
+            </svg>
+            Audit
           </button>
         )}
 

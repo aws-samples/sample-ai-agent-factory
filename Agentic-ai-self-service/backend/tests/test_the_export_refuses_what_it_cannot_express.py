@@ -112,7 +112,7 @@ _MEASURED_AS_DROPPED = {
     # graph is refused here.
     "identity_config": {
         "clientId": "3fj9s8d7f6g5h4j3k2l1",
-        "clientSecretRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:idp-AbCdEf",
+        "clientSecretRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/idp-AbCdEf",  # pragma: allowlist secret
         "scopes": ["agent/invoke"],
     },
     "connectors": [{"connector_id": "slack", "name": "slack", "authMethod": "api_key"}],

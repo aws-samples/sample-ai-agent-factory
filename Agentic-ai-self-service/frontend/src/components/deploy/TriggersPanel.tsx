@@ -79,6 +79,8 @@ function DetailRow({
 export function TriggersPanel({ runtimeName, refreshKey }: TriggersPanelProps) {
   const [triggers, setTriggers] = useState<TriggerSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasProductionVersion, setHasProductionVersion] =
+    useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -99,6 +101,7 @@ export function TriggersPanel({ runtimeName, refreshKey }: TriggersPanelProps) {
     const generation = ++reloadGeneration.current;
     if (!runtimeName) {
       setTriggers([]);
+      setHasProductionVersion(null);
       setLoading(false);
       return;
     }
@@ -106,16 +109,26 @@ export function TriggersPanel({ runtimeName, refreshKey }: TriggersPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const loaded = await getApiClient().listTriggers(runtimeName);
+      const api = getApiClient();
+      const slots = await api.getSlots(runtimeName);
+      if (reloadGeneration.current !== generation) return;
+      const productionReady = Boolean(slots.production_version_id);
+      setHasProductionVersion(productionReady);
+      if (!productionReady) {
+        setTriggers([]);
+        return;
+      }
+      const loaded = await api.listTriggers(runtimeName);
       if (reloadGeneration.current === generation) {
         setTriggers(loaded);
       }
     } catch (e) {
       if (reloadGeneration.current !== generation) return;
-      // A not-yet-deployed runtime returns 403/404. A 401 is deliberately
+      // A missing slot/runtime is not trigger-ready. A 401 is deliberately
       // surfaced because it means the signed-in session is no longer usable.
       if (isNotReadyError(e)) {
         setTriggers([]);
+        setHasProductionVersion(false);
       } else {
         setError(getErrorMessage(e));
       }
@@ -244,6 +257,40 @@ export function TriggersPanel({ runtimeName, refreshKey }: TriggersPanelProps) {
     return (
       <div className="p-5 text-sm text-gray-500">
         Deploy this agent at least once to manage triggers.
+      </div>
+    );
+  }
+
+  if (hasProductionVersion !== true) {
+    return (
+      <div className="p-5 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h4 className="text-sm font-semibold text-gray-800">Triggers</h4>
+            <p className="text-xs text-gray-500">
+              Triggers target the production slot and never a staging version.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void reload()}
+            disabled={loading}
+            className="shrink-0 text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loading ? 'Checking…' : 'Refresh'}
+          </button>
+        </div>
+        {error ? (
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        ) : (
+          <div role="status" className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+            {loading
+              ? 'Checking the production slot…'
+              : 'Promote a succeeded version to production in the Versions tab before managing triggers.'}
+          </div>
+        )}
       </div>
     );
   }

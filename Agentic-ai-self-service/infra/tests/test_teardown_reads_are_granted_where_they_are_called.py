@@ -31,6 +31,7 @@ no resource-level scoping (ListSecrets), and nowhere it is not used.
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import pathlib
@@ -308,6 +309,96 @@ def test_no_other_backend_lambda_holds_the_grant(graph, template_json, entries, 
         if rel not in needed and _allows(statements_for_role(template_json, role), action)
     ]
     assert not over, f"granted {action} but never call {SEEDS[action]}(): {over}"
+
+
+def _trigger_table(template_json: dict) -> str:
+    found = [
+        logical_id
+        for logical_id, resource in template_json["Resources"].items()
+        if resource["Type"] == "AWS::DynamoDB::Table" and "-triggers" in str(resource["Properties"].get("TableName"))
+    ]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def _assert_status_update_trigger_cleanup_binding(template_json: dict, entries: dict[str, str]) -> None:
+    trigger_table = _trigger_table(template_json)
+    status_module = "step_handlers/status_update_step.py"
+    role = entries[status_module]
+    status_lambdas = [
+        resource
+        for resource in template_json["Resources"].values()
+        if resource["Type"] == "AWS::Lambda::Function"
+        and resource["Properties"].get("Handler") == "src/app/step_handlers/status_update_step.handler"
+    ]
+    assert len(status_lambdas) == 1, status_lambdas
+    environment = status_lambdas[0]["Properties"].get("Environment", {}).get("Variables", {})
+    assert environment.get("TRIGGERS_TABLE_NAME") == {"Ref": trigger_table}
+    unrelated = [
+        resource["Properties"].get("Handler")
+        for resource in template_json["Resources"].values()
+        if resource["Type"] == "AWS::Lambda::Function"
+        and str(resource["Properties"].get("Handler") or "").startswith("src/app/step_handlers/")
+        and resource not in status_lambdas
+        and "TRIGGERS_TABLE_NAME" in resource["Properties"].get("Environment", {}).get("Variables", {})
+    ]
+    assert unrelated == []
+
+    matching = []
+    for _source, statement in statements_for_role(template_json, role):
+        actions = statement.get("Action")
+        actions = [actions] if isinstance(actions, str) else (actions or [])
+        resources = statement.get("Resource")
+        resources = [resources] if not isinstance(resources, list) else resources
+        if "dynamodb:Query" in actions and {"Fn::GetAtt": [trigger_table, "Arn"]} in resources:
+            matching.append(statement)
+    assert len(matching) == 1, matching
+    assert matching[0]["Action"] == "dynamodb:Query" or matching[0]["Action"] == ["dynamodb:Query"]
+
+
+def test_status_update_can_query_the_real_trigger_partition(template_json, entries):
+    _assert_status_update_trigger_cleanup_binding(template_json, entries)
+
+
+def test_wrong_trigger_table_binding_breaks_the_cleanup_contract(template_json, entries):
+    mutant = copy.deepcopy(template_json)
+    trigger_table = _trigger_table(mutant)
+    other_table = next(
+        logical_id
+        for logical_id, resource in mutant["Resources"].items()
+        if resource["Type"] == "AWS::DynamoDB::Table" and logical_id != trigger_table
+    )
+    status_lambda = next(
+        resource
+        for resource in mutant["Resources"].values()
+        if resource["Type"] == "AWS::Lambda::Function"
+        and resource["Properties"].get("Handler") == "src/app/step_handlers/status_update_step.handler"
+    )
+    status_lambda["Properties"]["Environment"]["Variables"]["TRIGGERS_TABLE_NAME"] = {"Ref": other_table}
+    with pytest.raises(AssertionError):
+        _assert_status_update_trigger_cleanup_binding(mutant, entries)
+
+
+def test_removing_trigger_query_breaks_the_cleanup_contract(template_json, entries):
+    mutant = copy.deepcopy(template_json)
+    trigger_table = _trigger_table(mutant)
+    role = entries["step_handlers/status_update_step.py"]
+    removed = 0
+    for _source, statement in statements_for_role(mutant, role):
+        resources = statement.get("Resource")
+        resources = [resources] if not isinstance(resources, list) else resources
+        if {"Fn::GetAtt": [trigger_table, "Arn"]} not in resources:
+            continue
+        actions = statement.get("Action")
+        if actions == "dynamodb:Query":
+            statement["Action"] = []
+            removed += 1
+        elif isinstance(actions, list) and "dynamodb:Query" in actions:
+            actions.remove("dynamodb:Query")
+            removed += 1
+    assert removed == 1
+    with pytest.raises(AssertionError):
+        _assert_status_update_trigger_cleanup_binding(mutant, entries)
 
 
 @pytest.mark.parametrize("action", ["cognito-idp:DescribeResourceServer", "cognito-idp:ListUserPoolClients"])

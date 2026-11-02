@@ -55,8 +55,8 @@
     "typescript": "5.9.3",
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0",
-    "vite": "7.3.6",
-    "vitest": "4.1.11"
+    "vite": "7.3.7",
+    "vitest": "4.1.12"
   },
   "engines": {
     "node": ">=22.12"

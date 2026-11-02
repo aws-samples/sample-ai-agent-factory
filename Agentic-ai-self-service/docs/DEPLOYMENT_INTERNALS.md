@@ -57,8 +57,9 @@ When you run `./scripts/deploy.sh`, this is the sequence of operations:
    aws sts get-caller-identity — verifies configured credentials are valid
 
 3. Install CDK dependencies
-   pip install -r infra/requirements.txt (aws-cdk-lib, constructs, cdk-nag)
-   npm install in infra/ (for npx cdk)
+   pip install -r infra/requirements.txt (aws-cdk-lib, constructs, cdk-nag — exact pins)
+   npm ci --ignore-scripts in infra/ (installs exactly the CDK CLI pinned by infra/package-lock.json;
+   every cdk invocation below is infra/node_modules/.bin/cdk, never a floating `npx cdk`)
 
 4. Install backend dependencies
    pip install backend/ (FastAPI, Pydantic, boto3, Mangum)
@@ -75,8 +76,12 @@ When you run `./scripts/deploy.sh`, this is the sequence of operations:
    Creates backend/agentcore-deps/mcp-lean.zip (standalone FastMCP, no Strands/model stack)
 
 7. Bootstrap CDK (if first time in this region)
-   npx cdk bootstrap aws://{account}/{region}
+   infra/node_modules/.bin/cdk bootstrap aws://{account}/{region}
    Creates the CDKToolkit stack with S3 bucket for CDK assets
+   The region must be one of the seven selected release Regions: deploy.sh refuses any
+   other before touching AWS, and infra/app.py refuses it again at synth (so a direct
+   `cdk synth`/`cdk deploy` cannot bypass the script), reading the same
+   release/agentcore-regions.json.
 
 8. Run cdk deploy
    Synthesizes CloudFormation template (CDK-NAG runs here — fails on violations)
@@ -324,19 +329,21 @@ DELETE /api/runtime/{runtime_id}
 
 ## Dynamic Gateway Tool-to-Lambda Pipeline
 
-This is the core innovation of the platform. When a user creates a custom deployment and selects tools (DuckDuckGo Search, Wikipedia, Weather, Web Page Fetcher), those tools are **not embedded** as Python functions inside the agent code. Instead:
+This pipeline keeps executable tools outside the agent runtime. When a user selects Amazon Web Search, Wikipedia, Weather, Web Page Fetcher, or customer-support tools, the agent discovers them through its Gateway. Lambda-backed tools are not embedded in the agent; managed Web Search is an AWS connector target pinned to version `1.2.0`:
 
 ```
 User selects tools in UI
     |
     v
-Backend selects the matching Lambda family:
-  "AgentCoreDynamicTools" for web + canonical order tools, or
-  "AgentCoreCustomerSupportTools" for the legacy assistant contract
+Backend selects target families:
+  "AmazonWebSearch" for the managed Web Search connector,
+  "AgentCoreDynamicTools" for Wikipedia/weather/fetch + canonical order tools,
+  or "AgentCoreCustomerSupportTools" for the legacy assistant contract
     |
     v
-Backend creates a Gateway target with only the SELECTED tool schemas
-registered as inlinePayload (so the agent only sees what was chosen)
+Backend creates each Gateway target with only its selected contract:
+  connectorId=web-search, version=1.2.0 for managed search; inlinePayload
+  schemas for Lambda targets
     |
     v
 Backend creates Cognito OAuth2 (user pool + app client + resource server)
@@ -349,7 +356,7 @@ Agent code connects to Gateway via MCP protocol (with Cognito token)
 Agent discovers available tools from Gateway at runtime via tools/list
     |
     v
-Tool calls route:  Agent -> Bedrock Converse API (tool_use) -> MCP Gateway -> Lambda -> API
+Tool calls route: Agent -> model tool_use -> MCP Gateway -> managed AWS connector or Lambda target
 ```
 
 ### Why This Matters
@@ -363,7 +370,8 @@ Tool calls route:  Agent -> Bedrock Converse API (tool_use) -> MCP Gateway -> La
 
 | Canvas tool ID | Gateway-advertised name | Lambda/target family | Implementation |
 |----------------|-------------------------|----------------------|----------------|
-| `duckduckgo_search` | `duckduckgo_search` | DynamicTools | DuckDuckGo Instant Answer API |
+| `web_search` | `WebSearch` | AmazonWebSearch connector | AgentCore managed Web Search `web-search` v`1.2.0`; structured title, URL, text, date, and source citations |
+| `duckduckgo_search` (saved-canvas alias only) | `WebSearch` | AmazonWebSearch connector | Migrated before target construction; never routed to scraper code |
 | `wikipedia_search` | `wikipedia_search` | DynamicTools | Wikipedia REST API |
 | `weather_api` | `get_weather` | DynamicTools | Open-Meteo Geocoding + Weather API |
 | `web_page_fetcher` | `fetch_webpage` | DynamicTools | stdlib `urllib.request` |
@@ -377,24 +385,40 @@ Tool calls route:  Agent -> Bedrock Converse API (tool_use) -> MCP Gateway -> La
 | `get_return_policy` | `get_return_policy` | CustomerSupportTools | Legacy assistant return-policy lookup |
 | `knowledge_base` | `knowledge_base_query` | Per-deployment KB target | Bedrock Knowledge Base RetrieveAndGenerate |
 
-The search/weather/customer tools use **zero external dependencies** -- only Python standard library. No Lambda layers, no custom runtimes, instant cold starts. The Knowledge Base tool uses boto3 (bundled in the Lambda runtime).
+The Wikipedia/weather/fetch/customer Lambda tools use only Python standard library (plus runtime-provided boto3 where needed). Managed Web Search queries stay within AWS and results must retain their source links. The Knowledge Base tool uses boto3 from the Lambda runtime.
 
 ### How Tool Schemas Work
 
-Each tool has an MCP-compliant schema registered in `GATEWAY_TOOL_SCHEMAS`:
+Managed search is configured as a connector target rather than appearing in `GATEWAY_TOOL_SCHEMAS`:
+
+```python
+{
+    "name": "AmazonWebSearch",
+    "targetConfiguration": {
+        "mcp": {
+            "connector": {
+                "source": {"connectorId": "web-search", "version": "1.2.0"},
+                "configurations": [{"name": "WebSearch", "parameterValues": {}}],
+            }
+        }
+    },
+}
+```
+
+Lambda-backed tools retain MCP-compliant inline schemas, for example:
 
 ```python
 GATEWAY_TOOL_SCHEMAS = {
-    "duckduckgo_search": {
-        "name": "duckduckgo_search",
-        "description": "Search the web using DuckDuckGo...",
+    "wikipedia_search": {
+        "name": "wikipedia_search",
+        "description": "Search Wikipedia and return an article summary.",
         "inputSchema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "The search query"}},
+            "properties": {"query": {"type": "string"}},
             "required": ["query"],
         },
     },
-    # ... wikipedia_search, weather_api, web_page_fetcher
+    # ... weather_api and web_page_fetcher
 }
 ```
 
@@ -514,7 +538,7 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 |------|---------|
 | `template.yaml` | CloudFormation template with all AWS resources |
 | `agent-code/agent.py` | Generated agent code |
-| `cfn-provider.zip` | Custom Resource Lambda backing all four custom resources (code packaging, runtime log group governance, OAuth2 credential provider, Cedar policy) |
+| `cfn-provider.zip` | Provider code for five custom resource types: code packaging, runtime log-group governance, OAuth2 credential provider, Cedar policy, and pinned managed Web Search target. Most use the shared provider function; managed search uses a dedicated function for rollback-safe deletion. |
 | `tool-lambdas.zip` | Gateway tool Lambda implementations (if gateway tools are used) |
 | `custom-tools.zip` | AI-generated/custom tool Lambda implementations (if custom tools are used) |
 | `agent-code/mcp_server.py` | Generated MCP server code (MCP Server pattern only) |
@@ -522,6 +546,10 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 | `deploy.sh` | One-command deploy script (`./deploy.sh <stack-name> <region> <s3-bucket>`) |
 | `teardown.sh` | One-command teardown script (`./teardown.sh <stack-name> <region>`) |
 | `README.md` | Setup instructions and prerequisites |
+| `artifact-manifest.json` | Canonical path/type/mode/size/SHA-256 inventory for every payload member |
+| `SHA256SUMS` | Sorted payload and manifest checksums; the file intentionally does not hash itself |
+| `verify-artifact.py` | Standard-library archive and extracted-directory verifier |
+| `.github/workflows/`, `buildspec.yml`, `ci/` | Integrity-first CI examples; deployment remains off until explicitly enabled |
 
 ### How It Works
 
@@ -546,6 +574,28 @@ table. The generated README contains a minimal HCL wrapper. This matters even if
 small runtime-only export currently fits inline: adding a gateway, MCP server,
 knowledge base, evaluation, or tools can take the same Terraform module over the
 limit.
+
+### Download Integrity and Recipient Workflows
+
+Both export routes are authenticated customer paths. A release run must call the deployed API through CloudFront or use the real deploy-panel buttons. Calling `CfnTemplateGenerator` or `build_python_project` directly proves implementation behavior only and cannot satisfy live downloadable-asset evidence. The API response includes `archive_sha256` and `archive_bytes`, which bind the ZIP before extraction.
+
+Every CloudFormation and Python ZIP contains canonical `artifact-manifest.json`, sorted `SHA256SUMS`, and a standard-library `verify-artifact.py`. The manifest inventories each payload member's relative path, file type, mode, byte count, and SHA-256 digest. `SHA256SUMS` covers the manifest and payloads but not itself. The verifier rejects noncanonical JSON/checksum text, ordering or timestamp drift, duplicate/absolute/traversal/device paths, links and special files, unexpected or missing members, incorrect modes or sizes, and any digest mismatch. After comparing the authenticated response digest, run the verifier against the archive and again against the extracted root. Both verifiers (`verify-artifact.py` and the per-bundle `verify-integrity.py`) require Python isolated mode and exit non-zero without it, because a non-isolated interpreter resolves imports from the unverified artifact directory before the standard library; every generated entrypoint and CI example invokes them as `python3 -I`:
+
+```bash
+python3 -I verify-artifact.py --archive downloaded.zip --artifact-type cfn --extract verified-cfn
+cd verified-cfn/<artifact-root>
+python3 -I verify-artifact.py --directory . --artifact-type cfn
+```
+
+Use `--artifact-type python` for the standalone Python project returned by `POST /api/export-python`. That project contains generated source, `.env.example`, `requirements.txt`, `requirements.lock`, `verify-lock.py`, `install-locked.sh`, `check-installed.sh`, `run.sh`, `run-docker.sh`, an explicit Dockerfile, and inert GitHub Actions/CodeBuild examples. Recipient validation must happen in a clean workspace with no import or filesystem dependency on this repository.
+
+Python direct roots and the full accepted closure use exact versions. `install-locked.sh` refuses an existing environment, installs under the complete constraint set, runs `python -m pip check`, and invokes the installed-closure verifier. The verifier rejects missing roots, incompatible or unexpected distributions, and version drift. The lock does not contain distribution wheel hashes, so this is an exact-version and compatible-closure guarantee, not a wheel-byte guarantee. Customers needing distribution provenance must use a reviewed hash lock or an immutable package mirror.
+
+The image identity is explicit and immutable: `docker.io/library/python:3.13.13-slim@sha256:aa938a849bcb82dce8f49480f056ab82bf5c1c3ebc294f0430f37b6820e7f286`. Local execution defaults to `127.0.0.1`. `run-docker.sh` may bind inside the container as required, but publishes only `127.0.0.1:8080:8080` on the host. An all-interface host publish is outside this contract and requires a separately reviewed authentication and network-exposure design.
+
+Generated CI examples always verify integrity first. The Python examples install the exact lock, run compatibility and closure checks, compile all generated modules, smoke-start on loopback, and can build the immutable-base image without pushing it. The CloudFormation examples install cfn-lint 1.57.0 and Checkov 3.3.1, validate before mutation, and keep `ALLOW_DEPLOY=false` by default. Repository release CI additionally runs Terraform 1.14.6, ShellCheck 0.11.0, and actionlint 1.7.12 across the complete downloadable suite.
+
+The `delivery.downloadable_assets` release control requires offline positive/adversarial/removal-mutation evidence, an independent clean clone, exact-commit binding, authenticated live positive/adversarial calls, both artifact workflows in every selected Region, a real CloudFront UI download, update rollback, and direct-service `teardown_zero`. Live adversarial scenarios cover archive/manifest tampering, missing or incompatible Python dependencies, wrong account/Region parameters, and CI defaults becoming active. This claim is bounded to the exact commit, tool versions, Region profiles, and named scenarios. It does not guarantee future package-index bytes, future AWS behavior, or defect-free operation.
 
 ### Custom Resources in the Exported Stack
 
@@ -670,6 +720,12 @@ tags. This is the JSON-safe equivalent of a pluggable naming function:
   retain their 50-tag service limit, including unrelated tags already present when an
   update is reconciled.
 
+### Selected Production Region Envelope
+
+Production certification is Runtime-only and the candidate set is exactly `us-east-1`, `us-east-2`, `us-west-2`, `eu-central-1`, `eu-west-1`, `eu-west-2`, and `eu-west-3`. N. California (`us-west-1`) is excluded. N. Virginia, Ohio, Oregon, and Ireland use the full profile. Frankfurt and London omit managed Web Search but retain AWS Agent Registry federation and the built-in DynamoDB registry. Paris omits both managed Web Search and AWS Agent Registry federation but retains the built-in registry. Managed Harness and A2A are excluded from production. An export requesting a Region-unavailable feature must fail closed rather than silently remove it. A Region is "certified" only once a finalized evidence run names it; until then these are the selected certification candidates.
+
+The envelope is enforced, not advisory. One predicate (`region_capabilities.require_release_region`) is consulted at every admission point: the shared `DeployRequest` model (explicit `targetRegion`, every route and mode), the live deploy handler (the omitted-Region home fallback, before any row or AWS call), admin deploy-target registration (API 422 before any STS call, and again in the service), target resolution (so a legacy allowlist row or an out-of-envelope platform home Region cannot resolve), the deploy-panel options endpoint (never offers an inadmissible target), and the prepared state-machine payload (`unsupported_release_region`). `scripts/deploy.sh` and `infra/app.py` make the same decision for the platform stack itself from `release/agentcore-regions.json`; the frontend mirrors the predicate to avoid offering or submitting an inadmissible target, with the backend remaining the enforcement point. A test pins that every copy of the seven — backend, frontend, `deploy.sh`, the CDK matrix, and the CI `strict-synth` matrix — is literally the same set.
+
 ### Prerequisites for External Users
 
 - AWS CLI v2 configured with credentials
@@ -741,16 +797,20 @@ All Lambda functions include `PYTHONPATH=/var/task/src:/var/task:/var/task/lib` 
 
 ## Deployment Templates
 
-### Template 1: Web Search Agent (Beginner)
-- Agent: BedrockAgentCoreApp + boto3 Converse API with tool-calling loop
-- Tools: DuckDuckGo Search, Weather (Open-Meteo), Web Page Fetcher (embedded in agent code, no gateway)
-- Components: Runtime only (6 CFN resources)
+### Template 1: Managed Web Search Agent (Beginner)
+- Agent: BedrockAgentCoreApp + Strands Agent + MCP Gateway discovery
+- Tools: managed `WebSearch` connector v`1.2.0`, Weather (Open-Meteo), and Web Page Fetcher
+- Search contract: queries stay within AWS; outputs preserve source titles and links
+- Components: Runtime + Gateway + Cognito Identity + DynamicTools Lambda
 
 ### Template 2: Strands Agent + Gateway (Intermediate)
 - Agent: BedrockAgentCoreApp + Strands Agent + MCP Gateway tools
-- Tools: eight `DynamicTools` operations discovered through the MCP Gateway:
-  DuckDuckGo search, Wikipedia search, weather, webpage fetch, order lookup,
-  customer lookup, order listing, and refund processing
+- Tools: seven `DynamicTools` operations (all region-portable) discovered through the MCP Gateway:
+  Wikipedia lookup, weather, webpage fetch, order lookup, customer lookup,
+  order listing, and refund processing
+- Managed Web Search: intentionally not implied, so this generic template remains deployable
+  in reduced-profile Regions. Add `web_search` explicitly in a supported Region, or use
+  Template 1 when managed Web Search is required.
 - Auth: Cognito OAuth2 (client_credentials grant)
 - Components: Runtime + Gateway + Identity (16 CFN resources)
 
@@ -779,7 +839,8 @@ All Lambda functions include `PYTHONPATH=/var/task/src:/var/task:/var/task/lib` 
 
 ### Template 6: MCP Server Runtime (Intermediate)
 - Runtime: standalone `FastMCP` server, not a conversational agent
-- Tools: Weather (Open-Meteo), Web Search (DuckDuckGo), and SSRF-guarded URL Fetcher
+- Tools: Weather (Open-Meteo) and SSRF-guarded URL Fetcher
+- Full-web search: intentionally absent; use Template 1's managed Gateway connector, or supply custom MCP tool code
 - Components: MCP-protocol Runtime only; no model, Gateway, tool Lambda, or Cognito
 - Dependencies: the lean `mcp` AgentCore bundle rather than a Strands/model bundle
 - Test surface: product-owned MCP discovery and tool-call routes, not `/api/test-runtime`
@@ -817,7 +878,8 @@ Policy --> Runtime, Gateway
 .
 +-- backend/
 |   +-- pyproject.toml                    # Python deps and build config
-|   +-- requirements-lambda.txt           # Lambda-specific dependencies (installed to lib/)
+|   +-- requirements-lambda.in            # Direct Lambda dependency inputs
+|   +-- requirements-lambda.txt           # Generated x86_64/Python 3.12 hash lock (installed to lib/)
 |   +-- src/app/
 |   |   +-- main.py                       # FastAPI entry point (auto-selects storage backend)
 |   |   +-- lambda_handler.py             # Mangum wrapper for Workflow Lambda
@@ -956,7 +1018,7 @@ Policy --> Runtime, Gateway
 1. Open the CloudFront URL and click **"Custom"** to create a new deployment
 2. Configure the Runtime (name, model, system prompt)
 3. Connect a **Gateway** node to the Runtime
-4. Select tools: e.g., `duckduckgo_search` + `wikipedia_search`
+4. Select tools: e.g., `web_search` + `wikipedia_search`
 5. Click **Deploy**
 
 The backend will:
@@ -974,7 +1036,7 @@ The backend will:
 
 After deployment, use the test panel in the UI:
 - Ask "What is the weather in Chicago?" -- triggers `get_weather` via Gateway
-- Ask "Search for the latest news about AWS" -- triggers `duckduckgo_search` via Gateway
+- Ask "Search for current Amazon Bedrock AgentCore information and cite the sources" -- triggers `AmazonWebSearch___WebSearch` via Gateway
 - Ask "Tell me about Python programming" -- triggers `wikipedia_search` via Gateway
 
 ### Clean Up Deployed Agents

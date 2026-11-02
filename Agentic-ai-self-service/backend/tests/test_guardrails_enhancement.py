@@ -98,6 +98,21 @@ def _wiring_present(guardrails_step) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def test_pii_builder_canonicalizes_legacy_ssn_alias():
+    from app.step_handlers.guardrails_step import _build_pii_config
+
+    assert _build_pii_config(
+        [
+            {"type": "SSN", "action": "BLOCK"},
+            {"type": "US_SOCIAL_SECURITY_NUMBER", "action": "ANONYMIZE"},
+        ]
+    ) == {
+        "piiEntitiesConfig": [
+            {"type": "US_SOCIAL_SECURITY_NUMBER", "action": "BLOCK"},
+        ]
+    }
+
+
 def test_contextual_grounding_wired_into_create_params(monkeypatch):
     fake = FakeBedrock()
     gs = _load_handler(monkeypatch, fake)
@@ -109,11 +124,13 @@ def test_contextual_grounding_wired_into_create_params(monkeypatch):
         "guardrails_config": {
             "mode": "create_new",
             "name": "g1",
+            "baselineProfile": "production-v1",
             "contextualGrounding": {"groundingThreshold": 0.8, "relevanceThreshold": 0.6},
         },
     }
-    gs.handler(event, None)
+    result = gs.handler(event, None)
 
+    assert result["guardrails_result"]["baseline_profile"] == "production-v1"
     cg = fake.create_params.get("contextualGroundingPolicyConfig")
     assert cg == {
         "filtersConfig": [

@@ -65,6 +65,11 @@ _IAM_ROLE_ARN_RE = re.compile(
 )
 _S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _IP_ADDRESS_BUCKET_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_KMS_KEY_ARN_RE = re.compile(
+    r"^arn:(?P<partition>aws(?:-[a-z0-9-]+)?):kms:"
+    r"(?P<region>[a-z0-9-]+):(?P<account_id>\d{12}):key/(?P<key_id>[A-Za-z0-9-]{1,128})$"
+)
+_REQUIRED_EVALUATION_KEY_ACTIONS = frozenset({"kms:GenerateDataKey", "kms:Decrypt"})
 
 
 def _region() -> str:
@@ -107,16 +112,18 @@ def add_region(
     *,
     account_id: str | None = None,
     artifact_bucket: str | None = None,
+    evaluation_kms_key_arn: str | None = None,
 ) -> None:
-    """Persist a region allowlist row and its validated same-account bucket.
+    """Persist a region target and its validated artifacts/evaluation authority.
 
-    ``account_id`` and ``artifact_bucket`` are optional only for compatibility
-    with legacy callers that manage the bare allowlist. Such rows remain
-    visible to admins but are intentionally not deployable until they are
-    re-registered through the validation endpoint.
+    The optional fields only preserve readability of legacy rows. Admin registration
+    always supplies all three; live deployment resolution rejects an incomplete row.
     """
+    _require_release_region(region, surface="a deployment target")
     if bool(account_id) != bool(artifact_bucket):
         raise TargetError("A region target must store both account_id and artifact_bucket")
+    if evaluation_kms_key_arn and not account_id:
+        raise TargetError("A region target evaluation key requires an account_id")
     item = {
         "org_id": "default",
         "sk": _REGION_PREFIX + region,
@@ -129,6 +136,8 @@ def add_region(
             region,
             artifact_bucket=artifact_bucket,
         )
+    if evaluation_kms_key_arn:
+        item["evaluation_kms_key_arn"] = evaluation_kms_key_arn
     _settings_table().put_item(Item=item)
 
 
@@ -273,6 +282,7 @@ def add_account(
     mcp_runtime_role_arn: str | None = None,
     harness_role_arn: str | None = None,
     artifact_bucket: str | None = None,
+    evaluation_kms_key_arn: str | None = None,
 ) -> None:
     role_arn = target_deployment_role_arn(account_id, role_arn)
     runtime_role_arn = target_execution_role_arn(
@@ -305,6 +315,7 @@ def add_account(
             "mcp_runtime_role_arn": mcp_runtime_role_arn,
             "harness_role_arn": harness_role_arn,
             "artifact_bucket": artifact_bucket,
+            "evaluation_kms_key_arn": evaluation_kms_key_arn,
             "region": region,
         }
     )
@@ -334,6 +345,16 @@ def list_accounts() -> list[dict]:
 
 class TargetError(ValueError):
     """Raised when a requested deploy target is invalid / disabled / unreachable."""
+
+
+def _require_release_region(region: str, *, surface: str) -> str:
+    """The shared release-Region predicate, surfaced as this module's TargetError."""
+    from app.services.region_capabilities import UnsupportedReleaseRegionError, require_release_region
+
+    try:
+        return require_release_region(region, surface=surface)
+    except UnsupportedReleaseRegionError as exc:
+        raise TargetError(str(exc)) from exc
 
 
 def _role_name_from_arn(role_arn: str) -> str:
@@ -439,6 +460,134 @@ def _normalise_bucket_region(location: str | None) -> str:
     return str(location)
 
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _statement_allows(statement: dict, action: str) -> bool:
+    actions = {str(value) for value in _as_list(statement.get("Action"))}
+    return action in actions or "kms:*" in actions or "*" in actions
+
+
+def _condition_contains(statement: dict, operator: str, key: str, value: str) -> bool:
+    condition = statement.get("Condition")
+    if not isinstance(condition, dict):
+        return False
+    values = condition.get(operator)
+    if not isinstance(values, dict):
+        return False
+    return value in {str(item) for item in _as_list(values.get(key))}
+
+
+def _principal_contains(statement: dict, kind: str, value: str) -> bool:
+    principal = statement.get("Principal")
+    if not isinstance(principal, dict):
+        return False
+    return value in {str(item) for item in _as_list(principal.get(kind))}
+
+
+def _validate_evaluation_key_policy(
+    policy: dict,
+    *,
+    key_arn: str,
+    account_id: str,
+    region: str,
+    deployment_role_arn: str,
+) -> None:
+    statements = policy.get("Statement") if isinstance(policy, dict) else None
+    statements = _as_list(statements)
+    if not statements or not all(isinstance(statement, dict) for statement in statements):
+        raise TargetError(f"Evaluation KMS key {key_arn} has no valid key-policy statements")
+
+    match = _KMS_KEY_ARN_RE.fullmatch(key_arn)
+    assert match is not None
+    batch_arn = f"arn:{match.group('partition')}:bedrock-agentcore:{region}:{account_id}:batch-evaluate/*"
+    service_allowed = any(
+        statement.get("Effect") == "Allow"
+        and _principal_contains(statement, "Service", "bedrock-agentcore.amazonaws.com")
+        and all(_statement_allows(statement, action) for action in _REQUIRED_EVALUATION_KEY_ACTIONS)
+        and _condition_contains(statement, "StringEquals", "aws:SourceAccount", account_id)
+        and _condition_contains(statement, "ArnLike", "aws:SourceArn", batch_arn)
+        for statement in statements
+    )
+    if not service_allowed:
+        raise TargetError(
+            f"Evaluation KMS key {key_arn} must allow bedrock-agentcore.amazonaws.com "
+            "kms:GenerateDataKey and kms:Decrypt, restricted to the target account and "
+            "target-Region batch-evaluate/* source ARN"
+        )
+
+    root_arn = f"arn:{match.group('partition')}:iam::{account_id}:root"
+    caller_allowed = any(
+        statement.get("Effect") == "Allow"
+        and (
+            _principal_contains(statement, "AWS", deployment_role_arn)
+            or _principal_contains(statement, "AWS", root_arn)
+        )
+        and all(_statement_allows(statement, action) for action in _REQUIRED_EVALUATION_KEY_ACTIONS)
+        for statement in statements
+    )
+    if not caller_allowed:
+        raise TargetError(
+            f"Evaluation KMS key {key_arn} must delegate kms:GenerateDataKey and "
+            "kms:Decrypt to the target deployment role or target-account root"
+        )
+
+
+def validate_evaluation_kms_key(
+    session: boto3.Session,
+    *,
+    account_id: str,
+    region: str,
+    key_arn: str,
+    deployment_role_arn: str,
+) -> str:
+    """Validate one exact CMK using metadata and its policy, never key material."""
+
+    match = _KMS_KEY_ARN_RE.fullmatch(key_arn or "")
+    if match is None:
+        raise TargetError("The evaluation KMS key must be a full key ARN, not an alias")
+    if match.group("account_id") != account_id:
+        raise TargetError(
+            f"Evaluation KMS key belongs to account {match.group('account_id')}, not target account {account_id}"
+        )
+    if match.group("region") != region:
+        raise TargetError(f"Evaluation KMS key is in region {match.group('region')}, not target region {region}")
+    role_match = _IAM_ROLE_ARN_RE.fullmatch(deployment_role_arn or "")
+    if role_match is None or role_match.group("partition") != match.group("partition"):
+        raise TargetError("Evaluation KMS key and deployment role must belong to the same AWS partition")
+
+    kms_client = session.client("kms", region_name=region)
+    try:
+        metadata = kms_client.describe_key(KeyId=key_arn).get("KeyMetadata") or {}
+    except Exception as exc:  # noqa: BLE001
+        raise TargetError(f"Cannot describe evaluation KMS key {key_arn}") from exc
+    if metadata.get("Arn") != key_arn or metadata.get("AWSAccountId") != account_id:
+        raise TargetError("Evaluation KMS key metadata does not match its registered ARN/account")
+    if metadata.get("KeyManager") != "CUSTOMER":
+        raise TargetError("Evaluation KMS key must be customer managed")
+    if metadata.get("KeySpec") != "SYMMETRIC_DEFAULT" or metadata.get("KeyUsage") != "ENCRYPT_DECRYPT":
+        raise TargetError("Evaluation KMS key must be a symmetric ENCRYPT_DECRYPT key")
+    if metadata.get("KeyState") != "Enabled" or metadata.get("Enabled") is not True:
+        raise TargetError("Evaluation KMS key must be enabled")
+
+    try:
+        policy_text = kms_client.get_key_policy(KeyId=key_arn, PolicyName="default").get("Policy")
+        policy = json.loads(policy_text) if isinstance(policy_text, str) else policy_text
+    except Exception as exc:  # noqa: BLE001
+        raise TargetError(f"Cannot read the default policy for evaluation KMS key {key_arn}") from exc
+    _validate_evaluation_key_policy(
+        policy,
+        key_arn=key_arn,
+        account_id=account_id,
+        region=region,
+        deployment_role_arn=deployment_role_arn,
+    )
+    return key_arn
+
+
 def validate_artifact_bucket(
     session: boto3.Session,
     *,
@@ -502,16 +651,20 @@ def resolve_region(requested: str | None) -> str:
     """Return the region to deploy to, enforcing the allowlist when targeting.
 
     No requested region → home region (unchanged). A requested region is only
-    honored when targets are enabled AND it's on the admin allowlist.
+    honored when targets are enabled AND it's on the admin allowlist. Either way
+    the result must be a selected release Region: the admin allowlist is a
+    narrowing of the envelope, never a widening of it, so a row registered before
+    the envelope was enforced (or a platform stack stood up outside it) is refused
+    here rather than deployed to.
     """
     home = _region()
     if not requested or requested == home:
-        return home
+        return _require_release_region(home, surface="the platform home Region")
     if not targets_enabled():
         raise TargetError("Deployment targets are disabled; cannot target another region")
     if requested not in list_regions():
         raise TargetError(f"Region '{requested}' is not on the deployment allowlist")
-    return requested
+    return _require_release_region(requested, surface="this deployment target")
 
 
 def session_for_target(
@@ -626,6 +779,18 @@ def resolve_registered_account_target(
         region=resolved_region,
         artifact_bucket=target.get("artifact_bucket"),
     )
+    evaluation_kms_key_arn = str(target.get("evaluation_kms_key_arn") or "")
+    if not evaluation_kms_key_arn:
+        raise TargetError(
+            f"Account '{account_id}' has no validated production-evaluation KMS key; re-register the target"
+        )
+    evaluation_kms_key_arn = validate_evaluation_kms_key(
+        session,
+        account_id=account_id,
+        region=resolved_region,
+        key_arn=evaluation_kms_key_arn,
+        deployment_role_arn=deployment_role_arn,
+    )
     return {
         "account_id": account_id,
         "region": resolved_region,
@@ -634,6 +799,7 @@ def resolve_registered_account_target(
         "mcp_runtime_role_arn": mcp_runtime_role_arn,
         "harness_role_arn": harness_role_arn,
         "artifact_bucket": artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
     }
 
 
@@ -647,9 +813,13 @@ def resolve_registered_region_target(requested_region: str | None) -> dict:
     """
     resolved_region = resolve_region(requested_region)
     if resolved_region == _region():
+        evaluation_kms_key_arn = os.environ.get("EVALUATION_EVIDENCE_KMS_KEY_ARN", "").strip()
+        if not evaluation_kms_key_arn:
+            raise TargetError("The home Region has no configured production-evaluation KMS key")
         return {
             "region": resolved_region,
             "artifact_bucket": os.environ.get("ARTIFACTS_BUCKET_NAME", ""),
+            "evaluation_kms_key_arn": evaluation_kms_key_arn,
         }
 
     target = get_region_target(resolved_region)
@@ -688,8 +858,24 @@ def resolve_registered_region_target(requested_region: str | None) -> dict:
         artifact_bucket=artifact_bucket,
         same_account=True,
     )
+    evaluation_kms_key_arn = str(target.get("evaluation_kms_key_arn") or "")
+    if not evaluation_kms_key_arn:
+        raise TargetError(
+            f"Region '{resolved_region}' has no validated production-evaluation KMS key; re-register the target"
+        )
+    deployment_role_arn = os.environ.get("DEPLOYMENT_LAMBDA_ROLE_ARN", "").strip()
+    if not deployment_role_arn:
+        raise TargetError("The platform deployment role ARN is unavailable for evaluation-key validation")
+    evaluation_kms_key_arn = validate_evaluation_kms_key(
+        session,
+        account_id=account_id,
+        region=resolved_region,
+        key_arn=evaluation_kms_key_arn,
+        deployment_role_arn=deployment_role_arn,
+    )
     return {
         "account_id": account_id,
         "region": resolved_region,
         "artifact_bucket": artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
     }

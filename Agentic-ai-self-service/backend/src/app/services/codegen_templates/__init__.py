@@ -50,9 +50,10 @@ def load_impl(name: str) -> str:
 def dynamic_tools_lambda_source() -> str:
     """Full source of the dynamic-tools Gateway Lambda.
 
-    Composes the canonical web-tool implementations (search / wikipedia /
-    weather / SSRF-guarded webpage fetch), the customer-support demo data +
-    handlers, and the tool-name dispatcher into one self-contained module.
+    Composes the canonical Wikipedia/weather/SSRF-guarded webpage tools, the
+    customer-support demo data + handlers, and the tool-name dispatcher into
+    one self-contained module. Managed full-web search is a Gateway connector,
+    not Lambda code in this artifact.
     """
     return "\n\n".join(
         (

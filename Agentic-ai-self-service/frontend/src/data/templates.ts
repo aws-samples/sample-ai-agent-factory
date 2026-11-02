@@ -17,29 +17,29 @@ const rm = (modelId: string): string =>
 
 export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   // ──────────────────────────────────────────────────────────────────────────
-  // Template 1: Lightweight Web Search Agent (Beginner)
-  // Source: boto3 Converse API with DuckDuckGo via urllib
+  // Template 1: Managed Web Search Agent (Beginner)
+  // Source: Amazon Bedrock AgentCore Gateway Web Search Tool connector
   // ──────────────────────────────────────────────────────────────────────────
   {
     id: 'web-search-agent',
-    name: 'Lightweight Web Search Agent',
-    description: 'A web search agent using boto3 Converse API with DuckDuckGo search integration.',
-    longDescription: 'Deploy a lightweight agent that can search the web using DuckDuckGo via urllib. Uses the boto3 Converse API tool-calling loop for structured, reliable search workflows. Perfect for getting started with AgentCore.',
+    name: 'Managed Web Search Agent',
+    description: 'A Strands agent using Amazon Bedrock AgentCore managed Web Search with source citations.',
+    longDescription: 'Deploy a Strands agent that searches an AWS-managed web index through AgentCore Gateway. Queries stay inside AWS, no third-party API key or HTML parser is required, and results include source URLs and citations.',
     icon: '🔍',
     difficulty: 'beginner',
-    tags: ['boto3', 'web-search', 'duckduckgo'],
-    componentTypes: ['runtime'],
+    tags: ['strands', 'web-search', 'gateway', 'managed', 'citations'],
+    componentTypes: ['runtime', 'gateway', 'identity'],
     builtInTools: [
-      { name: 'DuckDuckGo Search', icon: '🦆', description: 'Web search via DuckDuckGo API - returns top 5 results' },
-      { name: 'Weather (Open-Meteo)', icon: '🌤️', description: 'Real-time weather data via Open-Meteo API - temperature, humidity, wind' },
-      { name: 'Web Page Fetcher', icon: '🌐', description: 'Fetches actual page content from URLs for up-to-date information' },
-      { name: 'Converse Tool Loop', icon: '🔧', description: 'Automatic tool routing via boto3 Converse API tool-calling loop' },
+      { name: 'Amazon Web Search', icon: '🔍', description: 'Managed Web Search Tool with titles, URLs, text excerpts, dates, and citations' },
+      { name: 'Weather (Open-Meteo)', icon: '🌤️', description: 'Real-time weather data via Open-Meteo API' },
+      { name: 'Web Page Fetcher', icon: '🌐', description: 'Fetches bounded content from a public URL' },
+      { name: 'MCP Gateway', icon: '🔌', description: 'Discovers and invokes managed tools through AgentCore Gateway' },
     ],
     nodes: [
       {
         idSuffix: 'runtime',
         type: 'runtime',
-        position: { x: 400, y: 250 },
+        position: { x: 300, y: 250 },
         label: 'Web Search Agent',
         configuration: {
           name: 'web_search_agent',
@@ -51,7 +51,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
             temperature: 0.7,
             topP: 0.9,
           },
-          systemPrompt: 'You are a helpful web search assistant. Use the DuckDuckGo search tool to find relevant URLs, then use the fetch_webpage tool to retrieve the actual page content for up-to-date information. Always fetch page content rather than relying on search snippets alone. Cite your sources.',
+          systemPrompt: 'You are a helpful web research assistant. Use the managed WebSearch tool for current information and retain source titles, URLs, and citations in every grounded answer. Use fetch_webpage only when the user needs bounded content from a specific public URL.',
           deploymentType: 'direct_code_deploy',
           pythonRuntime: 'PYTHON_3_13',
           protocol: 'HTTP',
@@ -62,8 +62,37 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
           multiAgentPattern: 'none',
         } as RuntimeConfiguration,
       },
+      {
+        idSuffix: 'gateway',
+        type: 'gateway',
+        position: { x: 600, y: 150 },
+        label: 'Web Search Gateway',
+        configuration: {
+          name: 'web_search_gateway',
+          enableSemanticSearch: true,
+        } as GatewayConfiguration,
+      },
+      {
+        idSuffix: 'identity',
+        type: 'identity',
+        position: { x: 600, y: 350 },
+        label: 'Cognito Identity',
+        configuration: {
+          name: 'web_search_auth',
+          credentialType: 'oauth2',
+          oauth2Config: {
+            provider: 'cognito',
+            clientId: '',
+            clientSecretRef: '',
+            scopes: [],
+          },
+        } as IdentityConfiguration,
+      },
     ],
-    edges: [],
+    edges: [
+      { sourceIdSuffix: 'runtime', targetIdSuffix: 'gateway', connectionType: 'data' },
+      { sourceIdSuffix: 'runtime', targetIdSuffix: 'identity', connectionType: 'tool' },
+    ],
   },
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -504,14 +533,13 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
     id: 'mcp-server-runtime',
     name: 'MCP Server Runtime',
     description: 'Host tools directly on the Runtime via MCP protocol — no Gateway or Lambda needed.',
-    longDescription: 'Deploy a standalone MCP server with weather, web search, and URL fetch tools served directly from AgentCore Runtime. No language-model loop, Gateway, Lambda, or external tool infrastructure is required.',
+    longDescription: 'Deploy a standalone MCP server with weather and URL fetch tools served directly from AgentCore Runtime. No language-model loop, Gateway, Lambda, or external tool infrastructure is required. For full web search, use the Managed Web Search Agent template, whose Gateway connector stays within AWS and preserves citations.',
     icon: '🛠️',
     difficulty: 'intermediate',
     tags: ['mcp', 'server', 'embedded-tools', 'no-gateway'],
     componentTypes: ['runtime'],
     builtInTools: [
-      { name: 'Weather Lookup', icon: '🌤️', description: 'Get current weather for any city via wttr.in' },
-      { name: 'Web Search', icon: '🔍', description: 'DuckDuckGo search for quick information retrieval' },
+      { name: 'Weather Lookup', icon: '🌤️', description: 'Get current weather for any city via Open-Meteo' },
       { name: 'URL Fetcher', icon: '🌐', description: 'Fetch and extract text from web pages' },
       { name: 'MCP Tool Discovery', icon: '🔧', description: 'Discover and invoke typed tools through the MCP protocol' },
     ],

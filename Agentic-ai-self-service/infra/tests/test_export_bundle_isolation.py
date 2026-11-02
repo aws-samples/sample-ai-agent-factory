@@ -330,3 +330,86 @@ def test_positive_control_an_access_point_or_website_is_caught(template, rtype):
     t["Resources"]["RogueAp"] = {"Type": rtype, "Properties": {}}
     t["Resources"][_artifacts_bucket_id(t)]["Properties"]["WebsiteConfiguration"] = {"IndexDocument": "i.html"}
     assert public_exposure_violations(t) == ["website configuration", f"{rtype} RogueAp"]
+
+
+def artifact_download_cors_violations(template: dict) -> list[str]:
+    """Return deviations from the one deliberately minimal browser-read rule."""
+    bucket = template["Resources"][_artifacts_bucket_id(template)]["Properties"]
+    expected = {
+        "CorsRules": [
+            {
+                "AllowedMethods": ["GET"],
+                "AllowedOrigins": ["*"],
+                "MaxAge": 300,
+            }
+        ]
+    }
+    return [] if bucket.get("CorsConfiguration") == expected else [repr(bucket.get("CorsConfiguration"))]
+
+
+def artifact_csp_violations(template: dict) -> list[str]:
+    """Require one HTTPS source for this bucket's regional hostname and no S3 wildcard."""
+    policies = _of_type(template, "AWS::CloudFront::ResponseHeadersPolicy")
+    assert len(policies) == 1, policies
+    csp = next(iter(policies.values()))["Properties"]["ResponseHeadersPolicyConfig"]["SecurityHeadersConfig"][
+        "ContentSecurityPolicy"
+    ]["ContentSecurityPolicy"]
+    if not (isinstance(csp, dict) and set(csp) == {"Fn::Join"}):
+        return [f"CSP is not construct-bound: {csp!r}"]
+    separator, parts = csp["Fn::Join"]
+    expected_host = {"Fn::GetAtt": [_artifacts_bucket_id(template), "RegionalDomainName"]}
+    exact_sources = sum(
+        1
+        for index, part in enumerate(parts)
+        if part == expected_host
+        and index > 0
+        and index + 1 < len(parts)
+        and isinstance(parts[index - 1], str)
+        and parts[index - 1].endswith("https://")
+        and isinstance(parts[index + 1], str)
+        and parts[index + 1].startswith("; ")
+    )
+    static_text = separator.join(part for part in parts if isinstance(part, str))
+    violations = [] if exact_sources == 1 else [f"exact artifact host sources={exact_sources}"]
+    for forbidden in ("https://*.s3", "https://s3.*", "https://*.amazonaws.com"):
+        if forbidden in static_text:
+            violations.append(f"broad S3 source {forbidden}")
+    return violations
+
+
+def test_artifact_download_cors_is_exactly_get_only_and_does_not_weaken_bucket_access(template):
+    # `*` selects browser origins, not S3 principals. The presigned URL is still
+    # the one-hour bearer authorization, and all four public-access blocks stay on.
+    assert artifact_download_cors_violations(template) == []
+    assert public_exposure_violations(template) == []
+
+
+def test_cloudfront_csp_names_only_the_construct_bound_artifact_bucket_host(template):
+    assert artifact_csp_violations(template) == []
+
+
+@pytest.mark.parametrize("mutation", ["remove", "write-method", "request-header", "exposed-header"])
+def test_positive_control_a_removed_or_widened_artifact_cors_rule_is_caught(template, mutation):
+    t = copy.deepcopy(template)
+    bucket = t["Resources"][_artifacts_bucket_id(t)]["Properties"]
+    if mutation == "remove":
+        bucket.pop("CorsConfiguration")
+    elif mutation == "write-method":
+        bucket["CorsConfiguration"]["CorsRules"][0]["AllowedMethods"].append("PUT")
+    elif mutation == "request-header":
+        bucket["CorsConfiguration"]["CorsRules"][0]["AllowedHeaders"] = ["*"]
+    else:
+        bucket["CorsConfiguration"]["CorsRules"][0]["ExposedHeaders"] = ["x-amz-meta-secret"]
+    assert artifact_download_cors_violations(t)
+
+
+def test_positive_control_removing_or_broadening_the_artifact_csp_source_is_caught(template):
+    t = copy.deepcopy(template)
+    policy = next(iter(_of_type(t, "AWS::CloudFront::ResponseHeadersPolicy").values()))
+    csp = policy["Properties"]["ResponseHeadersPolicyConfig"]["SecurityHeadersConfig"]["ContentSecurityPolicy"][
+        "ContentSecurityPolicy"
+    ]
+    expected_host = {"Fn::GetAtt": [_artifacts_bucket_id(t), "RegionalDomainName"]}
+    parts = csp["Fn::Join"][1]
+    parts[parts.index(expected_host)] = "*.s3.amazonaws.com"
+    assert artifact_csp_violations(t)

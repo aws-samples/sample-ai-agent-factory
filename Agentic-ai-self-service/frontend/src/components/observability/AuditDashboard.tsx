@@ -49,8 +49,20 @@ export function AuditDashboard() {
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
       )}
 
+      {data && (data.incomplete_attempts ?? 0) > 0 && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {data.incomplete_attempts} audited write attempt{data.incomplete_attempts === 1 ? '' : 's'} lack a correlated outcome. Investigate the application and audit logs before treating this period as complete.
+        </div>
+      )}
+
+      {data && (data.unverified_legacy_events ?? 0) > 0 && (
+        <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {data.unverified_legacy_events} pre-upgrade audit record{data.unverified_legacy_events === 1 ? '' : 's'} lack integrity digests and are not verified evidence. They remain visible until their legacy TTL expires.
+        </div>
+      )}
+
       {!data || data.total === 0 ? (
-        <div className="text-xs text-gray-500">No audit events yet — perform a deploy or config change.</div>
+        <div className="text-xs text-gray-500">No completed audit outcomes yet.</div>
       ) : (
         <>
           {/* Loom-study 5.2 — summary tiles + activity-over-time. */}

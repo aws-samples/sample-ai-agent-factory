@@ -37,6 +37,10 @@ _RUNTIME_ARN_RE = re.compile(
     r"(?P<region>[a-z0-9-]+):(?P<account_id>\d{12}):runtime/"
     r"(?P<runtime_id>[A-Za-z0-9_-]+)$"
 )
+_KMS_KEY_ARN_RE = re.compile(
+    r"^arn:aws(?:-[a-z0-9-]+)?:kms:(?P<region>[a-z0-9-]+):"
+    r"(?P<account_id>\d{12}):key/[A-Za-z0-9-]+$"
+)
 
 
 def _home_region() -> str:
@@ -118,6 +122,8 @@ class OwnedRuntimeTarget:
     account_id: str | None
     role_arn: str | None
     session: Any
+    production_gate_required: bool | None = None
+    evaluation_kms_key_arn: str | None = None
     runtime_arn: str = ""
     protocol: str = "HTTP"
     deployment: Any | None = None
@@ -161,6 +167,8 @@ def _target_from_deployment(
     expected_version_id: str | None = None,
     expected_runtime_id: str | None = None,
     expected_runtime_arn: str | None = None,
+    expected_evaluation_kms_key_arn: str | None = None,
+    production_gate_required: bool | None = None,
     required_protocol: str | None = None,
 ) -> OwnedRuntimeTarget:
     """Validate one deployment authority row and build its frozen target session."""
@@ -242,6 +250,16 @@ def _target_from_deployment(
     # home region.
     region = recorded_region or arn_region
 
+    evaluation_kms_key_arn = str(_field(deployment, "evaluation_kms_key_arn") or "").strip() or None
+    if expected_evaluation_kms_key_arn is not None and evaluation_kms_key_arn != expected_evaluation_kms_key_arn:
+        raise _unavailable("deployment/version evaluation key binding does not match")
+    if evaluation_kms_key_arn:
+        key_match = _KMS_KEY_ARN_RE.fullmatch(evaluation_kms_key_arn)
+        if key_match is None:
+            raise _unavailable("deployment evaluation key ARN is not canonical")
+        if key_match.group("region") != region or key_match.group("account_id") != arn_match.group("account_id"):
+            raise _unavailable("deployment evaluation key target binding does not match")
+
     target_event = {
         "target_account_id": account_id,
         "target_region": region,
@@ -260,6 +278,8 @@ def _target_from_deployment(
         account_id=target_event["target_account_id"],
         role_arn=target_event["target_role_arn"],
         session=session,
+        production_gate_required=production_gate_required,
+        evaluation_kms_key_arn=evaluation_kms_key_arn,
         runtime_arn=runtime_arn,
         protocol=protocol,
         deployment=deployment,
@@ -293,6 +313,55 @@ def resolve_owned_deployment_runtime_target(
         deployment,
         caller_sub,
         expected_deployment_id=deployment_id,
+        required_protocol=required_protocol,
+    )
+
+
+def resolve_owned_runtime_version_target(
+    runtime_name: str,
+    version_id: str,
+    caller_sub: str,
+    *,
+    required_protocol: str | None = None,
+) -> OwnedRuntimeTarget:
+    """Resolve one immutable version to its exact deployment and target session."""
+
+    try:
+        version = get_versions_store().get(runtime_name, version_id, consistent=True)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        assert_owner(version.owner_sub, caller_sub)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unavailable("version lookup failed", exc) from exc
+
+    if str(version.runtime_name or "") != runtime_name or str(version.version_id or "") != version_id:
+        raise _unavailable("version identity binding does not match")
+    if _status_value(version.status) != "succeeded":
+        raise HTTPException(status_code=409, detail="Only a succeeded version can be evaluated")
+    if not version.deployment_id or not version.runtime_id or not version.runtime_arn:
+        raise _unavailable("version has no complete deployment/runtime authority")
+    version_evaluation_key = str(version.evaluation_kms_key_arn or "").strip() or None
+    if bool(version.production_gate_required) and not version_evaluation_key:
+        raise _unavailable("production-gated version has no frozen evaluation key authority")
+
+    try:
+        deployment = get_deployment_store().get(version.deployment_id, consistent=True)
+    except Exception as exc:
+        raise _unavailable("deployment lookup failed", exc) from exc
+    if deployment is None:
+        raise _unavailable("deployment authority is missing")
+
+    return _target_from_deployment(
+        deployment,
+        caller_sub,
+        expected_deployment_id=str(version.deployment_id),
+        expected_version_id=version_id,
+        expected_runtime_id=str(version.runtime_id),
+        expected_runtime_arn=str(version.runtime_arn),
+        expected_evaluation_kms_key_arn=version_evaluation_key,
+        production_gate_required=version.production_gate_required,
         required_protocol=required_protocol,
     )
 
@@ -352,6 +421,9 @@ def resolve_owned_runtime_slot_target(
         raise _unavailable("version has no deployment authority")
     if not version.runtime_id or not version.runtime_arn:
         raise _unavailable("version has no runtime authority")
+    version_evaluation_key = str(version.evaluation_kms_key_arn or "").strip() or None
+    if bool(version.production_gate_required) and not version_evaluation_key:
+        raise _unavailable("production-gated version has no frozen evaluation key authority")
 
     try:
         deployment = get_deployment_store().get(
@@ -370,6 +442,8 @@ def resolve_owned_runtime_slot_target(
         expected_version_id=str(version.version_id),
         expected_runtime_id=str(version.runtime_id),
         expected_runtime_arn=str(version.runtime_arn or ""),
+        expected_evaluation_kms_key_arn=version_evaluation_key,
+        production_gate_required=version.production_gate_required,
         required_protocol=required_protocol,
     )
 

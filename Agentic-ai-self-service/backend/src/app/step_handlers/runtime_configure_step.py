@@ -14,6 +14,7 @@ from app.models.deployment_models import (
     RuntimeConfig,
 )
 from app.services import step_clients
+from app.services.delegated_identity import runtime_obo_transport_configuration
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.gateway_deployer import validate_token_endpoint_shape
 from app.services.observability import (
@@ -188,7 +189,11 @@ def handler(event: dict, context) -> dict:
         client_info = gateway_result.get("client_info") or {}
         idp_provider = client_info.get("provider", "cognito")
 
-        if idp_provider == "litellm":
+        if gateway_result.get("obo_required") is True:
+            if idp_provider != "workforce_jwt":
+                raise RuntimeError("OBO gateway is not bound to the platform workforce authorizer")
+            env_vars["GATEWAY_AUTH_MODE"] = "obo"
+        elif idp_provider == "litellm":
             # Workstream A: a LiteLLM MCP Gateway authenticates with a STATIC
             # virtual key, not an OAuth2 client-credentials exchange. Tell the
             # generated agent to skip the token endpoint entirely and send the key
@@ -305,6 +310,8 @@ def handler(event: dict, context) -> dict:
             enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
             platform_defaults=platform_observability_defaults,
             trusted_auth_secret_arns=event.get("recorded_secret_arns") or (),
+            production_evaluation_required=bool(event.get("production_gate_required")),
+            target_region=region,
         )
         env_vars.update(otel_env)
 
@@ -373,6 +380,14 @@ def handler(event: dict, context) -> dict:
         if server_protocol not in ("HTTP", "MCP"):
             server_protocol = "HTTP"
 
+        authorizer_config = None
+        request_header_config = None
+        if gateway_result.get("obo_required") is True:
+            authorizer_config, request_header_config = runtime_obo_transport_configuration(
+                region,
+                str(event.get("owner_sub") or ""),
+            )
+
         runtime_result = create_agent_runtime(
             agentcore_ctrl=agentcore_ctrl,
             runtime_name=runtime_name,
@@ -380,9 +395,12 @@ def handler(event: dict, context) -> dict:
             s3_bucket=s3_bucket,
             s3_key=s3_key,
             entrypoint=entrypoint,
+            instrument_observability=bool(event.get("production_gate_required")),
             python_runtime=config.python_runtime or "PYTHON_3_13",
             protocol=server_protocol,
             env_vars=env_vars if env_vars else None,
+            authorizer_config=authorizer_config,
+            request_header_config=request_header_config,
             vpc_config=getattr(config, "vpc_config", None),
             region=region,
             # P0-B governance tags. Verified present in THIS state's input on a live

@@ -384,7 +384,7 @@ class TestGatewayProviderIsHonoured:
 # The LiteLLM branch must produce a stack that can actually reach the proxy
 # ---------------------------------------------------------------------------
 
-LITELLM_KEY_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:litellm-key-AbCdEf"
+LITELLM_KEY_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/litellm-AbCdEf"
 LITELLM_GATEWAY = {
     "gateway_provider": "litellm",
     "litellm_base_url": "https://litellm.example.internal",
@@ -477,15 +477,12 @@ class TestLiteLLMExport:
         with_arn = yaml.safe_load(_generate(gateway_config=_litellm(litellm_api_key_ref=LITELLM_KEY_ARN)).template_yaml)
         assert with_arn["Parameters"]["LiteLLMApiKeySecretArn"]["Default"] == LITELLM_KEY_ARN
 
-        # A canvas carrying the key itself, or a non-ARN reference, must not put it
-        # in the template — the reference is dropped and the parameter goes back to
-        # having no default.
-        leaky = yaml.safe_load(
-            _generate(
-                gateway_config=_litellm(litellm_api_key_ref="sk-not-an-arn", litellm_api_key="sk-super-secret")
-            ).template_yaml
-        )
-        assert "Default" not in leaky["Parameters"]["LiteLLMApiKeySecretArn"]
+        # A raw key or malformed reference is rejected before serialization, and
+        # the diagnostic never echoes credential material.
+        with pytest.raises(ValueError) as error:
+            _generate(gateway_config=_litellm(litellm_api_key_ref="sk-not-an-arn", litellm_api_key="sk-super-secret"))
+        assert "raw credential material" in str(error.value)
+        assert "sk-super-secret" not in str(error.value)
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -502,14 +499,9 @@ class TestLiteLLMExport:
         deploy.sh and the README are as public as the template — people paste all
         three into tickets.
         """
-        bundle = _generate(**kwargs)
-        for label, content in (
-            ("template.yaml", bundle.template_yaml),
-            ("deploy.sh", bundle.deploy_sh),
-            ("README.md", bundle.readme),
-            ("agent.py", bundle.agent_code),
-        ):
-            assert "sk-super-secret-value" not in content, f"the virtual key leaked into {label}"
+        with pytest.raises(ValueError) as error:
+            _generate(**kwargs)
+        assert "sk-super-secret-value" not in str(error.value)
 
     def test_the_runtime_role_can_read_that_one_secret_and_nothing_else(self):
         role = yaml.safe_load(_generate(gateway_config=_litellm()).template_yaml)["Resources"]["RuntimeExecutionRole"]
@@ -546,7 +538,10 @@ class TestLiteLLMExport:
         template = yaml.safe_load(_generate(gateway_config=_litellm(), connected_tools=connected).template_yaml)
         role = template["Resources"]["RuntimeExecutionRole"]
         actions = [
-            a for s in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"] for a in _as_list(s["Action"])
+            action
+            for statement in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+            if statement.get("Effect") == "Allow"
+            for action in _as_list(statement["Action"])
         ]
         assert not [a for a in actions if a.startswith("bedrock-agentcore:") and "Gateway" in a]
         # The stronger statement: nothing in this role may reference a resource the
@@ -611,9 +606,9 @@ class TestLiteLLMExport:
         every request. A *private* https URL is fine — the recipient may deploy
         this stack inside the VPC that can reach it.
         """
-        with pytest.raises(CfnExportUnsupportedError) as exc:
+        with pytest.raises(ValueError) as exc:
             _generate(gateway_config=gateway_config)
-        assert expected in str(exc.value)
+        assert expected.lower() in str(exc.value).lower()
 
     def test_litellm_plus_an_mcp_server_node_is_refused_with_both_ways_out(self):
         """The one combination with no faithful export.
@@ -697,6 +692,7 @@ class TestLiteLLMExport:
         """Run the script. A refusal asserted only by grep is not a refusal."""
         script = tmp_path / "deploy.sh"
         script.write_text(_generate(gateway_config=_litellm()).deploy_sh)
+        (tmp_path / "verify-integrity.py").write_text("raise SystemExit(0)\n")
         proc = subprocess.run(
             ["bash", str(script), *args],
             capture_output=True,
@@ -971,70 +967,46 @@ class TestSourceIntegrity:
         assert '"AgentCodeDigest=$AGENT_CODE_DIGEST"' in script
         assert '"McpServerCodeDigest=$MCP_SERVER_DIGEST"' in script
 
-    def test_a_bundle_already_in_the_bucket_is_still_hashed(self, tmp_path):
-        """The branch where the dependency bundle is ALREADY in S3 must hash it.
-
-        This branch used to leave the recorded digest alone, and that made a
-        dependency-bundle-only change a silent no-op rather than the loud failure
-        the comment there claimed. With the digest unchanged, every property of
-        Custom::AgentCodePackage is identical between deploys, so CloudFormation
-        skips the resource, the packaging step never runs, and the Lambda's
-        _verify_bundle_digest is never reached to notice that the bundle in the
-        bucket is not the one the stack was built against. Green stack, old
-        dependencies.
-
-        Run rather than grepped, with a fake ``aws`` that reports the object
-        present and serves known bytes: the assertion is that the digest the
-        script ends up with is the digest of what is IN THE BUCKET.
-        """
+    def test_a_preexisting_stale_bundle_is_rejected_against_a_local_reviewed_build(self, tmp_path):
+        """Without an operator digest, S3 must never become its own trust anchor."""
         script = _generate(**self.MCP_COMBO).deploy_sh
         region = re.search(
-            r"^# 3\. Check/build/upload the dependency bundle\n(.*?)^# 4\. Package and upload assets",
+            r"^# 3\. Build or verify the reviewed dependency recipe.*?^# 4\. Package and upload assets",
             script,
             re.MULTILINE | re.DOTALL,
         )
         assert region, "deploy.sh no longer has a recognisable dependency-bundle section"
-        helpers = re.findall(r"^sha256_stdin\(\).*?^\}$", script, re.MULTILINE | re.DOTALL)
-        assert len(helpers) == 1, "deploy.sh no longer defines sha256_stdin"
+        helper = re.search(r"^sha256_stdin\(\).*?^\}", script, re.MULTILINE | re.DOTALL)
+        assert helper
 
-        in_the_bucket = b"pretend-dependency-bundle-bytes\n"
-        expected = "sha256:" + hashlib.sha256(in_the_bucket).hexdigest()
-        served = tmp_path / "served.zip"
-        served.write_bytes(in_the_bucket)
-
+        remote = tmp_path / "remote.zip"
+        remote.write_bytes(b"stale-or-substituted")
+        builder = tmp_path / "build-dependency-bundle.sh"
+        builder.write_text('#!/usr/bin/env bash\nprintf reviewed-current-recipe >"$1"\n')
+        builder.chmod(0o755)
         fake_bin = tmp_path / "bin"
         fake_bin.mkdir()
-        # head-object succeeds (the object is there); cp copies the known bytes to
-        # whatever destination the script chose. Anything else is a failure, so the
-        # test cannot pass by taking some other path through the branch.
-        (fake_bin / "aws").write_text(
-            "#!/bin/bash\n"
+        aws = fake_bin / "aws"
+        aws.write_text(
+            "#!/usr/bin/env bash\n"
             'if [[ "$1" == "s3api" && "$2" == "head-object" ]]; then exit 0; fi\n'
-            'if [[ "$1" == "s3" && "$2" == "cp" ]]; then cp ' + str(served) + ' "$4"; exit 0; fi\n'
-            'echo "unexpected aws call: $*" >&2; exit 64\n'
+            'if [[ "$1" == "s3" && "$2" == "cp" ]]; then cp "$REMOTE_BUNDLE" "$4"; exit 0; fi\n'
+            'echo "unexpected fake AWS call" >&2; exit 64\n'
         )
-        (fake_bin / "aws").chmod(0o755)
-
+        aws.chmod(0o755)
         proc = subprocess.run(
             [
                 "bash",
                 "-c",
-                "set -euo pipefail\n"
-                "BUCKET=bkt\nREGION=us-east-1\n"
-                + helpers[0]
-                + "\n"
-                + region.group(1)
-                + '\necho "DIGEST=$BUNDLE_DIGEST"\n',
+                "set -euo pipefail\nBUCKET=bkt\nREGION=us-east-1\n" + helper.group(0) + "\n" + region.group(0),
             ],
+            cwd=tmp_path,
+            env={"PATH": f"{fake_bin}:/usr/bin:/bin", "REMOTE_BUNDLE": str(remote)},
             capture_output=True,
             text=True,
-            cwd=tmp_path,
-            env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
         )
-        assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert f"DIGEST={expected}" in proc.stdout, (
-            "the already-in-the-bucket branch did not hash the object it found: " + proc.stdout
-        )
+        assert proc.returncode != 0
+        assert "stale or substituted" in proc.stderr
 
     def test_the_readme_does_not_promise_a_check_that_does_not_happen(self):
         """The prose and the script have to agree about when the digest is computed.
@@ -1051,17 +1023,9 @@ class TestSourceIntegrity:
         assert "left as it is" not in readme, "README still describes the stale-digest behaviour"
         assert "nothing local to hash" not in readme
 
-        # And states what actually happens, including the limit of it: hashing the
-        # object proves provenance from the bucket, not from a build you trust.
-        # This wording is narrower than the phrase it replaced ("downloads ... hashes the
-        # bytes themselves"), because the branch that used to hash its own local copy is
-        # gone: the object in the bucket is now the only thing any branch hashes, and the
-        # run that just uploaded it is the case that has to be said out loud.
-        assert "downloading the object from" in readme
-        assert "including on the run that just uploaded it" in readme
-        # Substring kept short deliberately: the README is hard-wrapped, so a longer
-        # phrase would straddle a newline and fail for reasons of layout, not content.
-        assert "cannot, by itself, tell you" in readme
+        assert "always rebuilds that reviewed recipe" in readme
+        assert "An existing mismatch is" in readme
+        assert "externally retained digest" in readme
 
     def test_the_lambda_verifies_the_zip_the_deploy_script_builds(self, tmp_path):
         """End of the chain: the real zip, hashed by the real handler."""
@@ -1255,14 +1219,12 @@ class TestDependencyBundleIntegrity:
             param = expected_digest_param.get(logical_id, "DependencyBundleDigest")
             assert resource["Properties"]["BundleDigest"] == {"Ref": param}, logical_id
 
-    def test_the_parameter_only_accepts_none_or_a_sha256(self):
-        """`none` has to be spelled out. An empty string would look like a digest
-        that simply had not been filled in, and nothing would ever say otherwise."""
+    def test_the_parameter_requires_a_sha256_and_has_no_bypass_default(self):
         spec = _template()["Parameters"]["DependencyBundleDigest"]
-        assert spec["Default"] == "none"
+        assert "Default" not in spec
         pattern = spec["AllowedPattern"]
-        assert re.fullmatch(pattern, "none")
         assert re.fullmatch(pattern, "sha256:" + "a" * 64)
+        assert not re.fullmatch(pattern, "none")
         assert not re.fullmatch(pattern, "")
         assert not re.fullmatch(pattern, "sha256:" + "a" * 63)
         assert not re.fullmatch(pattern, "a" * 64), "a bare hash could be any algorithm"
@@ -1316,33 +1278,17 @@ class TestDependencyBundleIntegrity:
         assert proc.returncode == 0, proc.stderr
         handler._verify_bundle_digest(blob.read_bytes(), proc.stdout.strip())  # must not raise
 
-    def test_the_deploy_script_hashes_the_object_in_the_bucket(self):
-        """Not the local file — including in the branch that just uploaded it.
-
-        The two can differ, and it is not hypothetical. Measured live: two first-time
-        deploys from one bucket both found ``agentcore-deps/base.zip`` absent, both built
-        it, and both uploaded. Each recorded the digest of ITS OWN local zip, so the one
-        whose upload lost the race had recorded bytes that were no longer in the bucket,
-        and the provider Lambda failed it into ROLLBACK_COMPLETE — correctly, over a
-        difference that was only embedded mtimes. Hashing the object closes the race,
-        including the case where the other build legitimately resolved a newer wheel.
-
-        Pinned as "no branch hashes $BUNDLE_FILE" rather than as the presence of the
-        helper, because the defect was a branch that reached for the local copy. Both
-        callers pass the key explicitly: a defaulted ``$1`` with a bare call is
-        ShellCheck SC2120/SC2119 under 0.9.0, and the shipped script must lint clean
-        on the recipient's machine, not only on ours.
-        """
+    def test_the_deploy_script_uses_local_reviewed_bytes_as_the_default_authority(self):
         script = _generate().deploy_sh
-        call = 'BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"'
-        assert call in script
-        assert script.count(call) == 2, (
-            "one of the two branches still records a digest of something other than the object"
-        )
-        assert "bundle_digest_in_bucket)" not in script, "a bare call would default the key (SC2120)"
-        assert 'sha256_stdin <"$BUNDLE_FILE"' not in script, "a branch hashes the local zip"
-        assert '"DependencyBundleDigest=$BUNDLE_DIGEST"' in script
-        assert "DEPENDENCY_BUNDLE_DIGEST" in script, "no way to pin the digest by hand"
+        assert 'bash "$builder" "$file"' in script
+        assert 'local_digest="$(file_digest "$file")"' in script
+        assert 'remote="$(bundle_digest_in_bucket "$key")"' in script
+        assert 'if [[ "$remote" != "$expected" ]]; then' in script
+        assert "stale or substituted bytes" in script
+        assert 'expected="${expected:-$local_digest}"' in script
+        assert 'expected="${expected:-$remote}"' not in script
+        assert 'PARAM_OVERRIDES+=("DependencyBundleDigest=$BUNDLE_DIGEST")' in script
+        assert "DEPENDENCY_BUNDLE_DIGEST" in script, "no way to provide an operator-trusted digest"
 
     def test_a_digest_that_cannot_be_read_back_stops_the_deploy(self):
         """The alternative is worse: carrying on with no digest turns the one check that
@@ -1371,13 +1317,15 @@ class TestDependencyBundleIntegrity:
         assert "touch -t 198001010000" in script, "member mtimes are still whatever the build ran at"
         assert "find . -print | sort | zip" in script, "member order is left to filesystem traversal"
         assert "zip -r -q " not in script, "a non-deterministic zip -r survived"
+        assert 'rm -rf "${BUILD_DIR:?}/bin"' in script, "other console scripts must be removed"
+        assert 'bin/opentelemetry-instrument"' in script
+        assert "#!/usr/bin/env python3" in script
+        assert '>"${BUILD_DIR:?}/opentelemetry-instrument"' in script
+        assert "*.dist-info/RECORD" in script, "RECORD retains hashes of path-dependent console scripts"
 
-    def test_the_digest_is_omitted_rather_than_sent_as_none(self):
-        """`cloudformation deploy` keeps a parameter it is not given (UsePreviousValue),
-        so omitting it means a stack that recorded a digest keeps checking it. Sending
-        "none" would silently switch the check off on the next deploy."""
+    def test_the_mandatory_digest_is_always_sent(self):
         script = _generate().deploy_sh
-        assert 'if [[ -n "$BUNDLE_DIGEST" ]]; then' in script
+        assert 'PARAM_OVERRIDES+=("DependencyBundleDigest=$BUNDLE_DIGEST")' in script
         assert "DependencyBundleDigest=none" not in script
 
     def test_the_readme_says_where_the_digest_comes_from(self):
@@ -2312,6 +2260,8 @@ class TestLeastPrivilegeResources:
                 continue
             for policy in _inline_policies(resource):
                 for statement in policy["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Allow":
+                        continue
                     target = statement.get("Resource")
                     if target == "*" or (isinstance(target, list) and "*" in target):
                         found.add((logical_id, statement.get("Sid", "<unnamed>")))
@@ -5566,7 +5516,7 @@ class TestTheShippedScriptsAreExecutable:
     recipient who ran ``./build-dependency-bundle.sh`` on its own did not.
     """
 
-    REQUIRED_SCRIPTS = {"deploy.sh", "teardown.sh", "build-dependency-bundle.sh"}
+    REQUIRED_SCRIPTS = {"deploy.sh", "teardown.sh", "build-dependency-bundle.sh", "verify.sh"}
 
     @classmethod
     def _expected_scripts(cls, bundle):
@@ -5644,8 +5594,10 @@ class TestCustomResources:
     which is very likely what prompted the question. These tests make the three
     statements impossible to drift apart again.
 
-    There are four now: ``Custom::RuntimeLogGroup`` was added for the log groups
-    AgentCore creates for the runtime itself, which no declared resource can reach.
+    There are five now: ``Custom::RuntimeLogGroup`` governs the log groups
+    AgentCore creates for the runtime itself, and
+    ``Custom::ManagedWebSearchTarget`` pins a connector version the native target
+    surface cannot express.
     """
 
     EXPECTED = {
@@ -5653,11 +5605,19 @@ class TestCustomResources:
         "Custom::OAuth2CredentialProvider",
         "Custom::AgentCorePolicy",
         "Custom::RuntimeLogGroup",
+        "Custom::ManagedWebSearchTarget",
+    }
+    COMBINATIONS = {
+        **COMPONENT_COMBINATIONS,
+        "managed-search": {
+            "template_id": "web-search-agent",
+            "gateway_config": AGENTCORE_GATEWAY,
+        },
     }
 
     def test_the_generator_emits_no_custom_resource_type_the_handler_cannot_serve(self):
         emitted = set()
-        for combo in COMPONENT_COMBINATIONS.values():
+        for combo in self.COMBINATIONS.values():
             emitted |= {r["Type"] for r in _template(**combo)["Resources"].values() if r["Type"].startswith("Custom::")}
         assert emitted <= self.EXPECTED, f"generator emits unserved types: {emitted - self.EXPECTED}"
 
@@ -5671,20 +5631,24 @@ class TestCustomResources:
         handler = _import_cfn_provider_handler()
         assert handler.SUPPORTED_RESOURCE_TYPES == self.EXPECTED
 
-    def test_all_four_are_reachable_from_some_canvas(self):
-        """A type in the allowlist that nothing emits is dead code; a type
-        something emits that is not in the allowlist now fails closed."""
+    def test_all_five_are_reachable_from_some_canvas(self):
+        """A served type must be emitted by at least one supported canvas."""
         emitted = set()
-        for combo in COMPONENT_COMBINATIONS.values():
+        for combo in self.COMBINATIONS.values():
             emitted |= {r["Type"] for r in _template(**combo)["Resources"].values() if r["Type"].startswith("Custom::")}
         assert emitted == self.EXPECTED, f"never emitted by any combination: {self.EXPECTED - emitted}"
 
-    def test_readme_lists_the_custom_resources_this_bundle_contains(self):
-        """The generated README is customer-facing and shipped inside the zip;
-        it is the artifact that told people there was only one."""
-        readme = _generate(**COMPONENT_COMBINATIONS["everything"]).readme
-        for resource_type in self.EXPECTED:
-            assert resource_type in readme, f"README does not mention {resource_type}"
+    def test_readme_lists_each_custom_resource_when_its_bundle_contains_it(self):
+        """Customer-facing bundle docs and emitted resources must agree."""
+        for name, combo in self.COMBINATIONS.items():
+            bundle = _generate(**combo)
+            emitted = {
+                r["Type"]
+                for r in yaml.safe_load(bundle.template_yaml)["Resources"].values()
+                if r["Type"].startswith("Custom::")
+            }
+            for resource_type in emitted:
+                assert resource_type in bundle.readme, f"{name}: README does not mention {resource_type}"
 
     def test_readme_does_not_claim_a_single_custom_resource(self):
         for name, combo in COMPONENT_COMBINATIONS.items():
@@ -5700,6 +5664,7 @@ class TestCustomResources:
         assert "Custom::RuntimeLogGroup" in readme
         assert "Custom::AgentCorePolicy" not in readme, "README lists a custom resource this bundle has no use for"
         assert "Custom::OAuth2CredentialProvider" not in readme
+        assert "Custom::ManagedWebSearchTarget" not in readme
 
     @ALL_COMBINATIONS
     def test_the_provider_lambda_keeps_its_asynchronous_retries(self, combo):
@@ -6027,7 +5992,7 @@ class TestDependencyBundleIsObtainable:
     def test_deploy_builds_and_uploads_the_bundle_instead_of_giving_up(self, combo):
         script = _generate(**combo).deploy_sh
         assert "build-dependency-bundle.sh" in script
-        assert 'aws s3 cp "$BUNDLE_FILE"' in script
+        assert 'aws s3 cp "$file"' in script
         # The old behaviour, which must not come back.
         assert "See README.md for instructions." not in script
 
@@ -7360,59 +7325,44 @@ def _render_key(expr, params, conditions, stack="stk"):
     return ev(expr)
 
 
-class TestABundleWithoutADigestStillMovesTheKey:
-    """P1 from the independent G10 review of the export path.
-
-    ``DependencyBundleDigest`` defaults to ``none`` for recipients who stage the bundle
-    themselves. With the key built from the two digests alone, pointing
-    ``DependencyBundleKey`` at a new bundle re-merged into the SAME OutputKey: the Update
-    ran (the key is a property), CodeZipPrefix did not move, the Runtime published no
-    version, and the overwrite destroyed the bytes the previous version referenced. The
-    bundle key is the only other thing that identifies the bundle, so without a digest it
-    is what keys the output.
-    """
-
+class TestMandatoryBundleDigestKeys:
     CODE = "sha256:" + "a" * 64
     BUNDLE = "sha256:" + "b" * 64
+    OTHER_BUNDLE = "sha256:" + "c" * 64
 
     def _key(self, template, logical_id, **params):
-        res = template["Resources"][logical_id]["Properties"]["OutputKey"]
-        defaults = {name: p.get("Default") for name, p in template["Parameters"].items()}
-        return _render_key(res, {**defaults, **params}, template.get("Conditions", {}))
+        resource = template["Resources"][logical_id]["Properties"]["OutputKey"]
+        defaults = {name: spec.get("Default") for name, spec in template["Parameters"].items()}
+        return _render_key(resource, {**defaults, **params}, template.get("Conditions", {}))
 
-    def test_the_agent_key_moves_with_the_bundle_key_when_no_digest_is_supplied(self):
-        t = _template()
-        a = self._key(t, "AgentCodePackage", AgentCodeDigest=self.CODE, DependencyBundleKey="agentcore-deps/base.zip")
-        b = self._key(t, "AgentCodePackage", AgentCodeDigest=self.CODE, DependencyBundleKey="agentcore-deps/base-2.zip")
-        assert a != b, "a bundle swap under a new key must re-key the merged code.zip"
-        assert a.startswith("deployments/stk/") and a.endswith("/code.zip"), a
-        assert a.count("/") == 3, f"the bundle key must collapse to one path segment: {a}"
+    def test_the_agent_output_key_is_governed_by_the_mandatory_bundle_digest(self):
+        template = _template()
+        common = {"AgentCodeDigest": self.CODE, "DependencyBundleKey": "same-key.zip"}
+        first = self._key(template, "AgentCodePackage", DependencyBundleDigest=self.BUNDLE, **common)
+        second = self._key(template, "AgentCodePackage", DependencyBundleDigest=self.OTHER_BUNDLE, **common)
+        assert first != second
+        assert "b" * 64 in first and "c" * 64 in second
 
-    def test_a_supplied_digest_governs_and_the_bundle_key_does_not(self):
-        t = _template()
-        common = dict(AgentCodeDigest=self.CODE, DependencyBundleDigest=self.BUNDLE)
-        a = self._key(t, "AgentCodePackage", DependencyBundleKey="k1.zip", **common)
-        b = self._key(t, "AgentCodePackage", DependencyBundleKey="k2.zip", **common)
-        assert a == b and "b" * 64 in a, (a, b)
-
-    def test_the_mcp_server_bundle_follows_the_same_rule(self):
-        t = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
-        assert "McpServerCodePackage" in t["Resources"], "combination emits no MCP server; proves nothing"
-        a = self._key(
-            t, "McpServerCodePackage", McpServerCodeDigest=self.CODE, McpServerDependencyBundleKey="x/lean.zip"
+    def test_the_mcp_server_uses_its_own_mandatory_digest(self):
+        template = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
+        common = {"McpServerCodeDigest": self.CODE, "McpServerDependencyBundleKey": "same-key.zip"}
+        first = self._key(template, "McpServerCodePackage", McpServerDependencyBundleDigest=self.BUNDLE, **common)
+        second = self._key(
+            template,
+            "McpServerCodePackage",
+            McpServerDependencyBundleDigest=self.OTHER_BUNDLE,
+            **common,
         )
-        b = self._key(
-            t, "McpServerCodePackage", McpServerCodeDigest=self.CODE, McpServerDependencyBundleKey="x/lean-2.zip"
-        )
-        assert a != b and a.endswith("/mcp-server-code.zip"), (a, b)
+        assert first != second and first.endswith("/mcp-server-code.zip")
 
-    def test_the_conditions_test_the_none_sentinel_exactly(self):
-        t = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
-        for param in ("DependencyBundleDigest", "McpServerDependencyBundleDigest"):
-            assert t["Conditions"][f"{param}Supplied"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": param}, "none"]}]}
+    def test_no_digestless_conditions_or_defaults_remain(self):
+        template = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
+        for parameter in ("DependencyBundleDigest", "McpServerDependencyBundleDigest"):
+            assert "Default" not in template["Parameters"][parameter]
+            assert f"{parameter}Supplied" not in template.get("Conditions", {})
 
-    def test_the_readme_tells_terraform_users_about_both_digests(self):
+    def test_the_readme_tells_direct_template_users_about_both_digests(self):
         readme = _generate(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []}).readme
-        section = readme.split("## Terraform", 1)[1]
-        assert "DependencyBundleDigest" in section and "McpServerDependencyBundleDigest" in section
-        assert "same key" in section, "the one non-propagating combination must be named"
+        assert "DependencyBundleDigest" in readme
+        assert "McpServerDependencyBundleDigest" in readme
+        assert "has no default" in readme

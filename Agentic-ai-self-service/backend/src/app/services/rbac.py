@@ -105,16 +105,20 @@ GROUP_SCOPES: dict[str, set[str]] = {
     # A registry developer can publish and maintain entries, but is deliberately
     # absent from auth._REGISTRY_ADMIN_GROUPS and therefore cannot approve/reject.
     "registry-developer": {"registry:read", "registry:write"},
-    # A standard user builds, deploys and invokes their own agents (docs/PERSONAS.md);
-    # owner_sub still confines every one of those calls to the caller's own rows.
+    # A standard user builds, deploys, invokes, and schedules their own agents
+    # (docs/PERSONAS.md); owner_sub still confines every call to the caller's rows.
     "g-users-default": {
         SCOPE_INVOKE,
         "agent:read",
         "agent:write",
         "cost:read",
+        "eval:read",
+        "eval:write",
         "prompt:read",
         "registry:read",
         "tag:read",
+        "trigger:read",
+        "trigger:write",
     },
     # --- Legacy groups (backward compatible) ---
     "org-admin": {SCOPE_ADMIN, SCOPE_INVOKE} | _all_read_write(),

@@ -1,0 +1,153 @@
+{
+  "schema_version": 2,
+  "source_url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html",
+  "accessed_at": "2026-10-27",
+  "partition": "aws",
+  "regions": [
+    {
+      "region": "us-east-1",
+      "name": "US East (N. Virginia)",
+      "profile": "full",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": true,
+      "harness": true
+    },
+    {
+      "region": "us-east-2",
+      "name": "US East (Ohio)",
+      "profile": "full",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": true,
+      "harness": true
+    },
+    {
+      "region": "us-west-1",
+      "name": "US West (N. California)",
+      "profile": "excluded",
+      "core": true,
+      "production_release": false,
+      "memory": false,
+      "agent_registry": false,
+      "web_search": false,
+      "harness": false
+    },
+    {
+      "region": "us-west-2",
+      "name": "US West (Oregon)",
+      "profile": "full",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": true,
+      "harness": true
+    },
+    {
+      "region": "eu-central-1",
+      "name": "Europe (Frankfurt)",
+      "profile": "reduced",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": false,
+      "harness": true
+    },
+    {
+      "region": "eu-west-1",
+      "name": "Europe (Ireland)",
+      "profile": "full",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": true,
+      "harness": true
+    },
+    {
+      "region": "eu-west-2",
+      "name": "Europe (London)",
+      "profile": "reduced",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": false,
+      "harness": true
+    },
+    {
+      "region": "eu-south-1",
+      "name": "Europe (Milan)",
+      "profile": "excluded",
+      "core": true,
+      "production_release": false,
+      "memory": false,
+      "agent_registry": false,
+      "web_search": false,
+      "harness": false
+    },
+    {
+      "region": "eu-west-3",
+      "name": "Europe (Paris)",
+      "profile": "reduced",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false,
+      "harness": true
+    },
+    {
+      "region": "eu-south-2",
+      "name": "Europe (Spain)",
+      "profile": "excluded",
+      "core": true,
+      "production_release": false,
+      "memory": false,
+      "agent_registry": false,
+      "web_search": false,
+      "harness": false
+    },
+    {
+      "region": "eu-north-1",
+      "name": "Europe (Stockholm)",
+      "profile": "excluded",
+      "core": true,
+      "production_release": false,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false,
+      "harness": false
+    }
+  ],
+  "core_features": [
+    "runtime_microvm",
+    "gateway",
+    "identity",
+    "built_in_tools",
+    "observability",
+    "policy",
+    "evaluations"
+  ],
+  "production_envelope": {
+    "partition": "aws",
+    "deployment_mode": "runtime",
+    "harness": false,
+    "a2a": false,
+    "gateway_provider": "agentcore",
+    "notes": [
+      "Production release supports exactly one independently deployed Runtime home Region selected from US East (N. Virginia), US East (Ohio), US West (Oregon), Europe (Frankfurt), Europe (Ireland), Europe (London), or Europe (Paris).",
+      "The full profile is selected in us-east-1, us-east-2, us-west-2, and eu-west-1. Frankfurt and London omit managed Web Search; Paris omits managed Web Search and AWS Agent Registry federation.",
+      "Managed Harness and A2A remain excluded from production even where the regional capability is available.",
+      "Memory scenarios run only where memory=true.",
+      "AWS Agent Registry scenarios run only where agent_registry=true.",
+      "Managed Web Search scenarios run only where web_search=true."
+    ]
+  }
+}

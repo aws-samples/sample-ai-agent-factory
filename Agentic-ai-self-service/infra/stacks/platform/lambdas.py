@@ -7,14 +7,17 @@ roles + Lambdas live in step_lambdas.py.
 
 import hashlib
 import os
+from decimal import Decimal, InvalidOperation
 
 import aws_cdk as cdk
+import cdk_nag
 from aws_cdk import CfnOutput, Duration, RemovalPolicy
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as events_targets
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_lambda_event_sources as lambda_event_sources
 from aws_cdk import aws_logs as logs
@@ -25,6 +28,7 @@ from aws_cdk import aws_ssm as ssm
 from .buckets import deny_writes_to_agentcore_deps
 from .config import (
     ATTACHABLE_MANAGED_POLICIES,
+    AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
     DEPLOYMENT_STATE_MACHINE_TIMEOUT_MINUTES,
     GOVERNANCE_TAG_KEY_PREFIXES_ENV,
     PENDING_CLAIM_SLACK_SECONDS,
@@ -72,6 +76,44 @@ DEPLOYMENT_LAMBDA_OWNERSHIP_READ_TYPES: tuple[str, ...] = (
 # test that bounds the bundle reads the same list the deploy uses; a test with its own copy
 # would pass while the deploy shipped something else. See get_backend_code for the measured
 # reason each of the last two groups is here.
+
+
+def _production_evaluation_gate_value(stack: cdk.Stack, environment: str) -> str:
+    """Render the gate flag; production-like environments cannot disable it."""
+
+    development_like = environment.strip().lower() in {
+        "dev",
+        "development",
+        "test",
+        "sandbox",
+        "preview",
+        "local",
+    }
+    raw = stack.node.try_get_context("production_evaluation_gate")
+    if raw is None or str(raw).strip() == "":
+        return "false" if development_like else "true"
+    if isinstance(raw, bool):
+        normalized = "true" if raw else "false"
+    else:
+        normalized = str(raw).strip().lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError("production_evaluation_gate context must be true or false")
+    if not development_like and normalized == "false":
+        raise ValueError("production_evaluation_gate cannot be disabled in a production-like environment")
+    return normalized
+
+
+def _budget_reservation_value(stack: cdk.Stack) -> str:
+    raw = str(stack.node.try_get_context("budget_reservation_usd") or "1.0").strip()
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError("budget_reservation_usd must be a decimal number") from exc
+    if not value.is_finite() or value < Decimal("0.000001") or value > Decimal("1000"):
+        raise ValueError("budget_reservation_usd must be in 0.000001..1000")
+    return format(value.normalize(), "f")
+
+
 BACKEND_ASSET_EXCLUDE: tuple[str, ...] = (
     ".venv",
     "__pycache__",
@@ -91,9 +133,11 @@ BACKEND_ASSET_EXCLUDE: tuple[str, ...] = (
     ".mypy_cache",
     "*.egg-info",
     ".DS_Store",
-    # Dependency-resolution metadata is a build input, not something any
-    # deployed handler reads. Keep it out of every Lambda asset.
+    # Dependency-resolution metadata and inputs are build-time only. The deploy script
+    # materializes their locked packages into lib/ before synthesis; no handler reads them.
     "uv.lock",
+    "requirements-lambda.in",
+    "requirements-lambda.txt",
     # Read only by scripts/install-agentcore-deps.sh when it BUILDS the dependency
     # bundles, and only on a developer machine or in CI. Nothing in the deployed
     # handler opens it, and shipping it would put the exact pinned version of every
@@ -247,6 +291,36 @@ def build_trigger_dispatch_queues(
     return dispatch_queue, dead_letter_queue, rule_prefix
 
 
+RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS: tuple[str, ...] = (
+    "bedrock-agentcore:CreateGateway",
+    "bedrock-agentcore:UpdateGateway",
+    "bedrock-agentcore:DeleteGateway",
+    "bedrock-agentcore:CreateGatewayTarget",
+    "bedrock-agentcore:UpdateGatewayTarget",
+    "bedrock-agentcore:DeleteGatewayTarget",
+    "bedrock-agentcore:SynchronizeGatewayTargets",
+    "bedrock-agentcore:CreatePolicyEngine",
+    "bedrock-agentcore:UpdatePolicyEngine",
+    "bedrock-agentcore:DeletePolicyEngine",
+    "bedrock-agentcore:CreatePolicy",
+    "bedrock-agentcore:UpdatePolicy",
+    "bedrock-agentcore:DeletePolicy",
+    "bedrock-agentcore:ManageResourceScopedPolicy",
+    "bedrock-agentcore:ManageAdminPolicy",
+)
+
+
+def _deny_runtime_control_plane_mutation(role: iam.Role) -> None:
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateGatewayOrPolicyControlPlane",
+            effect=iam.Effect.DENY,
+            actions=list(RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS),
+            resources=["*"],
+        )
+    )
+
+
 def build_shared_runtime_role(
     stack: cdk.Stack,
     cfg: PlatformConfig,
@@ -334,6 +408,39 @@ def build_shared_runtime_role(
             ],
             resources=["*"],
         )
+    )
+    runtime_observability_policy = iam.Policy(
+        stack,
+        "SharedRuntimeObservabilityTracePolicy",
+        statements=[
+            iam.PolicyStatement(
+                sid="AgentCoreObservabilityTraceExport",
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                resources=["*"],
+            )
+        ],
+    )
+    runtime_observability_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        runtime_observability_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "X-Ray trace export and sampling APIs do not support resource-level "
+                    "permissions. This dedicated policy contains only the four exact "
+                    "AWS-documented ADOT Runtime actions and is attached only to the "
+                    "model-capable shared Runtime role."
+                ),
+                applies_to=["Resource::*"],
+            )
+        ],
+        apply_to_children=True,
     )
     # All AgentCore runtime tool integrations (browser, code interpreter,
     # gateway, memory, guardrails, evaluation, policy). Exact action lists
@@ -562,6 +669,7 @@ def build_shared_runtime_role(
             },
         )
     )
+    _deny_runtime_control_plane_mutation(role)
     return role
 
 
@@ -635,6 +743,7 @@ def build_shared_mcp_runtime_role(
             resources=["*"],
         )
     )
+    _deny_runtime_control_plane_mutation(role)
     return role
 
 
@@ -646,6 +755,7 @@ def build_workflow_lambda(
     backend_code: _lambda.Code,
     workflows_table: dynamodb.Table,
     flows_table: dynamodb.Table,
+    audit_table: dynamodb.Table,
 ) -> _lambda.Function:
     """Create Workflow Lambda (FastAPI + Mangum) for CRUD operations.
 
@@ -663,6 +773,21 @@ def build_workflow_lambda(
     workflows_table.grant_read_write_data(role)
     # DynamoDB flows table: read/write
     flows_table.grant_read_write_data(role)
+    # Workflow/flow/share/GitOps/credential writes append to the shared audit
+    # projection. This application never reads it and cannot mutate prior rows.
+    audit_table.grant(role, "dynamodb:PutItem", "dynamodb:DescribeTable")
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateAuditEvidence",
+            effect=iam.Effect.DENY,
+            actions=[
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            resources=[audit_table.table_arn],
+        )
+    )
     # SSM read for app config
     role.add_to_policy(
         iam.PolicyStatement(
@@ -780,6 +905,7 @@ def build_workflow_lambda(
         environment={
             "DYNAMODB_TABLE_NAME": workflows_table.table_name,
             "DYNAMODB_FLOWS_TABLE_NAME": flows_table.table_name,
+            "AUDIT_TABLE_NAME": audit_table.table_name,
             "ENVIRONMENT": cfg.env,
             # PROJECT_NAME + ENVIRONMENT + APP_AWS_REGION form the resource-owner tag
             # in services/resource_ownership.py; routers/observability.py stamps it on
@@ -825,6 +951,8 @@ def build_deployment_lambda(
     trigger_rule_prefix: str,
     gateway_auth_pool: cognito.IUserPool | None = None,
     gateway_auth_domain: str = "",
+    workforce_user_pool: cognito.IUserPool | None = None,
+    workforce_user_pool_client: cognito.IUserPoolClient | None = None,
 ) -> _lambda.Function:
     """Create Deployment Lambda for deploy/status/test/delete operations.
 
@@ -842,6 +970,63 @@ def build_deployment_lambda(
         managed_policies=[
             iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
         ],
+    )
+    batch_evaluation_arn = f"arn:{stack.partition}:bedrock-agentcore:{stack.region}:{stack.account}:batch-evaluate/*"
+    evaluation_evidence_key = kms.Key(
+        stack,
+        "PromotionEvaluationEvidenceKey",
+        alias=f"alias/{cfg.project}-{cfg.env}-promotion-evidence",
+        description="Encrypts AgentCore batch-evaluation production promotion evidence",
+        enable_key_rotation=True,
+        removal_policy=cfg.removal_policy,
+        pending_window=Duration.days(30),
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:DescribeKey"],
+            resources=[evaluation_evidence_key.key_arn],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=[evaluation_evidence_key.key_arn],
+            conditions={
+                "StringLike": {"kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": batch_evaluation_arn}
+            },
+        )
+    )
+    # Admin registration and later target revalidation inspect only key metadata
+    # and policy. Crypto use remains bound to AgentCore batch-evaluation context.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:DescribeKey", "kms:GetKeyPolicy"],
+            resources=[f"arn:{stack.partition}:kms:*:{stack.account}:key/*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=[f"arn:{stack.partition}:kms:*:{stack.account}:key/*"],
+            conditions={
+                "StringLike": {
+                    "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": (
+                        f"arn:{stack.partition}:bedrock-agentcore:*:{stack.account}:batch-evaluate/*"
+                    )
+                }
+            },
+        )
+    )
+    evaluation_evidence_key.add_to_resource_policy(
+        iam.PolicyStatement(
+            principals=[iam.ServicePrincipal("bedrock-agentcore.amazonaws.com")],
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"aws:SourceAccount": stack.account},
+                "ArnLike": {"aws:SourceArn": batch_evaluation_arn},
+            },
+        )
     )
     # DynamoDB deployments table: read/write
     tables.deployments.grant_read_write_data(role)
@@ -1012,10 +1197,35 @@ def build_deployment_lambda(
     # Phase 2 (Loom) governance tagging. routers/tags.py + the deploy-time
     # tag resolver (services/tag_policy_store) read/write this table.
     tables.tag_policy.grant_read_write_data(role)
-    # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
+    # Phase 4 (Loom) FinOps — cost budgets and atomic invocation reservations.
     tables.budget.grant_read_write_data(role)
-    # Phase 5 (Loom) — audit trail (middleware writes, /api/admin/audit reads).
-    tables.audit.grant_read_write_data(role)
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["dynamodb:TransactWriteItems"],
+            resources=[tables.budget.table_arn],
+        )
+    )
+    # Append-only audit projection: the middleware can create immutable rows and
+    # the admin dashboard can query them, but this role cannot update or delete
+    # evidence even if a future code path attempts it.
+    tables.audit.grant(
+        role,
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:DescribeTable",
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateAuditEvidence",
+            effect=iam.Effect.DENY,
+            actions=[
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            resources=[tables.audit.table_arn],
+        )
+    )
     # states:StartExecution on the state machine (granted after SM creation)
     # SSM read
     role.add_to_policy(
@@ -1109,10 +1319,15 @@ def build_deployment_lambda(
             resources=[f"arn:aws:bedrock:*:{stack.account}:knowledge-base/*"],
         )
     )
-    # Guardrail cleanup on runtime delete. The manifest delete path (and the
-    # legacy guardrails_result fallback) run in THIS Lambda and call
-    # DeleteGuardrail — without it the guardrail orphans with AccessDenied
-    # (Bug 165). Guardrail ids are service-generated → guardrail/* pattern.
+    # Guardrail cleanup on runtime delete. The manifest delete path first reads
+    # the guardrail and its ownership tags, then deletes only an owned resource.
+    # A real eu-west-1 teardown retained its guardrail when ListTagsForResource
+    # was missing even though GetGuardrail and DeleteGuardrail were allowed.
+    # Guardrail ids are service-generated, so guardrail/* is the tightest
+    # pre-existing resource pattern.
+    # Keep the established get/delete statement on the role's existing policy;
+    # moving it would repack unrelated overflow policies. Isolate only the new
+    # ownership-tag read so the deployment delta remains reviewable.
     role.add_to_policy(
         iam.PolicyStatement(
             actions=[
@@ -1121,6 +1336,33 @@ def build_deployment_lambda(
             ],
             resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
         )
+    )
+    guardrail_ownership_read_policy = iam.Policy(
+        stack,
+        "DeploymentGuardrailOwnershipReadPolicy",
+        statements=[
+            iam.PolicyStatement(
+                actions=["bedrock:ListTagsForResource"],
+                resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+            )
+        ],
+    )
+    guardrail_ownership_read_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        guardrail_ownership_read_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "Bedrock assigns the Guardrail id after creation, so teardown cannot name "
+                    "a concrete ARN at synthesis time. This dedicated policy grants only the "
+                    "ownership-tag read on Guardrails in this account; application code requires "
+                    "live ManagedBy and AgentCoreStack tags before the separate delete action."
+                ),
+                applies_to=[{"regex": r"/^Resource::arn:.*:bedrock:\*:<AWS::AccountId>:guardrail\/\*$/g"}],
+            )
+        ],
+        apply_to_children=True,
     )
     # S3 Vectors teardown (Bug 167): the KB step self-provisions a vector
     # bucket+index; the manifest delete path in THIS Lambda tears it down.
@@ -1297,6 +1539,47 @@ def build_deployment_lambda(
             resources=["*"],
         )
     )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "bedrock-agentcore:StartBatchEvaluation",
+                "bedrock-agentcore:GetBatchEvaluation",
+            ],
+            resources=[f"arn:aws:bedrock-agentcore:*:{stack.account}:batch-evaluate/*"],
+        )
+    )
+    # Production Batch Evaluation preflights Transaction Search in the runtime
+    # Region before creating a job. Keep these two account-level reads isolated
+    # from the role's overflow managed policies: adding one statement there
+    # repacks several unrelated documents and inflates every code-only deploy.
+    batch_evaluation_trace_policy = iam.Policy(
+        stack,
+        "DeploymentBatchEvaluationTraceReadPolicy",
+        statements=[
+            iam.PolicyStatement(
+                actions=[
+                    "xray:GetIndexingRules",
+                    "xray:GetTraceSegmentDestination",
+                ],
+                resources=["*"],
+            ),
+        ],
+    )
+    batch_evaluation_trace_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        batch_evaluation_trace_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "X-Ray Transaction Search state is account/Region-level and "
+                    "these two read-only APIs expose no resource ARN."
+                ),
+                applies_to=["Resource::*"],
+            )
+        ],
+        apply_to_children=True,
+    )
     # SEPARATE, ARN-SCOPED STATEMENT: the ownership tag read that every delete on
     # this role's cascade depends on. This is the SAME defect fixed for the step
     # roles in platform/step_lambdas.py (see AGENTCORE_OWNERSHIP_READ_TYPES there)
@@ -1361,51 +1644,52 @@ def build_deployment_lambda(
             resources=[f"arn:aws:bedrock-agentcore:*:{stack.account}:gateway/*"],
         )
     )
-    # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
-    # SEPARATE STATEMENT, DIFFERENT ACTION PREFIX. Agent Registry graduated out
-    # of AgentCore into its own AWS service at GA: the boto3 clients are
-    # `agent-registry-control` / `agent-registry`, and BOTH planes authorize
-    # under a single `agent-registry:` prefix (the control-plane model's
-    # signingName is `agent-registry`, not `agent-registry-control`). Leaving
-    # these as `bedrock-agentcore:*Registry*` silently AccessDenies every
-    # federation call — and because the deploy-path auto-register is
-    # best-effort, the denial shows up only as a skipped log line.
-    # The data-plane search was also RENAMED: SearchRegistryRecords ->
-    # SearchDiscoverableRegistryRecords.
-    role.add_to_policy(
-        iam.PolicyStatement(
-            actions=[
-                # control plane (agent-registry-control)
-                "agent-registry:CreateRegistry",
-                "agent-registry:GetRegistry",
-                "agent-registry:UpdateRegistry",
-                "agent-registry:DeleteRegistry",
-                "agent-registry:ListRegistries",
-                "agent-registry:CreateRegistryRecord",
-                "agent-registry:GetRegistryRecord",
-                "agent-registry:ListRegistryRecords",
-                "agent-registry:UpdateRegistryRecord",
-                "agent-registry:UpdateRegistryRecordStatus",
-                "agent-registry:SubmitRegistryRecordForApproval",
-                "agent-registry:DeleteRegistryRecord",
-                # data plane (agent-registry) — discovery/search over APPROVED
-                # records. Note the GA operation names.
-                "agent-registry:SearchDiscoverableRegistryRecords",
-                "agent-registry:ListDiscoverableRegistryRecords",
-                "agent-registry:BatchGetDiscoverableRegistryRecord",
-                # tagging: registries/records created by the platform are tagged
-                # for cost attribution and teardown discovery.
-                "agent-registry:TagResource",
-                "agent-registry:UntagResource",
-                "agent-registry:ListTagsForResource",
-            ],
-            # The registryId is supplied by an admin at runtime (opt-in feature),
-            # so the registry/record ARNs are unknowable at synth time. Scoped by
-            # the exact action list instead of the resource, matching the
-            # AgentCore statement above.
-            resources=["*"],
+    if stack.region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS:
+        # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
+        # SEPARATE STATEMENT, DIFFERENT ACTION PREFIX. Agent Registry graduated out
+        # of AgentCore into its own AWS service at GA: the boto3 clients are
+        # `agent-registry-control` / `agent-registry`, and BOTH planes authorize
+        # under a single `agent-registry:` prefix (the control-plane model's
+        # signingName is `agent-registry`, not `agent-registry-control`). Leaving
+        # these as `bedrock-agentcore:*Registry*` silently AccessDenies every
+        # federation call — and because the deploy-path auto-register is
+        # best-effort, the denial shows up only as a skipped log line.
+        # The data-plane search was also RENAMED: SearchRegistryRecords ->
+        # SearchDiscoverableRegistryRecords.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    # control plane (agent-registry-control)
+                    "agent-registry:CreateRegistry",
+                    "agent-registry:GetRegistry",
+                    "agent-registry:UpdateRegistry",
+                    "agent-registry:DeleteRegistry",
+                    "agent-registry:ListRegistries",
+                    "agent-registry:CreateRegistryRecord",
+                    "agent-registry:GetRegistryRecord",
+                    "agent-registry:ListRegistryRecords",
+                    "agent-registry:UpdateRegistryRecord",
+                    "agent-registry:UpdateRegistryRecordStatus",
+                    "agent-registry:SubmitRegistryRecordForApproval",
+                    "agent-registry:DeleteRegistryRecord",
+                    # data plane (agent-registry) — discovery/search over APPROVED
+                    # records. Note the GA operation names.
+                    "agent-registry:SearchDiscoverableRegistryRecords",
+                    "agent-registry:ListDiscoverableRegistryRecords",
+                    "agent-registry:BatchGetDiscoverableRegistryRecord",
+                    # tagging: registries/records created by the platform are tagged
+                    # for cost attribution and teardown discovery.
+                    "agent-registry:TagResource",
+                    "agent-registry:UntagResource",
+                    "agent-registry:ListTagsForResource",
+                ],
+                # The registryId is supplied by an admin at runtime (opt-in feature),
+                # so the registry/record ARNs are unknowable at synth time. Scoped by
+                # the exact action list instead of the resource, matching the
+                # AgentCore statement above.
+                resources=["*"],
+            )
         )
-    )
     # Phase 1 Gap 1C — CloudWatch Logs Insights query for evaluator scores.
     role.add_to_policy(
         iam.PolicyStatement(
@@ -1416,6 +1700,34 @@ def build_deployment_lambda(
                 "logs:DescribeLogGroups",
             ],
             resources=["*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents",
+                "logs:StartQuery",
+                "logs:GetQueryResults",
+            ],
+            resources=[
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/runtimes/*",
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*",
+            ],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:PutRetentionPolicy",
+            ],
+            resources=[
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*",
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*:*",
+            ],
         )
     )
     # M-2: also delete the eval-results log groups on destroy_runtime. F-04 (signoff-g10):
@@ -2209,8 +2521,18 @@ def build_deployment_lambda(
             # with an explanation instead of becoming an AccessDenied inside a deployment that
             # has already created resources. Same constant, same value, both halves.
             GOVERNANCE_TAG_KEY_PREFIXES_ENV: governance_tag_key_prefixes_env_value(),
-            # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
+            # Phase 4 (Loom) FinOps — cost budgets table and conservative
+            # pre-invocation authorization unit.
             "BUDGET_TABLE_NAME": tables.budget.table_name,
+            "BUDGET_RESERVATION_USD": _budget_reservation_value(stack),
+            # Production-like environments land new versions in staging and require
+            # server-verified AgentCore batch evidence before the production pointer moves.
+            "PRODUCTION_EVALUATION_GATE": _production_evaluation_gate_value(stack, cfg.env),
+            "PRODUCTION_EVALUATION_POLICY_JSON": str(
+                stack.node.try_get_context("production_evaluation_policy_json") or ""
+            ),
+            "EVALUATION_EVIDENCE_KMS_KEY_ARN": evaluation_evidence_key.key_arn,
+            "DEPLOYMENT_LAMBDA_ROLE_ARN": role.role_arn,
             # Phase 5 (Loom) — audit trail table (middleware + admin router).
             "AUDIT_TABLE_NAME": tables.audit.table_name,
             # Loom-study 1.6 — JIT IAM permission-request workflow table.
@@ -2225,6 +2547,11 @@ def build_deployment_lambda(
             "ENVIRONMENT": cfg.env,
             "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
+            "WORKFORCE_USER_POOL_ID": (workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""),
+            "WORKFORCE_CLIENT_ID": (
+                workforce_user_pool_client.user_pool_client_id if workforce_user_pool_client is not None else ""
+            ),
+            "WORKFORCE_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "deployment",
             "TOOL_GENERATOR_MODEL_ID": f"{'eu' if stack.region.startswith('eu-') else 'apac' if stack.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
             # Tool-test sandbox network (F-11). Testing a generated tool executes
@@ -2387,6 +2714,7 @@ def build_stream_lambda(
     *,
     backend_code: _lambda.Code,
     deployments_table: dynamodb.Table,
+    budget_table: dynamodb.Table,
     user_pool: cognito.UserPool,
     user_pool_client: cognito.UserPoolClient,
 ) -> tuple:
@@ -2437,6 +2765,13 @@ def build_stream_lambda(
     # resolution + tenant-isolation checks. Read-only is sufficient — the
     # stream path never mutates state.
     deployments_table.grant_read_data(role)
+    budget_table.grant_read_write_data(role)
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["dynamodb:TransactWriteItems"],
+            resources=[budget_table.table_arn],
+        )
+    )
     # SSM read (config loader reads /agentcore-workflow/{env}/* like the
     # other Lambdas).
     role.add_to_policy(
@@ -2498,6 +2833,8 @@ def build_stream_lambda(
         environment={
             "DEPLOYMENTS_TABLE_NAME": deployments_table.table_name,
             "DEPLOYMENT_TABLE_NAME": deployments_table.table_name,
+            "BUDGET_TABLE_NAME": budget_table.table_name,
+            "BUDGET_RESERVATION_USD": _budget_reservation_value(stack),
             "ENVIRONMENT": cfg.env,
             "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,

@@ -53,6 +53,17 @@ def build_artifacts_bucket(stack: cdk.Stack, cfg: PlatformConfig, logging_bucket
         removal_policy=cfg.removal_policy,
         auto_delete_objects=cfg.allow_destroy,
         encryption=s3.BucketEncryption.S3_MANAGED,
+        # CORS grants no S3 permission: the one-hour presigned URL remains the
+        # bearer capability. A wildcard origin therefore lets each regional
+        # CloudFront frontend read only the exact object already authorized by
+        # that URL, without coupling this bucket back to the distribution.
+        cors=[
+            s3.CorsRule(
+                allowed_methods=[s3.HttpMethods.GET],
+                allowed_origins=["*"],
+                max_age=300,
+            )
+        ],
         server_access_logs_bucket=logging_bucket,
         server_access_logs_prefix="s3-artifacts/",
         lifecycle_rules=[

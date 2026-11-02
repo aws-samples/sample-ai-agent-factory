@@ -62,6 +62,14 @@ export interface CostSummary {
     limit: number;
     used_pct: number;
     status: 'ok' | 'warn' | 'over';
+    month?: string;
+    authorized?: number;
+    reserved?: number;
+    committed?: number;
+    remaining_authorization?: number;
+    reservation_unit?: number;
+    authorization_scope?: 'platform-mediated-invocation-operation';
+    is_actual_cost_cap?: false;
   };
 }
 
@@ -87,6 +95,9 @@ export interface TraceWaterfall {
 // Phase 5 (Loom) — admin action-audit summary.
 export interface AuditSummary {
   total: number;
+  audit_records?: number;
+  incomplete_attempts?: number;
+  unverified_legacy_events?: number;
   by_action: Record<string, number>;
   by_actor: Record<string, number>;
   // Loom-study 5.2 — analytics extras (optional for backward compat with older
@@ -96,7 +107,13 @@ export interface AuditSummary {
   by_day?: Array<{ day: string; count: number }>;
   events: Array<{
     action: string; actor_sub: string; method: string; path: string;
-    status_code: number; ts: string;
+    status_code: number; ts: string; phase?: 'attempt' | 'outcome';
+    correlation_id?: string; integrity_sha256?: string | null; integrity_verified?: boolean;
+  }>;
+  incomplete_events?: Array<{
+    action: string; actor_sub: string; method: string; path: string;
+    status_code: number; ts: string; phase: 'attempt';
+    correlation_id: string; integrity_sha256: string;
   }>;
 }
 

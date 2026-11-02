@@ -88,13 +88,13 @@ export const limitations: Record<ProjectId, Limitation[]> = {
       },
     },
     {
-      id: 'self-service-apac-prefix',
-      title: 'APAC inference prefixes',
-      text: "One region-specific caveat worth knowing before you pick a region: Bedrock's cross-region inference prefixes are `us.`, `eu.` and `apac.`, and the `apac.` family covers only the older Claude models. In APAC, current-generation models are published under *country* prefixes (`jp.` in `ap-northeast-1`, `au.` in `ap-southeast-2`) or as `global.`, so an APAC deployment may need its model ID set explicitly. `us-*` and `eu-*` regions need no such adjustment.",
+      id: 'self-service-release-regions',
+      title: 'Seven-Region release envelope',
+      text: 'Production deploys to exactly one of seven selected Regions: `us-east-1`, `us-east-2`, `us-west-2`, `eu-central-1`, `eu-west-1`, `eu-west-2` or `eu-west-3`. `deploy.sh`, the CDK app and the deploy API refuse every other Region, including `us-west-1` and every APAC Region. `eu-central-1` and `eu-west-2` run without managed Web Search; `eu-west-3` also has no AWS Agent Registry. Expanding the set requires the Region matrix, feature gates, tests and live certification to change together.',
       source: {
         file: SELF_SERVICE_README,
         heading: 'Deploying to another region',
-        quote: 'family covers only the older Claude models. In APAC, current-generation models',
+        quote: 'Set `AWS_REGION` to one of the seven selected release Regions',
       },
     },
     {

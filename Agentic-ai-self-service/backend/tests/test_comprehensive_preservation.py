@@ -164,16 +164,15 @@ class TestCodeGeneratorPreservation:
         assert "@app.entrypoint" in code
         assert "app.run()" in code
 
-    def test_langchain_web_search_template_content(self):
-        """**Validates: Requirements 3.1**
-
-        web-search-agent template MUST produce boto3 Converse API web search code.
-        """
+    def test_managed_web_search_template_content(self):
+        """web-search-agent must use the Strands Gateway MCP client."""
         config = _make_runtime_config()
         code = code_generator.generate_agent_code(config, template_id="web-search-agent")
-        assert "duckduckgo_search" in code
-        assert "fetch_webpage" in code
-        assert "_converse_loop" in code
+        assert "MCPClient" in code
+        assert "get_full_tools_list" in code
+        assert "GATEWAY_URL" in code
+        assert "_do_duckduckgo_search" not in code
+        assert "duckduckgo.com" not in code
 
     # Removed: test_strands_gateway_template_content asserted the legacy
     # _mcp_request / _to_bedrock_tools JSON-RPC helpers. Migrated to the official

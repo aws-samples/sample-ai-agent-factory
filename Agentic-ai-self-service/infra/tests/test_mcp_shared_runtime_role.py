@@ -84,6 +84,8 @@ def _role_logical_id(template_json: dict, role_name: str) -> str:
 def _role_actions(template_json: dict, logical_id: str) -> set[str]:
     actions: set[str] = set()
     for _source, statement in statements_for_role(template_json, logical_id):
+        if statement.get("Effect") != "Allow":
+            continue
         value = statement.get("Action") or []
         actions.update([value] if isinstance(value, str) else value)
     return actions

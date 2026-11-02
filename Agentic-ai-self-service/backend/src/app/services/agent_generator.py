@@ -94,12 +94,13 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
   TOOL SELECTION RULES (critical — a wrong toolId yields a gateway with NO
   targets and a broken agent):
   * BUILT-IN tools — set `isCustom: false` and use EXACTLY one of these toolIds:
-      - `duckduckgo_search`  (web search)
+      - `web_search`          (AWS-managed Web Search with source citations)
       - `wikipedia_search`   (encyclopedia lookup)
       - `weather_api`        (real-time weather + geocoding via Open-Meteo)
       - `web_page_fetcher`   (fetch a URL's text)
     Do NOT invent a built-in toolId. If the user asks for weather, use
-    `weather_api`. If they ask to search the web, use `duckduckgo_search`.
+    `weather_api`. If they ask to search the web, use `web_search`. The deployer
+    routes that ID to the managed AgentCore Gateway connector, not Lambda scraping.
   * CUSTOM tools — only when the need maps to NONE of the built-ins. Set
     `isCustom: true`, pick a unique snake_case `toolId`, and ALSO include:
       "inputSchema": {"type":"object","properties":{...},"required":[...]}
@@ -250,7 +251,7 @@ _SUBMIT_TOOL = {
 # agent is broken. Custom tools (isCustom=true) bypass this set but must carry an
 # inputSchema so the deploy can generate their Lambda. (Bug 138.)
 _BUILTIN_TOOL_IDS = {
-    "duckduckgo_search",
+    "web_search",
     "wikipedia_search",
     "weather_api",
     "web_page_fetcher",

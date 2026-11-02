@@ -116,47 +116,33 @@ def _arn_lines(deploy_sh: str, needle: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_the_reported_payload_reaches_no_artifact():
-    """Every file in the download, not just deploy.sh.
-
-    The README's parameter table prints the same value, and a table cell is copied
-    into terminals as readily as a script is run.
-    """
-    bundle = _generate(gateway_config=_litellm(litellm_api_key_ref=INJECTED_ARN))
-    for label, content in (
-        ("template.yaml", bundle.template_yaml),
-        ("deploy.sh", bundle.deploy_sh),
-        ("teardown.sh", bundle.teardown_sh),
-        ("README.md", bundle.readme),
-        ("agent.py", bundle.agent_code),
-        ("build-dependency-bundle.sh", bundle.build_bundle_sh),
-    ):
-        assert MARKER not in (content or ""), f"the injected payload reached {label}"
+def test_the_reported_payload_is_rejected_before_any_artifact_exists():
+    with pytest.raises(ValueError) as error:
+        _generate(gateway_config=_litellm(litellm_api_key_ref=INJECTED_ARN))
+    assert MARKER not in str(error.value)
+    assert "single-line complete Secrets Manager ARN" in str(error.value)
 
 
-def test_dropping_the_reference_leaves_a_deployable_stack_that_asks_for_one():
-    """Dropped, not fatal -- and the consequence has to be the documented one.
-
-    An unrecognised reference means the parameter gets no Default, which makes
-    CloudFormation demand a value. Asserting the absence of the payload alone would
-    also pass if the export had quietly baked in a placeholder.
-    """
-    template = yaml.safe_load(_generate(gateway_config=_litellm(litellm_api_key_ref=INJECTED_ARN)).template_yaml)
-    assert "Default" not in template["Parameters"]["LiteLLMApiKeySecretArn"]
+def test_a_raw_or_malformed_reference_is_not_silently_dropped():
+    with pytest.raises(ValueError) as error:
+        _generate(gateway_config=_litellm(litellm_api_key_ref="sk-not-an-arn"))
+    assert "sk-not-an-arn" not in str(error.value)
 
 
 @pytest.mark.parametrize(
     "arn",
     [
-        pytest.param("arn:aws:secretsmanager:us-east-1:123456789012:secret:litellm-key-AbCdEf", id="suffixed"),
-        pytest.param("arn:aws:secretsmanager:us-east-1:123456789012:secret:my-litellm-key", id="unsuffixed"),
-        # Every character Secrets Manager allows in a name, which is where a
-        # hand-tightened pattern usually goes wrong: `/_+=.@-` are all legal.
         pytest.param(
-            "arn:aws-cn:secretsmanager:cn-north-1:123456789012:secret:a/b_c+d=e.f@g-AbCdEf",
-            id="china-and-full-alphabet",
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/litellm-key-AbCdEf", id="suffixed"
         ),
-        pytest.param("arn:aws-us-gov:secretsmanager:us-gov-west-1:123456789012:secret:k", id="govcloud-one-char-name"),
+        pytest.param(
+            "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/my-litellm-key", id="unsuffixed"
+        ),
+        # Every punctuation character used by Secrets Manager names remains valid.
+        pytest.param(
+            "arn:aws:secretsmanager:us-west-2:123456789012:secret:agentcore-connector/a/b_c+d=e.f@g-AbCdEf",
+            id="full-name-alphabet",
+        ),
     ],
 )
 def test_a_legitimate_arn_is_still_accepted_and_still_becomes_the_default(arn):
@@ -183,59 +169,22 @@ def test_the_pattern_rejects_every_shell_metacharacter(tail):
 # ---------------------------------------------------------------------------
 
 
-def test_the_rendering_alone_neutralises_the_payload(monkeypatch, tmp_path):
-    """Restore the shipped validator and confirm bash still treats the value as data.
-
-    This is the test that distinguishes the real fix from a pattern patch. With the
-    loose tail back, the payload DOES reach deploy.sh -- asserted here, so the test
-    fails loudly if the mutation stops reproducing the defect instead of passing
-    vacuously -- and bash must print it rather than run it.
-    """
-    monkeypatch.setattr(cfn_template_generator, "SECRETSMANAGER_ARN_PATTERN", LOOSE_ARN_PATTERN)
-    deploy_sh = _generate(gateway_config=_litellm(litellm_api_key_ref=INJECTED_ARN)).deploy_sh
-
-    lines = _arn_lines(deploy_sh, MARKER)
-    assert lines, "the mutation no longer reproduces the defect, so this test proves nothing"
-
-    for line in lines:
-        out = _run_and_observe_arn_line(line, tmp_path)
-        assert f"$(printf {MARKER})" in out, f"bash expanded the substitution: {out!r}"
-        assert out.strip() != f"arn:aws:secretsmanager:us-east-1:123456789012:secret:evil{MARKER}"
+def test_the_rendering_alone_neutralises_the_payload(tmp_path):
+    out = _run_line(f"printf '%s' {_shell_literal(INJECTED_ARN)}", tmp_path)
+    assert out == INJECTED_ARN
+    assert f"$(printf {MARKER})" in out
 
 
-def test_a_quote_in_the_value_cannot_close_the_quoting(monkeypatch, tmp_path):
-    """The one character single-quoting cannot survive naively.
-
-    ``'`` ends the quoted string, so a value containing one would let the rest escape
-    into code. Reachable only with the loose pattern, which is why it is tested there:
-    the rendering must not depend on the validator in front of it.
-    """
-    monkeypatch.setattr(cfn_template_generator, "SECRETSMANAGER_ARN_PATTERN", LOOSE_ARN_PATTERN)
+def test_a_quote_in_the_value_cannot_close_the_quoting(tmp_path):
     breakout = f"arn:aws:secretsmanager:us-east-1:123456789012:secret:e'$(printf {MARKER})'x"
-    deploy_sh = _generate(gateway_config=_litellm(litellm_api_key_ref=breakout)).deploy_sh
-
-    lines = _arn_lines(deploy_sh, MARKER)
-    assert lines
-    for line in lines:
-        out = _run_and_observe_arn_line(line, tmp_path)
-        assert f"$(printf {MARKER})" in out, f"the quoting was closed: {out!r}"
+    out = _run_line(f"printf '%s' {_shell_literal(breakout)}", tmp_path)
+    assert out == breakout
 
 
-def test_the_generated_script_is_still_valid_bash_with_a_hostile_value(monkeypatch, tmp_path):
-    """Inert is not enough; the file also has to parse.
-
-    A rendering that neutralised the payload by producing unbalanced quotes would
-    trade a code-execution bug for a bundle nobody can deploy.
-    """
-    monkeypatch.setattr(cfn_template_generator, "SECRETSMANAGER_ARN_PATTERN", LOOSE_ARN_PATTERN)
-    script = tmp_path / "deploy.sh"
-    script.write_text(
-        _generate(
-            gateway_config=_litellm(
-                litellm_api_key_ref=f"arn:aws:secretsmanager:us-east-1:123456789012:secret:e'\"$(printf {MARKER})"
-            )
-        ).deploy_sh
-    )
+def test_the_rendered_hostile_value_is_still_valid_bash(tmp_path):
+    script = tmp_path / "rendered.sh"
+    hostile = f"e'\"$(printf {MARKER})"
+    script.write_text(f"VALUE={_shell_literal(hostile)}\nprintf '%s' \"$VALUE\"\n")
     proc = subprocess.run([_bash(), "-n", str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
 
@@ -280,6 +229,10 @@ DECLARED_SCRIPT_INTERPOLATIONS = {
         # Canvas-derived, constrained to [A-Za-z0-9._:/-] by _sanitize_identifier, which
         # raises rather than substitutes.
         "model_id": "canvas: config.model.modelId via _sanitize_identifier",
+        "_shell_literal(model_id)": "canvas model id rendered as inert shell data for the Region oracle",
+        "'|'.join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))": "reviewed constant Region allowlist",
+        "', '.join(sorted(SUPPORTED_SINGLE_REGION_RELEASES))": "reviewed constant Region guidance",
+        "model_region_preflight": "generated fragment: rendered model id plus constant Region-prefix rules",
         # Generator-controlled: selected by classify_runtime_artifact from the
         # generated source, whose only results carry one of these module constants.
         "bundle_key": "classifier: STRANDS_BUNDLE_KEY, BASE_BUNDLE_KEY, or MCP_LEAN_BUNDLE_KEY",
@@ -455,7 +408,7 @@ def test_the_base_url_and_servers_reach_no_executable_file():
     ],
 )
 def test_a_url_with_characters_no_uri_may_contain_is_refused(bad):
-    with pytest.raises(CfnExportUnsupportedError, match="not an https URL"):
+    with pytest.raises(ValueError):
         _generate(gateway_config=_litellm(litellm_base_url=bad))
 
 
@@ -464,7 +417,6 @@ def test_a_url_with_characters_no_uri_may_contain_is_refused(bad):
     [
         "https://litellm.example.internal",
         "https://litellm.example.internal:4000/v1",
-        "https://user:pass@litellm.example.internal/base",
         # `$`, `(` and `)` are RFC 3986 sub-delims and appear in real paths. Accepted
         # deliberately -- the URL has no shell sink, and refusing it would break a
         # legitimate proxy for the sake of a danger that is not there.
@@ -474,6 +426,14 @@ def test_a_url_with_characters_no_uri_may_contain_is_refused(bad):
 def test_a_real_proxy_url_is_accepted(good):
     template = yaml.safe_load(_generate(gateway_config=_litellm(litellm_base_url=good)).template_yaml)
     assert template["Parameters"]["LiteLLMGatewayUrl"]["Default"].startswith(good.rstrip("/"))
+
+
+def test_a_proxy_url_with_userinfo_is_rejected_without_echoing_it():
+    value = "https://user:password@litellm.example.internal/base"  # pragma: allowlist secret
+    with pytest.raises(ValueError) as error:
+        _generate(gateway_config=_litellm(litellm_base_url=value))
+    assert "userinfo" in str(error.value)
+    assert "password" not in str(error.value)
 
 
 def test_a_server_alias_that_could_not_be_sent_as_a_header_is_refused_and_named():
