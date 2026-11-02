@@ -13,6 +13,7 @@ account-agnostic.
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -66,9 +67,15 @@ def _json_response(status: int, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _oauth_error(status: int, code: str, *, challenge: str = "Bearer") -> dict[str, Any]:
+    """Build an RFC 6749 error response. ``code`` is always a literal at the call site.
+
+    The rejection is logged HERE, from the literal ``status`` and ``code`` arguments, so the
+    diagnostic never reads back from a response object (which carries headers and bodies).
+    """
     response = _json_response(status, {"error": code})
     if status == 401:
         response["headers"]["www-authenticate"] = challenge
+    _log_rejection(status, code)
     return response
 
 
@@ -267,29 +274,29 @@ def _route(event: dict[str, Any], method: str, path: str) -> dict[str, Any]:
     return _oauth_error(404, "not_found")
 
 
-def _log_rejection(method: str, path: str, response: dict[str, Any]) -> None:
-    """Live-gate diagnostic: route, status and OAuth error code only -- never tokens, headers or bodies."""
-    status = int(response.get("statusCode") or 0)
-    if status == 200:
-        return
-    try:
-        error = str((json.loads(str(response.get("body") or "{}")) or {}).get("error") or "")
-    except (ValueError, AttributeError):
-        error = ""
-    print(
-        json.dumps(
-            {"event": "rejected", "method": method[:8], "path": path[:64], "status": status, "error": error[:64]}
-        )
-    )
+#: Route of the request being served, set once per invocation by ``handler`` so the rejection log
+#: can name the method and path without ever being handed the response.
+_REQUEST_ROUTE: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
+    "acfpr_obo_request_route", default=("", "")
+)
+
+
+def _log_rejection(status: int, code: str) -> None:
+    """Live-gate diagnostic: route, status and OAuth error code only -- never tokens, headers or bodies.
+
+    Called only by ``_oauth_error`` with its literal arguments. Nothing here is read from a request
+    or a response object, so no credential-bearing value can reach the log.
+    """
+    method, path = _REQUEST_ROUTE.get()
+    print(json.dumps({"event": "rejected", "method": method[:8], "path": path[:64], "status": status, "error": code}))
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     request = (event.get("requestContext") or {}).get("http") or {}
     method = str(request.get("method") or "").upper()
     path = str(event.get("rawPath") or "/")
+    _REQUEST_ROUTE.set((method, path))
     try:
-        response = _route(event, method, path)
+        return _route(event, method, path)
     except Exception:
-        response = _oauth_error(503, "temporarily_unavailable")
-    _log_rejection(method, path, response)
-    return response
+        return _oauth_error(503, "temporarily_unavailable")

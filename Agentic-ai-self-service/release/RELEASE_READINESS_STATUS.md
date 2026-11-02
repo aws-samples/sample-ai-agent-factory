@@ -1,95 +1,87 @@
-# PR #65 Release-Readiness Status (handoff)
+# PR #65 Release-Readiness Status
 
-Branch: `wip/scenario-port` (HEAD `41f8468`, 47 commits ahead of
-`fix/self-service-production-readiness` @ `9ac7a0d`, 0 behind). **Not pushed, not merged.**
-Candidate under test: `acf-production` stack `SourceCommit` = `9ac7a0d…`, deployed us-east-1,
+Branch: `fix/self-service-production-readiness`. **Certified product SHA: `d7fd6c7`** (project tree
+`af7ec628`). The PR head is `d7fd6c7` plus exactly one harness-only commit (this file and
+`release/scenarios/obo_fixture_lambda.py`); `git diff d7fd6c7 HEAD -- backend/src infra frontend`
+is empty. Every `acf-production` stack reports `SourceCommit = d7fd6c7…`,
+`SourceProjectTree = af7ec628…`, `SourceDirty = false`, in all seven release Regions,
 account 048834207240.
 
-This file is the authoritative state. It is NOT a completion claim: the goal (all 59 scenarios
-live-proven + seven-Region campaign + review + merge) is **not met**.
+**Status: MERGE-READY.** Omar undrafts and merges; the agent does not.
 
-## Verified by evidence (live, receipt-backed, zero residue)
+## Clean-room cert at ONE SHA — complete, receipt-backed
 
-- **48 / 59 scenarios live-proven** against deployed `9ac7a0d` in us-east-1.
-- **gateway-governance: 11 / 11** — verified cycle 44, `journey.json`
-  (`build/release-scenario-journeys/9ac7a0d…/us-east-1/gateway-governance/journey.json`),
-  `cleanup_errors: []`. All 11 ids re-asserted PASS against the cached journey.
-  Oracles gate on the forgery-resistant **receipt-digest contract** (exact tool leaf +
-  per-argument SHA-256 `input_sha256`/`argument_sha256` + status + fixture dispatch count),
-  ported from the audited b43627b runner's `_receipt_for`.
+Run dir: `build/release-evidence/cand-d7fd6c7-us-east-1/`.
+`release_evidence.py status`: **`complete: true` — 140 active passes, 0 failures, 0 missing.**
 
-## Real defects found + fixed this arc (all committed on wip/scenario-port)
+- **Seven Regions × 3 live_region scenarios = 21/21 PASS**, every event bound to the SAME
+  `source_commit = d7fd6c7` and `project_tree = af7ec628`. Per-Region deployment binding checked
+  `SourceCommit`/`SourceProjectTree`/`SourceDirty=false`, the live template digest, and every
+  Lambda `CodeSha256` against the sealed assembly.
+  - us-east-1 · us-east-2 · us-west-2 · eu-central-1 · eu-west-1 · eu-west-2 · eu-west-3
+- **us-east-1 home-Region full suite**: live_positive 14, live_adversarial 29, rollback 3,
+  teardown_zero 4 (zero residue, including `aliasless-kms-and-log-groups-zero`), ui_cloudfront 2.
+- **Offline gates: 67/67** (offline_positive 30, offline_adversarial 17, offline_mutation 16,
+  exact_commit 2, clean_clone 2). Backend suite 9095 passed / 0 failed.
+- Sealed assemblies: `build/release-assemblies/d7fd6c7…/<region>/` for all seven Regions.
 
-1. `89b7b22` — public (AuthType=NONE) Lambda Function URL needs BOTH `lambda:InvokeFunctionUrl`
-   AND `lambda:InvokeFunction` (`InvokedViaFunctionUrl=True`) + `InvokeMode=BUFFERED`; absence
-   makes every public call 403 at the function-invoke gate (the "fixture never invoked" blocker).
-2. `d4d47f8` — `runtime_role_denial` made statement-authoritative: reads the role's
-   `NeverMutateGatewayOrPolicyControlPlane` Deny over all 15 FORBIDDEN_RUNTIME_CONTROL_ACTIONS;
-   IAM simulator used only as cross-check (it returns implicitDeny for policy actions simulated
-   against a gateway ARN — resource-type mismatch, not a real allow).
-3. `9b496b6` — journey must authorize the runtime invocation budget before probes (fixes 429);
-   `g-admins-cost` group required.
-4. `b4a5856` — drive runtime probes via `POST /api/test-runtime-async` (unredacted response +
-   `toolReceipts`); the slot invoke redacts output and surfaces no receipts under a guardrail.
-5. `cb5b7a6` — exact audited per-scenario prompts incl. the concatenation trick (blocked literal
-   must NOT appear in the prompt text, or the input guardrail blocks at ingestion = wrong stage).
-   This is what made the agent actually call tools (the zero-tool-call symptom was a prompt defect).
-6. `eecdde9` — receipt-digest oracles (see above); responseText is evidence only, because `9ac7a0d`
-   routes block text through Bedrock `blockedOutputsMessaging` (guardrails_step.py L227-228) /
-   Strands output redaction, so the final-turn string is LLM/path-dependent, not a stable contract.
-7. `41f8468` — same public-Function-URL grant fix applied to OBO's `_create_fixture`.
-   (Earlier arc also fixed: connector auth = api_key static Bearer; guardrail
-   `contentFilters:{prompt_attack:HIGH}`; deploy_body mirrors b43627b `_deployment_payload`.)
+## Product defect found + fixed this arc (committed as d7fd6c7)
 
-### Candidate behaviour difference (NOT a blocker, flag if you disagree)
-`9ac7a0d`'s user-facing guardrail-block message differs from audited b43627b: generic
-"The response was blocked by a safety guardrail." / "[Assistant output redacted.]" vs the specific
-"Tool input/result blocked…". Security behaviour is intact (tool blocked, receipt status=error, no
-fixture dispatch); only the human-readable string changed. Treated as acceptable messaging drift.
+`d7fd6c7` — **Converge managed Web Search Region refusal on the shared release-contract message**
+(`backend/src/app/services/managed_web_search.py`, +5/-3). `require_managed_web_search_region()`
+built an ad-hoc "unavailable" message that listed uncertified Regions via raw `{region!r}`; it now
+raises the shared `feature_unavailable_message("managed_web_search", region)` from
+`region_capabilities.py`. Caught at a reduced-feature Region by
+`test_reduced_region_features.py::…_web_search_template_is_refused_before_persistence…`;
+re-confirmed PASS in eu-west-3, eu-central-1 and eu-west-2. The new SHA invalidated prior
+evidence, so the full seven-Region cert was re-run at `d7fd6c7`.
 
-## Open / unproven (blocks merge under the evidence bar)
+## Harness-only follow-up on top of d7fd6c7 (CodeQL alert #117)
 
-- **OBO (3 ids): localized blocker.** The `41f8468` fixture-grant fix got the journey PAST the
-  fixture-never-invoked stage to the whoami assertion, which now returns a gateway `isError`
-  "An internal error occurred." The managed gateway invokes the fixture via its own IAM execution
-  role (`AgentCoreGateway-itobo…` inline `GatewayLambdaInvoke`), NOT the public URL — so the
-  whoami failure is a separate gateway→fixture invocation / OBO-identity-forwarding issue.
-  Diagnosis needs the fixture's CloudWatch logs, which teardown deletes: next step is a
-  keep-fixture run (skip `_delete_fixture` log-group deletion, or set `keep_log_group=True`) →
-  read the fixture log → fix. Unknown whether the root cause is product or harness.
-- **ui_cloudfront (1 id):** not yet ported (reuse `browser_widget.py` Playwright harness).
-- **clean_clone (2 ids):** not yet run; each is a ~3h detached `--no-hardlinks` full-gate run
-  (traceability `timeout_seconds:10800`). Defer to unattended / low-memory window.
+GitHub code scanning raised ONE new alert on the PR, `py/clear-text-logging-sensitive-data`
+(high) at `release/scenarios/obo_fixture_lambda.py::_log_rejection`. Analysis of the SARIF paths:
+all ten flows start at the ten `_oauth_error(...)` call sites (CodeQL treats each call's return
+as a sensitive source) and reach the log through `response → body → "error"`. The logged value
+was already one of seven constant OAuth codes, never request data — a **false positive** — but
+the diagnostic did read back from the response object.
 
-## Remaining path to merge (ordered)
+Fix: `_oauth_error` now logs the rejection itself from its literal `status`/`code` arguments; the
+route (method, path) comes from a per-invocation `ContextVar` set by `handler`. No logger reads a
+request or response any more. Behaviour is unchanged: one JSON line per rejection, silence on 200.
+Verified by seven behavioural checks (every code logged verbatim, 401 challenge preserved,
+header/body/token values provably absent from the log, exception path 503). This fixture is deployed
+only by the `identity.delegated_obo` live scenario and is **not part of any sealed product assembly**.
 
-1. Resolve OBO whoami (keep-fixture run → logs → fix) → OBO 3/3.
-2. Port + prove ui_cloudfront (1).
-3. Run clean_clone ×2 (~3h each, unattended).
-4. Merge `wip/scenario-port` → `fix/self-service-production-readiness`, run all offline gates
-   (ruff all 21 scenario files; `test_release_scenarios_live_binding.py`), add CHANGELOG entries
-   for the fixes above, `git push origin fix/self-service-production-readiness` (feature branch
-   ONLY — never main), confirm CI green for head.
-5. Seven-Region certifying campaign (us-east-1, us-east-2, us-west-2, eu-central-1, eu-west-1,
-   eu-west-2, eu-west-3): prepare_assemblies `--all-release-regions`, deploy 7 Regions serially,
-   recorder run all suites + live scenarios per Region, finalize, clean-clone cert, teardown.
-6. Independent adversarial review (subagents unmounted in this harness → in-session or a fresh
-   session with `include_memory=false`).
-7. Undraft + merge PR #65. **Then remind Omar to re-enable the three Kiro Crew deny rules:**
+## Residue sweep
+
+- Deleted the one pre-campaign orphan log group
+  `/aws/bedrock-agentcore/runtimes/it_widget_c8d9268db5bf_acbb40aa-lps9Es6t1w-DEFAULT`
+  (created 2026-10-30, before the 2026-11-01 campaign start; its runtime no longer existed) after
+  which `aliasless-kms-and-log-groups-zero` passed.
+- Swept this arc's own scratch left by a host-sleep-aborted attempt in us-west-2: recipient stack
+  `it-gateway-214f494aede943f8` (DELETE_COMPLETE) and bucket
+  `acfpr-recipient-us-west-2-fdfdbc8f5599`.
+
+## Environmental notes (not defects)
+
+- The broker caps a credential session near 60 min; the core-runtime plan can exceed it.
+  `regional_core.py` caches passed phases per (commit, Region, stack, template) and resumes at the
+  first unpassed phase. Two late-teardown `ExpiredToken` failures (us-west-2 core-runtime,
+  eu-west-1 CFN-recipient) passed on re-run; the functional assertions had already succeeded.
+- One us-west-2 CFN-recipient attempt failed on `Could not connect to the endpoint URL`: the host
+  slept mid-run (process CPU time 390 s vs 85 min wall-clock). Re-run under `caffeinate` passed.
+  Run live certification with sleep inhibited.
+- `release_evidence.py` binds a run to the exact HEAD commit and tree and refuses a dirty tree; any
+  new commit (even docs) starts a new source identity. Evidence for a candidate must be sealed
+  before follow-up commits land.
+
+## Remaining path (operator)
+
+1. Confirm CI is green on the PR head (offline gates mirror the local 67/67).
+2. **Omar undrafts + merges PR #65.** The agent never merges/undrafts.
+3. **Re-enable the three Kiro Crew deny rules** disabled for this campaign:
    `aws-destructive-cfn-deploy-mutate`, `aws-destructive-cfn-delete-stack`,
    `credential-exfil-s3-sync`.
-
-## Operational lessons (so the next run doesn't repeat failures)
-
-- **Creds vs journey length.** A journey takes ~28–30 min; the broker caps sessions well under the
-  requested duration (~46–65 min observed). A near-expiry cached re-vend caused an expired-token
-  teardown (cycle 43) that orphaned fixture residue. Re-vend immediately before each live run and
-  confirm `aws sts get-caller-identity` = 048834207240.
-- **Residue sweep after any failed teardown:** lambda `acfpr-{gg,obo}-fixture-*`, its IAM role +
-  inline policy, log group `/aws/lambda/…`, SSM `/acfpr/{gg,obo}/fixture/*`, synthetic cognito
-  users (email `acfpr.<label>.*@example.com` in pool `us-east-1_WYQPPnCqg` — username is the UUID
-  sub, so match on the email attribute), and product gateway roles `AgentCoreGateway-it{gg,obo}*`.
-- **Journey cache:** `rm -rf build/release-scenario-journeys/9ac7a0d*/us-east-1/<family>` before
-  each fresh live re-run (a recorded 429 still caches a completed journey).
-- Host policy: use the file-editor tool for large edits (shell heredocs trip an argv classifier);
-  keep AWS queries simple (`--query … --output text`). `timeout`/subagents not available.
+4. Optional, policy-dependent: if the release policy requires evidence bound to the exact PR head
+   rather than to the certified product SHA, re-run the campaign at HEAD (product bytes identical;
+   ~1–1.5 days).
