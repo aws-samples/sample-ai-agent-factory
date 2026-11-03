@@ -18,7 +18,7 @@ pydantic==2.13.4
 # static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml: that parameter, not
 # this file, pins the proxy that actually runs, and this pin is the client the
 # notebooks and scripts/test_gateway.py drive it with.
-litellm==1.88.6
+litellm==1.100.4
 # strands-agents 1.52.0 with BOTH extras. 0.1.5 caps openai<2.0.0 via its
 # `openai` extra, but litellm requires openai>=2.8.0 — pinning both made
 # pip resolution impossible, so `pip install -r` installed NOTHING and every
