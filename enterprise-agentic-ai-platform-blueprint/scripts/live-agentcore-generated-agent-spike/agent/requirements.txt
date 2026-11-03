@@ -23,7 +23,7 @@
 # Dockerfile's `pip check` still verifies overall consistency.
 boto3==1.43.98
 botocore==1.43.98
-strands-agents==1.44.0
+strands-agents==1.48.0
 strands-agents-tools==0.2.9
 # litellm 1.89.7 patches the authenticated SSRF and provider-credential
 # exfiltration via unvalidated request-body routing parameters
