@@ -55,8 +55,7 @@ export interface GatewayConfigurationModalProps {
  *  multi-target `targets[]` and falling back to the legacy single target. */
 function seedTargets(initial?: Partial<GatewayConfiguration>): GatewayTargetConfig[] {
   const merged = { ...createDefaultGatewayConfig(), ...initial } as GatewayConfiguration;
-  const resolved = resolveGatewayTargets(merged);
-  return resolved.length > 0 ? resolved : [createDefaultTargetConfig('lambda')];
+  return resolveGatewayTargets(merged);
 }
 
 export function GatewayConfigurationModal({
@@ -117,10 +116,8 @@ export function GatewayConfigurationModal({
       return errors;
     }
 
-    if (targets.length === 0) {
-      errors.push({ field: 'targets', message: 'At least one target is required' });
-    }
-
+    // Connected tool/MCP runtime nodes are validated against the whole graph.
+    // This editor validates only targets explicitly declared in this modal.
     targets.forEach((target, i) => {
       switch (target.type) {
         case 'openapi': {
@@ -132,7 +129,9 @@ export function GatewayConfigurationModal({
         }
         case 'lambda': {
           const lambdaConfig = target as LambdaTargetConfig;
-          if (lambdaConfig.functionArn && !isValidLambdaArn(lambdaConfig.functionArn)) {
+          if (!lambdaConfig.functionArn) {
+            errors.push({ field: `functionArn_${i}`, message: 'Lambda function ARN is required' });
+          } else if (!isValidLambdaArn(lambdaConfig.functionArn)) {
             errors.push({ field: `functionArn_${i}`, message: 'Invalid Lambda ARN format' });
           }
           break;
@@ -182,9 +181,13 @@ export function GatewayConfigurationModal({
   // single-target fields so old consumers keep working.
   const handleSave = useCallback(() => {
     const primary = targets[0];
+    const saved = { ...config, targets };
+    // An empty targets[] falls back to the legacy target in existing consumers.
+    // Clear both legacy fields so a removed target cannot reappear on reopen.
+    delete saved.targetType;
+    delete saved.targetConfig;
     onSave({
-      ...config,
-      targets,
+      ...saved,
       ...(primary ? { targetType: primary.type, targetConfig: primary } : {}),
     });
     onClose();
@@ -233,7 +236,8 @@ export function GatewayConfigurationModal({
             onChange={(value) => updateTargetField(index, 'functionArn', value)}
             placeholder="arn:aws:lambda:us-west-2:123456789012:function:my-function"
             error={getFieldError(`functionArn_${index}`)}
-            helpText="Leave empty to auto-create a test Lambda function"
+            required
+            helpText="ARN of the existing Lambda function to expose as a tool"
           />
         );
       }
@@ -515,8 +519,14 @@ export function GatewayConfigurationModal({
         <div className="space-y-6" data-testid="gateway-targets">
           <FormSection
             title="Gateway Targets"
-            description="Add one or more targets of different families (OpenAPI, Lambda, Smithy, MCP Server) to this gateway."
+            description="Add OpenAPI, Lambda or MCP Server targets here, or connect tool and MCP runtime nodes on the canvas."
           >
+            {targets.length === 0 && (
+              <p className="text-sm text-gray-600" data-testid="gateway-targets-empty">
+                No targets configured here. Connect a tool or MCP server runtime on the canvas,
+                or add a target below. Workflow validation checks these connections before deployment.
+              </p>
+            )}
             {targets.map((target, index) => (
               <div
                 key={index}
@@ -538,8 +548,7 @@ export function GatewayConfigurationModal({
                     type="button"
                     data-testid={`remove-target-${index}`}
                     onClick={() => removeTarget(index)}
-                    disabled={targets.length <= 1}
-                    className="mt-6 px-2 py-1 text-xs font-medium text-red-600 hover:text-red-800 disabled:text-gray-300 disabled:cursor-not-allowed"
+                    className="mt-6 px-2 py-1 text-xs font-medium text-red-600 hover:text-red-800"
                     aria-label={`Remove target ${index + 1}`}
                   >
                     Remove

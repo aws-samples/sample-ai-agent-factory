@@ -330,7 +330,10 @@ describe('mapGatewayDeployTargets', () => {
 
 describe('gateway provider selection', () => {
   it('defaults a freshly dropped Gateway node to AgentCore', () => {
-    expect(createDefaultGatewayConfig().gatewayProvider).toBe('agentcore');
+    const config = createDefaultGatewayConfig();
+    expect(config.gatewayProvider).toBe('agentcore');
+    expect(resolveGatewayTargets(config)).toEqual([]);
+    expect(config.targetConfig).toBeUndefined();
   });
 
   it('treats a canvas saved before this feature as AgentCore', () => {

@@ -165,11 +165,9 @@ export function createDefaultTargetConfig(targetType: GatewayTargetType): Gatewa
 export function createDefaultGatewayConfig(): GatewayConfiguration {
   return {
     name: '',
-    // AgentCore stays the default so a freshly dropped Gateway node behaves
-    // exactly as it did before the LiteLLM provider existed.
+    // Targets may come from connected canvas nodes. Add explicit targets only
+    // when the user requests them, rather than declaring an empty Lambda.
     gatewayProvider: 'agentcore',
-    targetType: 'lambda',
-    targetConfig: createDefaultTargetConfig('lambda'),
     enableSemanticSearch: true,
   };
 }
