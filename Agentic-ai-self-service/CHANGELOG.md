@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — a Gateway fed by connected canvas tools no longer carries a blank Lambda target
+
+- A freshly dropped Gateway node seeded its configuration with a default Lambda target whose
+  function ARN was empty, and the Gateway editor refused to save with no explicit target. A
+  gateway whose tools come from connected tool nodes or an MCP server runtime therefore always
+  carried a phantom target that validation then had to tolerate. The editor now starts with no
+  explicit targets, lets the last one be removed, and clears the legacy `targetType` /
+  `targetConfig` mirror on save so a removed target cannot reappear when the dialog is
+  reopened. Connected tool and MCP runtime nodes are validated against the whole graph, as
+  before; only targets declared in the dialog are validated there.
+- An explicitly added Lambda target now requires a valid function ARN. The field used to read
+  "Leave empty to auto-create a test Lambda function", which the deployment path never did.
+- The Managed Web Search gallery template now carries an explicit connected `web_search` tool
+  node wired to its gateway, so the template validates and deploys the same way whether it is
+  opened from the gallery or re-imported.
+
 ### Fixed — a reduced Region's Web Search refusal names the release Regions, not the AWS list
 
 - `managed_web_search.require_managed_web_search_region` built its own refusal from

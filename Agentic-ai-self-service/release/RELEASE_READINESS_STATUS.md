@@ -1,20 +1,30 @@
-# PR #65 Release-Readiness Status
+# Release-Readiness Status
 
-Branch: `fix/self-service-production-readiness`. **Certified product SHA: `d7fd6c7`** (project tree
-`af7ec628`). The PR head is `d7fd6c7` plus exactly one harness-only commit (this file and
-`release/scenarios/obo_fixture_lambda.py`); `git diff d7fd6c7 HEAD -- backend/src infra frontend`
-is empty. Every `acf-production` stack reports `SourceCommit = d7fd6c7…`,
-`SourceProjectTree = af7ec628…`, `SourceDirty = false`, in all seven release Regions,
-account 048834207240.
+This file records the most recent production-readiness certification of the Self-Service
+platform and what has changed since. It is maintained alongside `CHANGELOG.md`; the mechanics
+of a certification run are in [`release/README.md`](README.md).
 
-**Status: MERGE-READY.** Omar undrafts and merges; the agent does not.
+## Current state
 
-## Clean-room cert at ONE SHA — complete, receipt-backed
+- **Released to `main`:** PR #65 (`fix/self-service-production-readiness`), merged 2026-11-02.
+- **Certified product SHA: `d7fd6c7`** (project tree `af7ec628`). The merge carried one further
+  commit, `cd7a6fa`, that touched only the OBO certification fixture and this file; the shipped
+  `backend/`, `infra/` and `frontend/` bytes were exactly the certified ones.
+- **Since the certification:** PR #82 (`fix/gateway-connected-tool-targets`) changed the frontend
+  Gateway editor and gallery templates only (see `CHANGELOG.md`, "a Gateway fed by connected
+  canvas tools no longer carries a blank Lambda target"). It touched no backend or infrastructure
+  file, so the certified backend and CDK product are unchanged; the frontend is covered by its
+  unit suite and CI, not by a new live campaign.
+- **Version:** every component still declares `0.1.0` (2026-07-17) with the changes above
+  recorded under `[Unreleased]`. No release tag has been cut for the certified state.
 
-Run dir: `build/release-evidence/cand-d7fd6c7-us-east-1/`.
+## The certification (PR #65) — complete, receipt-backed
+
+Run id `cand-d7fd6c7-us-east-1`, in the certification account (one account, bound by
+`start --account-id`; the id is recorded in the run's receipts, not here).
 `release_evidence.py status`: **`complete: true` — 140 active passes, 0 failures, 0 missing.**
 
-- **Seven Regions × 3 live_region scenarios = 21/21 PASS**, every event bound to the SAME
+- **Seven Regions × 3 live_region scenarios = 21/21 PASS**, every event bound to the same
   `source_commit = d7fd6c7` and `project_tree = af7ec628`. Per-Region deployment binding checked
   `SourceCommit`/`SourceProjectTree`/`SourceDirty=false`, the live template digest, and every
   Lambda `CodeSha256` against the sealed assembly.
@@ -23,65 +33,59 @@ Run dir: `build/release-evidence/cand-d7fd6c7-us-east-1/`.
   teardown_zero 4 (zero residue, including `aliasless-kms-and-log-groups-zero`), ui_cloudfront 2.
 - **Offline gates: 67/67** (offline_positive 30, offline_adversarial 17, offline_mutation 16,
   exact_commit 2, clean_clone 2). Backend suite 9095 passed / 0 failed.
-- Sealed assemblies: `build/release-assemblies/d7fd6c7…/<region>/` for all seven Regions.
+- **CI on the merged head:** all jobs green, including strict synthesis in all seven Regions and
+  the CodeQL alert gate ("No new alerts in code changed by this pull request").
 
-## Product defect found + fixed this arc (committed as d7fd6c7)
+The run directory and the sealed per-Region assemblies were local build artifacts (they grew to
+roughly 100 GB across the campaign) and were not retained after the merge. The durable record is
+this file, the CI history on the merged commits, and the controls/traceability contracts under
+`release/`. A future audit that needs receipts re-runs the campaign at the SHA under review.
 
-`d7fd6c7` — **Converge managed Web Search Region refusal on the shared release-contract message**
-(`backend/src/app/services/managed_web_search.py`, +5/-3). `require_managed_web_search_region()`
-built an ad-hoc "unavailable" message that listed uncertified Regions via raw `{region!r}`; it now
-raises the shared `feature_unavailable_message("managed_web_search", region)` from
-`region_capabilities.py`. Caught at a reduced-feature Region by
-`test_reduced_region_features.py::…_web_search_template_is_refused_before_persistence…`;
-re-confirmed PASS in eu-west-3, eu-central-1 and eu-west-2. The new SHA invalidated prior
-evidence, so the full seven-Region cert was re-run at `d7fd6c7`.
+## Defects found and fixed by the certification
 
-## Harness-only follow-up on top of d7fd6c7 (CodeQL alert #117)
+- `d7fd6c7` — **reduced-Region Web Search refusal used an ad-hoc message** that listed Regions
+  outside the seven-Region envelope. `require_managed_web_search_region()` now raises the shared
+  `region_capabilities.feature_unavailable_message("managed_web_search", …)`. Caught live at the
+  first reduced-feature Region; pinned by
+  `test_reduced_region_features.py::test_web_search_template_is_refused_before_persistence_where_the_matrix_says_so`
+  and re-confirmed in eu-west-3, eu-central-1 and eu-west-2. The new SHA invalidated prior
+  evidence, so the full seven-Region cert was re-run at `d7fd6c7`.
+- `cd7a6fa` — **OBO certification fixture logging** (`release/scenarios/obo_fixture_lambda.py`).
+  CodeQL `py/clear-text-logging-sensitive-data` flagged a diagnostic that read the OAuth error
+  code back out of the response object. The value was already one of seven constants; the fixture
+  now logs from the literal `status`/`code` arguments at the point the error is built, so no logger
+  reads a request or response. Harness-only: the fixture is deployed by the
+  `identity.delegated_obo` scenario and is not part of any sealed product assembly.
 
-GitHub code scanning raised ONE new alert on the PR, `py/clear-text-logging-sensitive-data`
-(high) at `release/scenarios/obo_fixture_lambda.py::_log_rejection`. Analysis of the SARIF paths:
-all ten flows start at the ten `_oauth_error(...)` call sites (CodeQL treats each call's return
-as a sensitive source) and reach the log through `response → body → "error"`. The logged value
-was already one of seven constant OAuth codes, never request data — a **false positive** — but
-the diagnostic did read back from the response object.
+## Deployed footprint
 
-Fix: `_oauth_error` now logs the rejection itself from its literal `status`/`code` arguments; the
-route (method, path) comes from a per-invocation `ContextVar` set by `handler`. No logger reads a
-request or response any more. Behaviour is unchanged: one JSON line per rejection, silence on 200.
-Verified by seven behavioural checks (every code logged verbatim, 401 challenge preserved,
-header/body/token values provably absent from the log, exception path 503). This fixture is deployed
-only by the `identity.delegated_obo` live scenario and is **not part of any sealed product assembly**.
+`acf-production` is deployed at `d7fd6c7` in all seven release Regions of the certification
+account (the campaign's own deployments; they remain running and billing until torn down with
+`scripts/cleanup.sh` per Region). One pre-campaign stack, `acfpr-cert-8d6cd05` in eu-west-1
+(created 2026-10-08), predates this work and was left untouched.
 
-## Residue sweep
-
-- Deleted the one pre-campaign orphan log group
-  `/aws/bedrock-agentcore/runtimes/it_widget_c8d9268db5bf_acbb40aa-lps9Es6t1w-DEFAULT`
-  (created 2026-10-30, before the 2026-11-01 campaign start; its runtime no longer existed) after
-  which `aliasless-kms-and-log-groups-zero` passed.
-- Swept this arc's own scratch left by a host-sleep-aborted attempt in us-west-2: recipient stack
-  `it-gateway-214f494aede943f8` (DELETE_COMPLETE) and bucket
-  `acfpr-recipient-us-west-2-fdfdbc8f5599`.
-
-## Environmental notes (not defects)
+## Operating notes for the next campaign
 
 - The broker caps a credential session near 60 min; the core-runtime plan can exceed it.
   `regional_core.py` caches passed phases per (commit, Region, stack, template) and resumes at the
-  first unpassed phase. Two late-teardown `ExpiredToken` failures (us-west-2 core-runtime,
-  eu-west-1 CFN-recipient) passed on re-run; the functional assertions had already succeeded.
-- One us-west-2 CFN-recipient attempt failed on `Could not connect to the endpoint URL`: the host
-  slept mid-run (process CPU time 390 s vs 85 min wall-clock). Re-run under `caffeinate` passed.
-  Run live certification with sleep inhibited.
-- `release_evidence.py` binds a run to the exact HEAD commit and tree and refuses a dirty tree; any
-  new commit (even docs) starts a new source identity. Evidence for a candidate must be sealed
-  before follow-up commits land.
+  first unpassed phase, so a re-vend resumes cleanly. Two late-teardown `ExpiredToken` failures
+  passed on re-run with the functional assertions already satisfied.
+- Run live certification with host sleep inhibited (`caffeinate -i -s` on macOS). One attempt
+  failed on `Could not connect to the endpoint URL` because the laptop slept mid-run (process CPU
+  time 390 s against 85 min of wall-clock).
+- `release_evidence.py` binds a run to the exact HEAD commit and tree and refuses a dirty tree.
+  Any new commit, even documentation, starts a new source identity: seal the evidence for a
+  candidate before follow-up commits land, and keep docs-only follow-ups in a separate PR.
+- Prune `build/release-assemblies/` and `build/release-evidence/` for superseded SHAs as the
+  campaign progresses; a fresh checkout is cheapest with `git clone --filter=blob:none`.
+- Every `CHANGELOG.md` edit shifts the one allowlisted `detect-secrets` finding; re-run
+  `detect-secrets-hook` with the baseline and commit the refreshed line number, or CI fails.
 
-## Remaining path (operator)
+## Open items
 
-1. Confirm CI is green on the PR head (offline gates mirror the local 67/67).
-2. **Omar undrafts + merges PR #65.** The agent never merges/undrafts.
-3. **Re-enable the three Kiro Crew deny rules** disabled for this campaign:
+1. Cut a release (version bump across `backend/`, `frontend/`, `infra/`; move `[Unreleased]` to a
+   dated section) for the certified state plus #82.
+2. Decide the fate of the six non-home `acf-production` deployments left running by the campaign.
+3. Re-enable the three Kiro Crew deny rules disabled for the campaign:
    `aws-destructive-cfn-deploy-mutate`, `aws-destructive-cfn-delete-stack`,
    `credential-exfil-s3-sync`.
-4. Optional, policy-dependent: if the release policy requires evidence bound to the exact PR head
-   rather than to the certified product SHA, re-run the campaign at HEAD (product bytes identical;
-   ~1–1.5 days).
