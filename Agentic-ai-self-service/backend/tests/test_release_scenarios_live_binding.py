@@ -40,7 +40,7 @@ regional_core = _load("regional_core")
 COMMIT = "a" * 40
 TREE = "b" * 40
 REGION = "eu-west-3"
-ACCOUNT = "048834207240"
+ACCOUNT = "123456789012"
 
 
 def _asset_bytes(label: str) -> bytes:
