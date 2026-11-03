@@ -29,5 +29,5 @@ strands-agents-tools==0.2.9
 # exfiltration via unvalidated request-body routing parameters
 # (GHSA-3cv6-jpf6-8222 / CVE-2026-84377, affects >= 1.89.0 < 1.89.7). Smallest
 # release on the live-proven 1.89 line that clears it.
-litellm==1.89.7
+litellm==1.100.4
 bedrock-agentcore==1.23.1
