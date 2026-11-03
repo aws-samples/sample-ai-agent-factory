@@ -28,7 +28,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     icon: '🔍',
     difficulty: 'beginner',
     tags: ['strands', 'web-search', 'gateway', 'managed', 'citations'],
-    componentTypes: ['runtime', 'gateway', 'identity'],
+    componentTypes: ['runtime', 'gateway', 'identity', 'tool'],
     builtInTools: [
       { name: 'Amazon Web Search', icon: '🔍', description: 'Managed Web Search Tool with titles, URLs, text excerpts, dates, and citations' },
       { name: 'Weather (Open-Meteo)', icon: '🌤️', description: 'Real-time weather data via Open-Meteo API' },
@@ -88,10 +88,23 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
           },
         } as IdentityConfiguration,
       },
+      {
+        idSuffix: 'tool-web-search',
+        type: 'tool',
+        position: { x: 900, y: 150 },
+        label: 'Amazon Web Search',
+        configuration: {
+          name: 'Amazon Web Search',
+          toolId: 'web_search',
+          description: 'Managed AgentCore Web Search with source titles, URLs, and citations',
+          enabled: true,
+        } as ToolConfiguration,
+      },
     ],
     edges: [
       { sourceIdSuffix: 'runtime', targetIdSuffix: 'gateway', connectionType: 'data' },
       { sourceIdSuffix: 'runtime', targetIdSuffix: 'identity', connectionType: 'tool' },
+      { sourceIdSuffix: 'gateway', targetIdSuffix: 'tool-web-search', connectionType: 'tool' },
     ],
   },
 

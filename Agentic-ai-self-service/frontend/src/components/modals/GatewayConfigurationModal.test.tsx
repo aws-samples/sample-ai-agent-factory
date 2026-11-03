@@ -10,6 +10,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { GatewayConfigurationModal } from './GatewayConfigurationModal';
 import type { GatewayConfiguration } from '../../types/components';
+import { mapGatewayDeployTargets, resolveGatewayTargets } from '../../utils/gatewayConfig';
+import { validateWorkflow } from '../../utils/validation';
 
 // The MCP catalog fetch is lazy + async; a resolved empty list keeps the
 // mcp_server row rendering its "Custom endpoint…" option without network.
@@ -70,10 +72,10 @@ describe('GatewayConfigurationModal — multiple targets', () => {
     expect(saved.targets?.map((t) => t.type)).toEqual(['lambda', 'openapi', 'mcp_server']);
     // Legacy single-target fields mirror targets[0] for backward compat.
     expect(saved.targetType).toBe('lambda');
-    expect(saved.targetConfig.type).toBe('lambda');
+    expect(saved.targetConfig?.type).toBe('lambda');
   });
 
-  it('removes a target row (and cannot remove the last one)', () => {
+  it('removes every target and clears the mirrored legacy target on save', () => {
     const onSave = vi.fn();
     const initial: Partial<GatewayConfiguration> = {
       name: 'gw',
@@ -95,13 +97,85 @@ describe('GatewayConfigurationModal — multiple targets', () => {
     fireEvent.click(screen.getByTestId('remove-target-1'));
     expect(screen.queryByTestId('target-row-1')).toBeNull();
 
-    // The remaining single row's remove button is disabled.
-    expect((screen.getByTestId('remove-target-0') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('remove-target-0'));
+    expect(screen.queryByTestId('target-row-0')).toBeNull();
 
     fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).toHaveBeenCalledTimes(1);
     const saved = onSave.mock.calls[0][0] as GatewayConfiguration;
-    expect(saved.targets).toHaveLength(1);
-    expect(saved.targets?.[0].type).toBe('lambda');
+    expect(saved.targets).toEqual([]);
+    expect(saved.targetType).toBeUndefined();
+    expect(saved.targetConfig).toBeUndefined();
+    expect(resolveGatewayTargets(saved)).toEqual([]);
+    expect(mapGatewayDeployTargets(saved)).toEqual({ externalMcpServers: [], gatewayTargets: [] });
+  });
+
+  it('keeps a targetless configuration after save/reopen while deployment still checks canvas tools', () => {
+    const onSave = vi.fn();
+    const initial: GatewayConfiguration = { name: 'connected-tools-gw', enableSemanticSearch: true };
+    const { rerender } = render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={onSave} initialConfig={initial} />,
+    );
+    fireEvent.click(screen.getByTestId('tab-target'));
+    expect(screen.queryByTestId('target-row-0')).toBeNull();
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(JSON.stringify(onSave.mock.calls[0][0])) as GatewayConfiguration;
+    expect(resolveGatewayTargets(saved)).toEqual([]);
+    rerender(<GatewayConfigurationModal isOpen onClose={() => {}} onSave={onSave} initialConfig={saved} />);
+    expect(screen.queryByTestId('target-row-0')).toBeNull();
+
+    // Saving a draft is allowed; deployment still requires something for the gateway to serve.
+    const result = validateWorkflow(
+      [{ id: 'gw', type: 'gateway', data: { configuration: saved } }],
+      [],
+    );
+    expect(result.errors.some((error) => error.componentId === 'gw' && error.field === 'targets')).toBe(true);
+  });
+
+  it('lets a stale blank legacy Lambda target be removed and keeps it removed on reopen', () => {
+    const onSave = vi.fn();
+    const initial: GatewayConfiguration = {
+      name: 'legacy-gw',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: '' },
+      enableSemanticSearch: true,
+    };
+    const { rerender } = render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={onSave} initialConfig={initial} />,
+    );
+    fireEvent.click(screen.getByTestId('tab-target'));
+    fireEvent.click(screen.getByTestId('remove-target-0'));
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(JSON.stringify(onSave.mock.calls[0][0])) as GatewayConfiguration;
+    expect(saved.targetConfig).toBeUndefined();
+    expect(resolveGatewayTargets(saved)).toEqual([]);
+    rerender(<GatewayConfigurationModal isOpen onClose={() => {}} onSave={onSave} initialConfig={saved} />);
+    expect(screen.queryByTestId('target-row-0')).toBeNull();
+  });
+
+  it('requires a valid ARN when the user adds an explicit Lambda target', () => {
+    const onSave = vi.fn();
+    render(
+      <GatewayConfigurationModal
+        isOpen onClose={() => {}} onSave={onSave}
+        initialConfig={{ name: 'gw', enableSemanticSearch: true }}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('tab-target'));
+    fireEvent.click(screen.getByTestId('add-target'));
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).not.toHaveBeenCalled();
+    expect((screen.getByTestId('modal-save-button') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByTestId('field-functionArn_0'), { target: { value: 'invalid-arn' } });
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByTestId('field-functionArn_0'), {
+      target: { value: 'arn:aws:lambda:us-east-1:123456789012:function:tool' },
+    });
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).toHaveBeenCalledTimes(1);
   });
 });
 

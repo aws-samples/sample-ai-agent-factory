@@ -112,9 +112,10 @@ export interface GatewayConfiguration {
    * Single-target legacy fields. Kept for backward compatibility with saved
    * canvases and existing tests. When `targets` is present and non-empty it is
    * the source of truth and these are ignored; otherwise they are the target.
+   * Absent when the gateway is served by connected tools or an MCP runtime.
    */
-  targetType: GatewayTargetType;
-  targetConfig: GatewayTargetConfig;
+  targetType?: GatewayTargetType;
+  targetConfig?: GatewayTargetConfig;
   /** LiteLLM proxy base URL (https). Required when gatewayProvider is 'litellm'. */
   litellmBaseUrl?: string;
   /**
