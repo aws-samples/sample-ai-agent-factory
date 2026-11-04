@@ -17,7 +17,10 @@ from app.services.cfn_template_generator import CfnExportUnsupportedError, CfnTe
 from app.services.runtime_artifact import STRANDS_BUNDLE_KEY, classify_runtime_artifact
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
-SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/export-abcdef"
+# Synthetic recipient-account reference for offline IAM tests; this is not a credential.
+SECRET_ARN = (
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/export-abcdef"  # pragma: allowlist secret
+)
 
 
 def _request(*, nested=None, **kwargs) -> DeployRequest:
@@ -318,7 +321,8 @@ for protocol, module_name in (
 class SecretClient:
     def get_secret_value(self, *, SecretId):
         secret_reads.append(SecretId)
-        return {"SecretString": "Authorization=Bearer PRIVATE-RUNTIME-AUTH"}
+        # Synthetic marker returned only by this mock; no live credential is read.
+        return {"SecretString": "Authorization=Bearer PRIVATE-RUNTIME-AUTH"}  # pragma: allowlist secret
 def client(service):
     assert service == "secretsmanager"
     return SecretClient()

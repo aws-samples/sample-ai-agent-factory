@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from app.models.deployment_models import DeployRequest, ObservabilityConfig
 from app.services.deployment_payload_validation import PayloadPhase, validate_deployment_payload
-from app.services.observability import build_otel_env_vars
+from app.services.observability import build_otel_env_vars, build_otel_resource_attributes
 
 
 class CfnObservabilityError(ValueError):
@@ -97,6 +97,15 @@ def build_export_observability_env(
             "Observability extraHeaders cannot be exported as plaintext; use authHeaderSecretArn."
         )
 
+    try:
+        resource_attributes = build_otel_resource_attributes(
+            observability.resource_attributes,
+            deployment_id=runtime_name,
+        )
+    except ValueError as exc:
+        # The shared serializer's error is deliberately value-free.
+        raise CfnObservabilityError(str(exc)) from None
+
     effective = observability.model_dump()
     if not observability.enabled:
         # This checkbox opts out of the external backend, not the local usage
@@ -125,7 +134,5 @@ def build_export_observability_env(
             env["OTEL_TRACES_SAMPLER"] = "parentbased_traceidratio"
             env["OTEL_TRACES_SAMPLER_ARG"] = str(observability.sample_rate)
         if observability.resource_attributes:
-            attributes = dict(observability.resource_attributes)
-            attributes.setdefault("deployment.id", runtime_name)
-            env["OTEL_RESOURCE_ATTRIBUTES"] = ",".join(f"{key}={value}" for key, value in attributes.items() if value)
+            env["OTEL_RESOURCE_ATTRIBUTES"] = resource_attributes
     return env

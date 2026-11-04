@@ -793,6 +793,12 @@ attributes; authentication remains a Secrets Manager reference, not a credential
 embedded in the template or source. Native usage telemetry does not invent a
 localhost collector. Account-level CloudWatch Transaction Search prerequisites
 remain the destination account operator's responsibility.
+Resource attribute values are URL-encoded for the OpenTelemetry environment
+parser, preserving commas, literal percent sequences, Unicode, significant
+whitespace and empty strings. Keys retain their spelling and case. Empty keys,
+keys with surrounding whitespace, and keys containing commas, equals signs or
+NUL characters are refused because the runtime environment cannot represent
+them unchanged.
 
 These resources and runtime bindings are part of the exported stack. They do not
 export the platform itself, its tenant authorization service, staging/production

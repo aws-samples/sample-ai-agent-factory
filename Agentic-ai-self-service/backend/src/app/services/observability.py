@@ -20,6 +20,7 @@ import os
 import re
 from collections.abc import Collection
 from functools import lru_cache
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -283,12 +284,35 @@ def get_platform_observability_defaults_lenient() -> dict | None:
         return None
 
 
-def _resource_attributes_string(attrs: dict[str, str], deployment_id: str) -> str:
-    """Build the OTEL_RESOURCE_ATTRIBUTES value (comma-separated key=value)."""
+def build_otel_resource_attributes(attrs: dict[str, str], deployment_id: str = "") -> str:
+    """Serialize resource metadata without changing its keys or string values.
+
+    The SDK splits pairs before URL-decoding values, so commas, percent signs,
+    Unicode, and significant whitespace must be encoded. Empty values remain
+    explicit ``key=`` pairs. Keys are not URL-decoded by the SDK: refuse keys
+    its environment grammar cannot represent instead of silently changing them.
+    """
     merged = dict(attrs or {})
     if deployment_id and "deployment.id" not in merged:
         merged["deployment.id"] = deployment_id
-    return ",".join(f"{k}={v}" for k, v in merged.items() if v)
+    pairs = []
+    for key, value in merged.items():
+        if not isinstance(key, str) or not key or key.strip() != key or "," in key or "=" in key or "\x00" in key:
+            # Do not echo attribute names/values: they are untrusted metadata
+            # and can contain sensitive material even when the shape is invalid.
+            raise ValueError(
+                "Observability resource attribute keys must be nonempty, "
+                "without commas, equals signs, NUL characters, or surrounding whitespace."
+            )
+        if not isinstance(value, str):
+            raise ValueError("Observability resource attribute values must be strings.")
+        try:
+            key.encode("utf-8")
+            encoded_value = quote(value, safe="")
+        except UnicodeError:
+            raise ValueError("Observability resource attribute keys and values must be valid UTF-8 text.") from None
+        pairs.append(f"{key}={encoded_value}")
+    return ",".join(pairs)
 
 
 def build_otel_env_vars(
@@ -450,16 +474,22 @@ def build_otel_env_vars(
         default_endpoint = _PROVIDER_DEFAULT_ENDPOINTS.get(provider, "")
         if default_endpoint and (caller_secret or caller_headers):
             endpoint = default_endpoint
+    resource_attrs = obs.get("resource_attributes") or obs.get("resourceAttributes") or {}
     if not endpoint:
         # No usable 3rd-party export target, but observability IS enabled
         # (explicitly or by default). The generated bootstrap turns this into
         # usage-only runtime log records for cost rollup.
-        return _finalize(dict(_AGENTCORE_NATIVE_OBSERVABILITY_ENV))
+        native_env = dict(_AGENTCORE_NATIVE_OBSERVABILITY_ENV)
+        if resource_attrs:
+            native_env["OTEL_RESOURCE_ATTRIBUTES"] = build_otel_resource_attributes(
+                resource_attrs,
+                deployment_id,
+            )
+        return _finalize(native_env)
 
     protocol = obs.get("otlp_protocol") or obs.get("otlpProtocol", "http/protobuf")
     service_name = obs.get("service_name") or obs.get("serviceName") or runtime_name
     sample_rate = obs.get("sample_rate") if "sample_rate" in obs else obs.get("sampleRate", 1.0)
-    resource_attrs = obs.get("resource_attributes") or obs.get("resourceAttributes") or {}
     secret_arn = caller_secret
     if secret_arn and not plat and secret_arn not in trusted_secret_arns:
         # Critic Finding 1: per-canvas (tenant-supplied) ARNs MUST live in
@@ -483,7 +513,7 @@ def build_otel_env_vars(
         "OTEL_BSP_EXPORT_TIMEOUT": "5000",
     }
 
-    resource_str = _resource_attributes_string(resource_attrs, deployment_id)
+    resource_str = build_otel_resource_attributes(resource_attrs, deployment_id)
     if resource_str:
         env["OTEL_RESOURCE_ATTRIBUTES"] = resource_str
 
