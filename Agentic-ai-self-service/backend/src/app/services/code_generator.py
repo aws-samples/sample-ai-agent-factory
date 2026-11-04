@@ -4014,6 +4014,10 @@ try:
                                 "status": "APPROVAL_REQUIRED", "tool": tool_name,
                                 "request_id": req_id, "policy": matched.get("name"),
                                 "message": "This tool requires human approval before it can run."})}]}
+                async def stream(self, tool_use, invocation_state=None, **kwargs):
+                    # The SDK executes tools through stream(). Never delegate
+                    # this boundary to the original tool via __getattr__.
+                    yield await self.invoke(tool_use)
                 # Strands tools may be invoked via __call__ or stream; provide both.
                 def __call__(self, tool_use, *a, **k):
                     import asyncio as _a

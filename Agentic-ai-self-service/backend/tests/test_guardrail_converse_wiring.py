@@ -25,12 +25,17 @@ import ast
 import asyncio
 import json
 import sys
+import threading
 from types import SimpleNamespace
 
 import boto3
 import pytest
 import yaml
 from botocore.exceptions import ClientError
+from strands._middleware.stages import ExecuteToolContext
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookRegistry
+from strands.tools.executors._executor import _make_execute_tool_terminal
+from strands.types.tools import AgentTool
 
 sys.path.insert(0, "src")
 
@@ -349,3 +354,196 @@ def test_scratch_tool_guardrail_and_human_approval_hooks_remain_composed(
         assert refusal["status"] == "APPROVAL_REQUIRED"
         assert refusal["request_id"] == "offline-approval-request"
     assert original_calls == [], "Neither blocked input nor required approval may execute the original tool."
+
+
+async def _dispatch_emitted_hooks_through_sdk(monkeypatch, source, actions, mode):
+    """Use real SDK events, callback ordering and stream dispatch without a model."""
+    namespace, clients, requests = _emitted_guardrail_namespace(monkeypatch, source, actions)
+    monkeypatch.setenv(
+        "LOOM_APPROVAL_POLICIES",
+        json.dumps([{"name": "offline-approval-policy", "tool_match": ["send_email"], "mode": mode}]),
+    )
+    pending = []
+    original_stream_calls = []
+    original_invocation_calls = []
+
+    def record_pending(tool_name, tool_input):
+        pending.append((tool_name, tool_input))
+        return "offline-sdk-approval-request"
+
+    namespace["_hitl_record_pending"] = record_pending
+
+    class SentinelTool(AgentTool):
+        @property
+        def tool_name(self):
+            return "send_email"
+
+        @property
+        def tool_spec(self):
+            return {
+                "name": self.tool_name,
+                "description": "Offline sentinel tool",
+                "inputSchema": {"json": {"type": "object"}},
+            }
+
+        @property
+        def tool_type(self):
+            return "python"
+
+        async def invoke(self, tool_use):
+            original_invocation_calls.append(tool_use["name"])
+            return {
+                "toolUseId": tool_use["toolUseId"],
+                "status": "success",
+                "content": [{"text": "offline-sentinel-success"}],
+            }
+
+        async def stream(self, tool_use, invocation_state, **kwargs):
+            original_stream_calls.append(tool_use["name"])
+            yield await self.invoke(tool_use)
+
+    # Evaluate the real exported Agent's hooks argument, rather than supplying
+    # a test-only composition that could conceal a dropped approval provider.
+    agent_calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Agent"
+    ]
+    assert len(agent_calls) == 1
+    hook_expression = next(keyword.value for keyword in agent_calls[0].keywords if keyword.arg == "hooks")
+    hooks = eval(compile(ast.Expression(hook_expression), "<emitted-sdk-hooks>", "eval"), namespace)
+    registry = HookRegistry()
+    for hook in hooks:
+        registry.add_hook(hook)
+    agent = SimpleNamespace()
+    original_tool = SentinelTool()
+    tool_use = {"toolUseId": "sdk-approval-1", "name": "send_email", "input": {"message": "public test"}}
+    before = BeforeToolCallEvent(
+        agent=agent,
+        selected_tool=original_tool,
+        tool_use=tool_use,
+        invocation_state={},
+    )
+    before, interrupts = await registry.invoke_callbacks_async(before)
+    assert interrupts == []
+    if before.cancel_tool:
+        # Match the SDK executor's cancellation route: do not enter the tool
+        # terminal, but still dispatch the real AfterToolCallEvent for cleanup.
+        result = {
+            "toolUseId": tool_use["toolUseId"],
+            "status": "error",
+            "content": [{"text": before.cancel_tool}],
+        }
+        selected_tool = None
+    else:
+        context = ExecuteToolContext(
+            agent=agent,
+            tool=before.selected_tool,
+            tool_use=before.tool_use,
+            invocation_state=before.invocation_state,
+            cancel_signal=threading.Event(),
+            _interrupt_state=None,
+        )
+        events = [event async for event in _make_execute_tool_terminal({})(context)]
+        result = events[-1].tool_result
+        selected_tool = before.selected_tool
+    after = AfterToolCallEvent(
+        agent=agent,
+        selected_tool=selected_tool,
+        tool_use=before.tool_use,
+        invocation_state=before.invocation_state,
+        result=result,
+    )
+    after, interrupts = await registry.invoke_callbacks_async(after)
+    assert interrupts == []
+    return SimpleNamespace(
+        before=before,
+        after=after,
+        clients=clients,
+        requests=requests,
+        pending=pending,
+        original_stream_calls=original_stream_calls,
+        original_invocation_calls=original_invocation_calls,
+    )
+
+
+def _assert_sdk_required_approval_is_enforced(observed):
+    assert observed.original_stream_calls == [], "Required approval delegated the original stream."
+    assert observed.original_invocation_calls == [], "Required approval invoked the original tool."
+    assert observed.before.cancel_tool is False
+    assert observed.pending == [("send_email", {"message": "public test"})]
+    assert observed.after.result["status"] == "error"
+    refusal = json.loads(observed.after.result["content"][0]["text"])
+    assert refusal["status"] == "APPROVAL_REQUIRED"
+    assert refusal["tool"] == "send_email"
+    assert refusal["request_id"] == "offline-sdk-approval-request"
+
+
+@pytest.mark.parametrize(
+    ("mode", "actions", "outcome"),
+    [
+        ("require", ["NONE", "NONE"], "approval-required"),
+        ("require", ["GUARDRAIL_INTERVENED", "NONE"], "input-blocked"),
+        ("require", ["AWS_ERROR", "NONE"], "input-blocked"),
+        ("notify", ["NONE", "NONE"], "allowed"),
+        ("notify", ["NONE", "GUARDRAIL_INTERVENED"], "output-blocked"),
+        ("notify", ["NONE", "AWS_ERROR"], "output-blocked"),
+    ],
+)
+def test_actual_sdk_stream_dispatch_preserves_guardrails_and_human_approval(
+    monkeypatch, scratch_guardrail_source, mode, actions, outcome
+):
+    observed = asyncio.run(_dispatch_emitted_hooks_through_sdk(monkeypatch, scratch_guardrail_source, actions, mode))
+
+    assert isinstance(observed.before, BeforeToolCallEvent)
+    assert isinstance(observed.after, AfterToolCallEvent)
+    assert observed.clients == [("bedrock-runtime", {"region_name": "eu-west-1"})]
+    assert [request["source"] for request in observed.requests] == ["INPUT", "OUTPUT"]
+    assert observed.after.result["toolUseId"] == "sdk-approval-1"
+    if outcome == "approval-required":
+        _assert_sdk_required_approval_is_enforced(observed)
+    elif outcome == "input-blocked":
+        assert observed.before.cancel_tool == "Tool input blocked by the safety guardrail."
+        assert observed.pending == []
+        assert observed.original_stream_calls == [] and observed.original_invocation_calls == []
+        assert observed.after.result["status"] == "error"
+        assert "Tool input blocked" in observed.after.result["content"][0]["text"]
+    else:
+        assert observed.before.cancel_tool is False
+        assert observed.pending == [("send_email", {"message": "public test"})]
+        assert observed.original_stream_calls == ["send_email"]
+        assert observed.original_invocation_calls == ["send_email"]
+        if outcome == "allowed":
+            assert observed.after.result["status"] == "success"
+            assert observed.after.result["content"] == [{"text": "offline-sentinel-success"}]
+        else:
+            assert observed.after.result["status"] == "error"
+            assert observed.after.result["content"] == [{"text": "Tool result blocked by the safety guardrail."}]
+            assert "offline-sentinel-success" not in json.dumps(observed.after.result)
+
+
+def test_actual_sdk_regression_detects_removing_only_deny_stub_stream(monkeypatch, scratch_guardrail_source):
+    tree = ast.parse(scratch_guardrail_source)
+    removed = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_DenyStub":
+            original_body = node.body
+            node.body = [
+                child
+                for child in original_body
+                if not (isinstance(child, ast.AsyncFunctionDef) and child.name == "stream")
+            ]
+            removed += len(original_body) - len(node.body)
+    assert removed == 1, "The mutation must remove only the new streaming boundary."
+    observed = asyncio.run(
+        _dispatch_emitted_hooks_through_sdk(monkeypatch, ast.unparse(tree), ["NONE", "NONE"], "require")
+    )
+
+    # The original bug still records pending approval, then forwards stream()
+    # to the original tool. The same positive assertion must reject this mutant.
+    assert observed.pending == [("send_email", {"message": "public test"})]
+    assert observed.original_stream_calls == ["send_email"]
+    assert observed.original_invocation_calls == ["send_email"]
+    assert observed.after.result["status"] == "success"
+    with pytest.raises(AssertionError, match="delegated the original stream"):
+        _assert_sdk_required_approval_is_enforced(observed)
