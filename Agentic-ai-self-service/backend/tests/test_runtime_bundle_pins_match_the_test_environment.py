@@ -126,13 +126,13 @@ REQUIRED_PINS = frozenset(
 
 #: Pinned packages the TEST environment must also have at the pinned version, because a
 #: test imports them directly. Deliberately a subset of REQUIRED_PINS: `mcp` and
-#: `bedrock-agentcore` are imported only by generated code that runs in the container, and
-#: `strands-agents-tools` only by generated code, so forcing them into every developer's
-#: environment would buy nothing. `strands-agents` and the OpenTelemetry trio are driven
-#: for real by tests/test_observability.py.
+#: `strands-agents-tools` are used only by other generated runtime code. The real
+#: `bedrock-agentcore` app also runs in the whole-module startup tests, while
+#: `strands-agents` and the OpenTelemetry graph are driven by observability tests.
 MUST_MATCH_LOCALLY = frozenset(
     {
         "strands-agents",
+        "bedrock-agentcore",
         "tenacity",
         "opentelemetry-api",
         "opentelemetry-sdk",
@@ -214,8 +214,8 @@ def test_the_dev_extra_and_the_bundle_agree(constraint_pins: dict[str, str], dev
 
     This is the whole point of the file: the test environment has to exercise the import
     surface the container gets. It is deliberately a check over the INTERSECTION -- the
-    `dev` extra does not need to install `mcp` or the runtime harness, which only
-    generated code imports -- and `test_the_dev_extra_declares_what_the_tests_import`
+    `dev` extra does not need to install every generated-code dependency such as
+    `mcp` -- and `test_the_dev_extra_declares_what_the_tests_import`
     below is what stops that intersection from shrinking to nothing.
     """
     shared = sorted(set(constraint_pins) & set(dev_extra_pins))

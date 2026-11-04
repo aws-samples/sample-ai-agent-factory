@@ -50,6 +50,9 @@ dev = [
     # about the container. backend/tests/test_runtime_bundle_pins_match_the_test_environment.py
     # fails if these drift from the constraint file or from the interpreter running them.
     "strands-agents==1.56.0",
+    # Whole-module startup tests execute the real generated runtime harness,
+    # including handler registration. Keep it aligned with the runtime lock too.
+    "bedrock-agentcore==1.23.1",
     # Shared retry dependency: google-genai requires <9.2.0 while the unconstrained
     # Strands baseline moved to 9.2.1. Keep tests and every provider bundle on the
     # newest common release; bundle pin-parity tests enforce this exact value.
