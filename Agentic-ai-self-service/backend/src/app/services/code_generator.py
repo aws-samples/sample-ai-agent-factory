@@ -4002,9 +4002,10 @@ try:
                 return  # recorded, but allow the tool to proceed
             # require → block: swap the selected tool for a deny-stub.
             _orig = event.selected_tool
+            _blocked_tool_name = tool_name
 
             class _DenyStub:
-                tool_name = tool_name
+                tool_name = _blocked_tool_name
                 def __getattr__(self, _n):
                     return getattr(_orig, _n) if _orig is not None else None
                 async def invoke(self, tool_use, *a, **k):
@@ -4057,6 +4058,7 @@ _GUARDRAIL_TOOL_CORE_SRC = r"""
 # Guard every tool boundary independently of model input/output Guardrails.
 import json as _guardrail_json
 import logging as _guardrail_logging
+import os as _guardrail_os
 import boto3 as _guardrail_boto3
 
 _guardrail_log = _guardrail_logging.getLogger("agentcore.guardrail.tools")
@@ -4069,7 +4071,10 @@ def _guardrail_client():
     if _guardrail_runtime_client is None:
         _guardrail_runtime_client = _guardrail_boto3.client(
             "bedrock-runtime",
-            region_name=REGION,
+            # Scratch agents resolve their model region from the environment
+            # instead of defining REGION. Keep explicit template regions first,
+            # then use the same AWS_REGION/default as their model constructor.
+            region_name=globals().get("REGION") or _guardrail_os.environ.get("AWS_REGION", "us-east-1"),
         )
     return _guardrail_runtime_client
 
