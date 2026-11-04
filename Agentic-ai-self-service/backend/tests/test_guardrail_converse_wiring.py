@@ -36,7 +36,7 @@ from app.services.code_generator import (  # noqa: E402
 # The exact, valid single-brace splat that MUST appear in the deployed code.
 _VALID_SPLAT = (
     '**({"guardrailConfig": {"guardrailIdentifier": GUARDRAIL_ID, '
-    '"guardrailVersion": GUARDRAIL_VERSION}} if GUARDRAIL_ID else {})'
+    '"guardrailVersion": GUARDRAIL_VERSION, "trace": "disabled"}} if GUARDRAIL_ID else {})'
 )
 
 

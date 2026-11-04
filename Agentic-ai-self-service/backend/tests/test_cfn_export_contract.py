@@ -2138,8 +2138,6 @@ WILDCARD_ALLOWLIST = {
     # them. See the comments on these statements.
     ("RuntimeExecutionRole", "BrowserAccess"),
     ("RuntimeExecutionRole", "CodeInterpreterAccess"),
-    # No guardrail is created by this template; the id arrives at runtime.
-    ("RuntimeExecutionRole", "GuardrailsAccess"),
     # DescribeLogGroups is list-shaped: IAM authorizes it against an EMPTY group name
     # (arn:...:log-group::log-stream:), so no resource-scoped grant can match -- verified
     # live on the governance statement, which is why it deliberately carries none. The

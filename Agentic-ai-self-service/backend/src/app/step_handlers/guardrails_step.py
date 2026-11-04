@@ -20,10 +20,20 @@ from app.services import step_clients
 from app.services.aws_pagination import list_all
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.guardrail_builders import (
-    BEDROCK_PII_TYPES,
+    build_content_filter_config as _build_content_filter_config,
+)
+from app.services.guardrail_builders import (
     build_contextual_grounding_config,
     build_regex_filters,
-    normalize_pii_type,
+)
+from app.services.guardrail_builders import (
+    build_pii_config as _build_pii_config,
+)
+from app.services.guardrail_builders import (
+    build_topic_config as _build_topic_config,
+)
+from app.services.guardrail_builders import (
+    build_word_config as _build_word_config,
 )
 from app.services.resource_ownership import assert_guardrail_owned
 from app.services.resource_tagging import governed_lower_tag_list
@@ -43,105 +53,6 @@ def _get_deployment_store() -> DeploymentStateStore:
         table_name=_get_env("DEPLOYMENT_TABLE_NAME", "DeploymentState"),
         region=_get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1")),
     )
-
-
-# Content filter strength mapping
-_FILTER_STRENGTHS = {"NONE", "LOW", "MEDIUM", "HIGH"}
-
-
-def _build_content_filter_config(content_filters) -> dict:
-    """Build contentPolicyConfig from a {category: strength} mapping.
-
-    Canonical shape is a dict {violence:"HIGH", hate:"MEDIUM", ...}. Be defensive:
-    a list of {type/category, inputStrength/strength} dicts (the alt shape some
-    UIs emit) is normalized to the dict form rather than 500-ing with
-    AttributeError on .items() (see also memory_step Bug 131).
-    """
-    if isinstance(content_filters, list):
-        normalized = {}
-        for f in content_filters:
-            if isinstance(f, dict):
-                cat = f.get("type") or f.get("category") or f.get("name")
-                strength = f.get("inputStrength") or f.get("strength") or f.get("outputStrength") or "MEDIUM"
-                if cat:
-                    normalized[str(cat).lower()] = strength
-        content_filters = normalized
-    if not isinstance(content_filters, dict):
-        return {}
-    filters = []
-    category_map = {
-        "hate": "HATE",
-        "insults": "INSULTS",
-        "sexual": "SEXUAL",
-        "violence": "VIOLENCE",
-        "misconduct": "MISCONDUCT",
-        "prompt_attack": "PROMPT_ATTACK",
-    }
-    for key, strength in content_filters.items():
-        category = category_map.get(key.lower())
-        if not category:
-            continue
-        strength_upper = str(strength).upper()
-        if strength_upper not in _FILTER_STRENGTHS:
-            strength_upper = "MEDIUM"
-        # PROMPT_ATTACK is an input-only filter: Bedrock CreateGuardrail rejects
-        # any non-NONE outputStrength ("PROMPT ATTACK content filter strength for
-        # response must be NONE"). Mirror the CFN-export path here.
-        output_strength = "NONE" if category == "PROMPT_ATTACK" else strength_upper
-        filter_entry = {
-            "type": category,
-            "inputStrength": strength_upper,
-            "outputStrength": output_strength,
-        }
-        filters.append(filter_entry)
-    if not filters:
-        return {}
-    return {"filtersConfig": filters}
-
-
-def _build_pii_config(pii_filters: list) -> dict:
-    """Build sensitiveInformationPolicyConfig from PII filter list."""
-    pii_actions: dict[str, str] = {}
-    for pii in pii_filters:
-        pii_type = normalize_pii_type(pii.get("type", ""))
-        action = str(pii.get("action", "ANONYMIZE")).upper()
-        if pii_type not in BEDROCK_PII_TYPES:
-            continue
-        if action not in ("BLOCK", "ANONYMIZE"):
-            action = "ANONYMIZE"
-        if pii_type not in pii_actions or action == "BLOCK":
-            pii_actions[pii_type] = action
-    if not pii_actions:
-        return {}
-    return {"piiEntitiesConfig": [{"type": pii_type, "action": action} for pii_type, action in pii_actions.items()]}
-
-
-def _build_topic_config(denied_topics: list) -> dict:
-    """Build topicPolicyConfig from denied topic list."""
-    topics = []
-    for topic in denied_topics:
-        name = topic.get("name", "").strip()
-        definition = topic.get("definition", "").strip()
-        if not name or not definition:
-            continue
-        topics.append(
-            {
-                "name": name,
-                "definition": definition,
-                "type": "DENY",
-            }
-        )
-    if not topics:
-        return {}
-    return {"topicsConfig": topics}
-
-
-def _build_word_config(word_filters: list) -> dict:
-    """Build wordPolicyConfig from word filter list."""
-    words = [{"text": w.strip()} for w in word_filters if w.strip()]
-    if not words:
-        return {}
-    return {"wordsConfig": words}
 
 
 def _find_guardrail_id_by_name(bedrock, name: str) -> str | None:

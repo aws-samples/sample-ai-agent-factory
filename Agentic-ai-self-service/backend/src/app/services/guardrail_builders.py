@@ -112,6 +112,94 @@ def normalize_pii_type(value: Any) -> str:
     return _PII_TYPE_ALIASES.get(candidate, candidate)
 
 
+def normalize_content_filter_type(value: Any) -> str:
+    """Keep the input-only prompt-attack filter after frontend hydration.
+
+    Older frontend clients recursively camel-cased saved configurations,
+    including policy category keys, turning prompt_attack into promptAttack.
+    Both spellings describe the same Bedrock filter, not distinct policies.
+    """
+    candidate = str(value or "").lower()
+    return "prompt_attack" if candidate == "promptattack" else candidate
+
+
+def build_content_filter_config(content_filters) -> dict:
+    """Build the shared live/export Bedrock content-policy request shape."""
+    if isinstance(content_filters, list):
+        normalized = {}
+        for entry in content_filters:
+            if isinstance(entry, dict):
+                category = entry.get("type") or entry.get("category") or entry.get("name")
+                strength = (
+                    entry.get("inputStrength") or entry.get("strength") or entry.get("outputStrength") or "MEDIUM"
+                )
+                if category:
+                    normalized[normalize_content_filter_type(category)] = strength
+        content_filters = normalized
+    if not isinstance(content_filters, dict):
+        return {}
+    category_map = {
+        "hate": "HATE",
+        "insults": "INSULTS",
+        "sexual": "SEXUAL",
+        "violence": "VIOLENCE",
+        "misconduct": "MISCONDUCT",
+        "prompt_attack": "PROMPT_ATTACK",
+    }
+    filters = []
+    for key, strength in content_filters.items():
+        category = category_map.get(normalize_content_filter_type(key))
+        if not category:
+            continue
+        strength_upper = str(strength).upper()
+        if strength_upper not in {"NONE", "LOW", "MEDIUM", "HIGH"}:
+            strength_upper = "MEDIUM"
+        filters.append(
+            {
+                "type": category,
+                "inputStrength": strength_upper,
+                "outputStrength": "NONE" if category == "PROMPT_ATTACK" else strength_upper,
+            }
+        )
+    return {"filtersConfig": filters} if filters else {}
+
+
+def build_pii_config(pii_filters: list) -> dict:
+    """Canonicalize PII aliases and keep BLOCK when duplicate types disagree."""
+    pii_actions: dict[str, str] = {}
+    for pii in pii_filters:
+        pii_type = normalize_pii_type(pii.get("type", ""))
+        action = str(pii.get("action", "ANONYMIZE")).upper()
+        if pii_type not in BEDROCK_PII_TYPES:
+            continue
+        if action not in ("BLOCK", "ANONYMIZE"):
+            action = "ANONYMIZE"
+        if pii_type not in pii_actions or action == "BLOCK":
+            pii_actions[pii_type] = action
+    return (
+        {"piiEntitiesConfig": [{"type": pii_type, "action": action} for pii_type, action in pii_actions.items()]}
+        if pii_actions
+        else {}
+    )
+
+
+def build_topic_config(denied_topics: list) -> dict:
+    """Build the same denied-topic policy for platform deploys and exports."""
+    topics = []
+    for topic in denied_topics:
+        name = topic.get("name", "").strip()
+        definition = topic.get("definition", "").strip()
+        if name and definition:
+            topics.append({"name": name, "definition": definition, "type": "DENY"})
+    return {"topicsConfig": topics} if topics else {}
+
+
+def build_word_config(word_filters: list) -> dict:
+    """Build the same exact-match word policy for platform deploys and exports."""
+    words = [{"text": word.strip()} for word in word_filters if word.strip()]
+    return {"wordsConfig": words} if words else {}
+
+
 # Allowed regex-filter actions. ANONYMIZE is the safe default (redact rather
 # than hard-block) and matches the PII-filter default in guardrails_step.
 _REGEX_ACTIONS = ("BLOCK", "ANONYMIZE")

@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from app.services.guardrail_builders import normalize_pii_type
+from app.services.guardrail_builders import normalize_content_filter_type, normalize_pii_type
 
 DEV_ENVIRONMENTS = frozenset({"dev", "development", "test", "sandbox", "preview", "local"})
 PRODUCTION_GUARDRAIL_PROFILE = "production-v1"
@@ -58,7 +58,7 @@ def _content_filters(config: Mapping[str, Any]) -> dict[str, Any]:
         return dict(_BASELINE_CONTENT_FILTERS)
     if not isinstance(supplied, Mapping):
         raise ProductionSafetyConfigurationError("Production Guardrail contentFilters must be an object")
-    merged = {str(key): value for key, value in supplied.items()}
+    merged = {normalize_content_filter_type(key): value for key, value in supplied.items()}
     # The platform floor wins over a caller's weaker NONE/LOW/MEDIUM value.
     merged.update(_BASELINE_CONTENT_FILTERS)
     return merged
@@ -100,6 +100,16 @@ def enforce_production_guardrail_baseline(config: Mapping[str, Any] | None) -> d
     if not is_production_like_environment():
         return copy.deepcopy(dict(config)) if config is not None else None
 
+    return apply_production_guardrail_profile(config)
+
+
+def apply_production_guardrail_profile(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Apply the explicit production-v1 profile without consulting environment.
+
+    Downloadable artifacts must reproduce a declared profile even when generated
+    by a development platform, without imposing that profile on ordinary drafts.
+    The live production path calls this same pure transformation.
+    """
     prepared = copy.deepcopy(dict(config or {}))
     mode = str(prepared.get("mode") or "create_new").strip().lower()
     if mode != "create_new":

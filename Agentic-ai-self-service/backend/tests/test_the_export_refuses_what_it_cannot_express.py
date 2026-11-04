@@ -11,8 +11,8 @@ compare the emitted artifacts byte for byte:
     identity_config         all 7 text artifacts byte-identical
     connectors              all 7 text artifacts byte-identical
     external_mcp_servers    all 7 text artifacts byte-identical
-    guardrails_config       all 7 text artifacts byte-identical
-    observability_config    all 7 text artifacts byte-identical
+    guardrails_config       all 7 text artifacts byte-identical   <- SINCE FIXED, emitted
+    observability_config    all 7 text artifacts byte-identical   <- SINCE FIXED, emitted
     resource_tags           all 7 text artifacts byte-identical   <- SINCE FIXED, emitted
     tag_profile             all 7 text artifacts byte-identical   <- SINCE FIXED, resolved
     target_account_id       all 7 text artifacts byte-identical
@@ -202,7 +202,7 @@ class TestTheCallerActuallySeesTheReason:
     def test_the_route_returns_the_reason_not_a_500(self):
         response = self._client().post(
             "/api/generate-cfn-template",
-            json=self._body(guardrailsConfig={"enabled": True, "blocked_topics": ["z"]}),
+            json=self._body(identityConfig={"provider": "cognito", "clientId": "3fj9s8d7f6g5h4j3k2l1"}),
         )
         assert response.status_code == 400, (
             f"expected the refusal to reach the caller as a 400; got {response.status_code}. "
@@ -210,7 +210,7 @@ class TestTheCallerActuallySeesTheReason:
             f"Body: {response.text[:400]}"
         )
         detail = str(response.json().get("detail", ""))
-        assert "guardrails_config" in detail, f"the caller cannot tell what to remove: {detail}"
+        assert "identity_config" in detail, f"the caller cannot tell what to remove: {detail}"
         assert "Internal server error" not in detail
 
     def test_the_governance_concurrency_tokens_are_declared_non_template_state(self):

@@ -752,6 +752,8 @@ diagrams with any supported combination of:
 | + Evaluation | Online Evaluation Config, Evaluation IAM Role |
 | + Knowledge Base | Bedrock Knowledge Base, Data Source, KB IAM Role, KB Tool Lambda + Target |
 | + Policy Engine | Policy Engine (attached to Gateway), `Custom::AgentCorePolicy` for each Cedar policy |
+| + Guardrails | Configured Bedrock Guardrail and an immutable GuardrailVersion, or references to an existing numbered version; model/tool enforcement and scoped runtime permissions |
+| + Observability | Canvas-selected native/OTLP runtime configuration, instrumentation, sampling and service attributes; optional Secrets Manager reference with scoped read permission |
 | + MCP Server | Second Runtime (MCP protocol), MCP Server code, OAuth2 Credential Provider |
 | LiteLLM Gateway | Runtime and endpoint configured for the external LiteLLM MCP URL, pinned server aliases, and a Secrets Manager virtual-key reference; no AgentCore Gateway, Cognito, or tool Lambda is created |
 
@@ -762,9 +764,40 @@ to the configured function, and the gateway role may invoke exactly that ARN (an
 never edits a function it does not own; a function in another account must also allow the role). The empty
 row a new gateway node starts with is not a target.
 
-A setting the template cannot express is refused with a 400 that names it, never dropped: guardrails, SaaS
-connectors, external MCP servers, a target account or region, a substantive identity or observability block,
+A setting the template cannot express is refused with a 400 that names it, never dropped: SaaS
+connectors, external MCP servers, a target account or region, a substantive identity block,
 and an OpenAPI spec or Smithy model configured as a gateway target.
+
+### Guardrail and observability continuity
+
+The export reads `guardrailsConfig` and `observabilityConfig` from the same request
+the canvas sends. A configured Guardrail does not require a redundant
+`connectedTools` marker to reach the generated model and tool-enforcement code.
+New Guardrails carry the selected content strengths, PII actions, denied topics,
+word filters and supported regex filters. The version binds the policy snapshot,
+and the runtime references its numbered version rather than mutable `DRAFT`.
+Existing mode references a numbered version without editing the existing policy.
+Unrepresentable or invalid security settings still fail closed.
+Canvas display labels are normalized into an overridable `GuardrailName`
+parameter. Saved-flow hydration preserves policy-map keys; the exporter also
+accepts older clients' `promptAttack` alias without losing the input-only filter.
+An explicitly declared `production-v1` profile uses the same mandatory
+content/PII floor as the live deployment path; unprofiled drafts are not upgraded
+to that profile implicitly.
+
+The nonempty top-level observability block takes precedence over nested runtime settings,
+matching the platform runtime consumer. Explicitly disabled external OTLP remains
+disabled; configured observability retains native allowlisted usage metering.
+Enabled OTLP settings carry their endpoint, service name, sampling and resource
+attributes; authentication remains a Secrets Manager reference, not a credential
+embedded in the template or source. Native usage telemetry does not invent a
+localhost collector. Account-level CloudWatch Transaction Search prerequisites
+remain the destination account operator's responsibility.
+
+These resources and runtime bindings are part of the exported stack. They do not
+export the platform itself, its tenant authorization service, staging/production
+slots, promotion evidence store or customer pipeline configuration. CI examples
+remain integrity-first and inert until explicitly configured for deployment.
 
 ## Lambda Dependency Packaging
 

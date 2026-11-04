@@ -29,16 +29,20 @@ function toCamelCase(str: string): string {
 }
 
 /**
- * Recursively converts all object keys from snake_case to camelCase.
+ * Converts configuration field names without renaming policy/attribute map keys.
  */
-function keysToCamelCase(obj: unknown): unknown {
+function keysToCamelCase(obj: unknown, parentKey?: string): unknown {
   if (Array.isArray(obj)) {
-    return obj.map(keysToCamelCase);
+    return obj.map(value => keysToCamelCase(value, parentKey));
   }
   if (obj !== null && typeof obj === 'object') {
     const result: Record<string, unknown> = {};
+    // These dictionaries contain domain identifiers, not configuration fields.
+    // In particular, prompt_attack is the key the Guardrails editor reads.
+    const preserveKeys = parentKey === 'contentFilters' || parentKey === 'resourceAttributes';
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      result[toCamelCase(key)] = keysToCamelCase(value);
+      const convertedKey = preserveKeys ? key : toCamelCase(key);
+      result[convertedKey] = keysToCamelCase(value, convertedKey);
     }
     return result;
   }
