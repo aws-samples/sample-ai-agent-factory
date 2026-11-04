@@ -158,7 +158,8 @@ def test_policy_change_replaces_immutable_version_and_runtime_is_pinned():
     second, _ = _template(supplied)
     version = first["Resources"]["BedrockGuardrailVersion"]
     assert version["Type"] == "AWS::Bedrock::GuardrailVersion"
-    assert version["DependsOn"] == ["BedrockGuardrail"]
+    # The real GetAtt is the ordering edge; an explicit duplicate produces W3005.
+    assert "DependsOn" not in version
     assert version["Properties"]["GuardrailIdentifier"] == {"Fn::GetAtt": ["BedrockGuardrail", "GuardrailId"]}
     assert (
         version["Properties"]["Description"]

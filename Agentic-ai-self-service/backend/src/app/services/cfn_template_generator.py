@@ -9958,8 +9958,9 @@ def handler(event, context):
             }
             template["Resources"]["BedrockGuardrailVersion"] = {
                 "Type": "AWS::Bedrock::GuardrailVersion",
-                "DependsOn": ["BedrockGuardrail"],
                 "Properties": {
+                    # GetAtt already orders version creation after the policy;
+                    # duplicating that edge with DependsOn triggers W3005.
                     "GuardrailIdentifier": plan.guardrail_id,
                     # Description is a replacement property. A changed policy
                     # therefore creates a fresh immutable version rather than
