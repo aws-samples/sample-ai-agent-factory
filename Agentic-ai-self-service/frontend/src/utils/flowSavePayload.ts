@@ -20,16 +20,18 @@ function toSnakeCase(str: string): string {
 }
 
 /**
- * Recursively converts all object keys from camelCase to snake_case.
+ * Converts configuration field names without renaming policy/attribute map keys.
  */
-function keysToSnakeCase(obj: unknown): unknown {
+function keysToSnakeCase(obj: unknown, parentKey?: string): unknown {
   if (Array.isArray(obj)) {
-    return obj.map(keysToSnakeCase);
+    return obj.map(value => keysToSnakeCase(value, parentKey));
   }
   if (obj !== null && typeof obj === 'object') {
     const result: Record<string, unknown> = {};
+    const preserveKeys = parentKey === 'content_filters' || parentKey === 'resource_attributes';
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      result[toSnakeCase(key)] = keysToSnakeCase(value);
+      const convertedKey = preserveKeys ? key : toSnakeCase(key);
+      result[convertedKey] = keysToSnakeCase(value, convertedKey);
     }
     return result;
   }
@@ -39,7 +41,7 @@ function keysToSnakeCase(obj: unknown): unknown {
 /**
  * Converts React Flow nodes to the backend ComponentNode format.
  * Only includes nodes that have a configuration set.
- * Converts all keys to snake_case to match backend Pydantic models.
+ * Converts field names to snake_case to match backend Pydantic models.
  */
 export function toBackendNodes(nodes: AgentCoreNode[]): unknown[] {
   return nodes

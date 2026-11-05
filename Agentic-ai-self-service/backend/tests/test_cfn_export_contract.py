@@ -273,6 +273,145 @@ COMPONENT_COMBINATIONS = {
 
 ALL_COMBINATIONS = pytest.mark.parametrize("combo", COMPONENT_COMBINATIONS.values(), ids=list(COMPONENT_COMBINATIONS))
 
+# Keep control coverage on the scanner inputs rather than multiplying every
+# broad contract test. These policies must reach native CFN resources, version
+# bindings and runtime IAM, not just pass the generator's configuration model.
+_CONTROL_GUARDRAIL_POLICY = {
+    "enabled": True,
+    "mode": "create_new",
+    "name": "Scanner Production Guardrails",
+    "componentType": "guardrails",
+    "contentFilters": {
+        "hate": "HIGH",
+        "insults": "HIGH",
+        "sexual": "HIGH",
+        "violence": "HIGH",
+        "misconduct": "HIGH",
+        "promptAttack": "HIGH",
+    },
+    "piiFilters": [{"type": "EMAIL", "action": "ANONYMIZE"}, {"type": "PASSWORD", "action": "BLOCK"}],
+    "deniedTopics": [{"name": "Disallowed activities", "definition": "Instructions for prohibited activities."}],
+    "wordFilters": ["do-not-disclose"],
+    "regexFilters": [{"name": "InternalCode", "pattern": "AF-[0-9]{4}", "action": "ANONYMIZE"}],
+}
+_CONTROL_RESOURCE_ATTRIBUTES = {
+    "team.name": "research,security",
+    "Empty": "",
+    "literal_percent": "100%2C",
+    "Padding": " leading and trailing ",
+}
+# Synthetic recipient-account Secrets Manager reference, not authentication material.
+_CONTROL_REFERENCE_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/scanner-abcdef"
+_CONTROL_HTTP_OBSERVABILITY = {
+    "enableOtel": True,
+    "provider": "custom",
+    "otlpEndpoint": "https://telemetry.example.test",
+    "otlpProtocol": "http/protobuf",
+    "serviceName": "scanner-export",
+    "sampleRate": 0,
+    "authHeaderSecretArn": _CONTROL_REFERENCE_ARN,
+    "resourceAttributes": _CONTROL_RESOURCE_ATTRIBUTES,
+}
+CONTROL_SCAN_COMBINATIONS = {
+    "legacy-guardrails+native-observability": {
+        "connectedTools": ["guardrails", "observability"],
+    },
+    "created-guardrails+native-opt-out": {
+        "guardrails_config": _CONTROL_GUARDRAIL_POLICY,
+        "observability_config": {
+            "enableOtel": False,
+            "name": "Scanner Release Telemetry",
+            "serviceName": "scanner-native",
+            "resourceAttributes": _CONTROL_RESOURCE_ATTRIBUTES,
+        },
+    },
+    "existing-guardrail-id+http-auth": {
+        "guardrails_config": {"mode": "existing", "guardrailId": "scannerabc123", "guardrailVersion": "7"},
+        "observability_config": _CONTROL_HTTP_OBSERVABILITY,
+    },
+    "existing-guardrail-arn+grpc-auth": {
+        "guardrails_config": {
+            "mode": "existing",
+            "guardrailId": "arn:aws:bedrock:us-east-1:123456789012:guardrail/scannerabc123",
+            "guardrailVersion": "7",
+        },
+        "observability_config": {**_CONTROL_HTTP_OBSERVABILITY, "otlpProtocol": "grpc", "sampleRate": 0.25},
+    },
+    "gateway+memory+created-guardrails+http-auth": {
+        "gateway_config": AGENTCORE_GATEWAY,
+        "memory_config": {"enabled": True},
+        "guardrails_config": _CONTROL_GUARDRAIL_POLICY,
+        "observability_config": _CONTROL_HTTP_OBSERVABILITY,
+    },
+}
+SCANNER_CASES = {**COMPONENT_COMBINATIONS, **CONTROL_SCAN_COMBINATIONS}
+SCANNER_COMBINATIONS = pytest.mark.parametrize("combo", SCANNER_CASES.values(), ids=list(SCANNER_CASES))
+
+
+class TestScannerControlFixtures:
+    """Prove the additional scanner cases emit the controls they claim to scan."""
+
+    @pytest.mark.parametrize("name,combo", CONTROL_SCAN_COMBINATIONS.items(), ids=list(CONTROL_SCAN_COMBINATIONS))
+    def test_scanner_control_cases_emit_real_bindings(self, name, combo):
+        before = json.loads(json.dumps(combo))
+        bundle = _generate(**combo)
+        template = yaml.safe_load(bundle.template_yaml)
+        resources = template["Resources"]
+        env = _runtime_env(template)
+        statements = resources["RuntimeExecutionRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+        access = next(statement for statement in statements if statement.get("Sid") == "GuardrailsAccess")
+        required = next(
+            statement for statement in statements if statement.get("Sid") == "RequireExportedGuardrailVersion"
+        )
+        assert access["Effect"] == "Allow"
+        assert access["Resource"] != "*"
+        assert required["Effect"] == "Deny"
+        assert required["Condition"]["StringNotEquals"]["bedrock:GuardrailIdentifier"] == {
+            "Fn::Join": [":", [access["Resource"], env["GUARDRAIL_VERSION"]]]
+        }
+
+        policy = combo.get("guardrails_config")
+        if policy and policy["mode"] == "existing":
+            assert "BedrockGuardrail" not in resources
+            assert "BedrockGuardrailVersion" not in resources
+            assert env["GUARDRAIL_ID"] == {"Ref": "ExistingGuardrailIdentifier"}
+            assert env["GUARDRAIL_VERSION"] == {"Ref": "ExistingGuardrailVersion"}
+            assert template["Parameters"]["ExistingGuardrailIdentifier"]["Default"] == policy["guardrailId"]
+            assert template["Parameters"]["ExistingGuardrailVersion"]["Default"] == policy["guardrailVersion"]
+            assert "ExistingGuardrailIsArn" in template["Conditions"]
+        else:
+            guardrail = resources["BedrockGuardrail"]["Properties"]
+            assert resources["BedrockGuardrailVersion"]["Type"] == "AWS::Bedrock::GuardrailVersion"
+            assert env["GUARDRAIL_ID"] == {"Fn::GetAtt": ["BedrockGuardrail", "GuardrailId"]}
+            assert env["GUARDRAIL_VERSION"] == {"Fn::GetAtt": ["BedrockGuardrailVersion", "Version"]}
+            assert len(guardrail["ContentPolicyConfig"]["FiltersConfig"]) == 6
+            if policy:
+                assert guardrail["Name"] == {"Ref": "GuardrailName"}
+                assert guardrail["SensitiveInformationPolicyConfig"]["PiiEntitiesConfig"]
+                assert guardrail["SensitiveInformationPolicyConfig"]["RegexesConfig"]
+                assert guardrail["TopicPolicyConfig"]["TopicsConfig"]
+                assert guardrail["WordPolicyConfig"]["WordsConfig"]
+
+        obs = combo.get("observability_config", {})
+        if obs.get("enableOtel"):
+            assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == obs["otlpEndpoint"]
+            assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == obs["otlpProtocol"]
+            assert env["OTEL_AUTH_SECRET_ARN"] == _CONTROL_REFERENCE_ARN
+            auth = next(statement for statement in statements if statement.get("Sid") == "OtelAuthHeaderSecret")
+            assert auth["Resource"] == [_CONTROL_REFERENCE_ARN]
+        else:
+            assert env["AGENT_OBSERVABILITY_ENABLED"] == "true"
+            assert not any(key.startswith("OTEL_EXPORTER_") or key == "OTEL_AUTH_SECRET_ARN" for key in env)
+        if obs.get("resourceAttributes"):
+            actual_attributes = {
+                key: urllib.parse.unquote(value)
+                for key, value in (pair.split("=", 1) for pair in env["OTEL_RESOURCE_ATTRIBUTES"].split(","))
+            }
+            assert all(actual_attributes[key] == value for key, value in obs["resourceAttributes"].items())
+        assert "_otel_bootstrap()" in bundle.agent_code
+        compile(bundle.agent_code, f"scanner-control-{name}.py", "exec")
+        assert combo == before
+
 
 # ---------------------------------------------------------------------------
 # The gateway provider must be honoured, not ignored
@@ -2138,8 +2277,6 @@ WILDCARD_ALLOWLIST = {
     # them. See the comments on these statements.
     ("RuntimeExecutionRole", "BrowserAccess"),
     ("RuntimeExecutionRole", "CodeInterpreterAccess"),
-    # No guardrail is created by this template; the id arrives at runtime.
-    ("RuntimeExecutionRole", "GuardrailsAccess"),
     # DescribeLogGroups is list-shaped: IAM authorizes it against an EMPTY group name
     # (arn:...:log-group::log-stream:), so no resource-scoped grant can match -- verified
     # live on the governance statement, which is why it deliberately carries none. The
@@ -3420,7 +3557,7 @@ class TestPolicyScanner:
     def findings(cls, tmp_path_factory):
         _require_scanner("checkov", "pipx install checkov==3.3.1 (isolated, see _require_scanner)")
         directory = tmp_path_factory.mktemp("emitted")
-        for name, combo in COMPONENT_COMBINATIONS.items():
+        for name, combo in SCANNER_CASES.items():
             (directory / f"{name}.yaml").write_text(_generate(**combo).template_yaml)
         return cls._scan(directory)
 
@@ -6919,7 +7056,7 @@ class TestTemplateIsAscii:
 
 
 class TestTemplateValidity:
-    @ALL_COMBINATIONS
+    @SCANNER_COMBINATIONS
     def test_cfn_lint_passes(self, combo):
         """Every emitted shape is warning-clean except one live-proven catalog gap.
 

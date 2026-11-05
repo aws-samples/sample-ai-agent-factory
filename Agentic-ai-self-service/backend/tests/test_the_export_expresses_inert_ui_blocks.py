@@ -1,9 +1,10 @@
 """F-G04-003: the UI sends an identity node and an observability block on every export, and two of
 the six gallery templates carry them in an INERT shape -- provider selected, every credential field
-empty; ``enableOtel: false``. Neither changes the deployed graph, and the platform path does nothing
-with them either, so the export must express them by omission rather than refuse the template.
-The same fields with a substantive value are still refused (negative controls), and the refusal
-allow-list stays closed for every other field.
+empty; ``enableOtel: false``. These require no external identity or tracing resources.
+An explicit false tracing block disables external OTLP, while a connected
+observability node retains the platform's native usage ledger.
+Substantive identity values are still refused (negative controls). Observability now has
+a faithful emitter, and the refusal allow-list stays closed for every other field.
 
 The positive cases use the exact request bodies the integration harness composes from the frontend
 templates (``tests/integration/test_template_deployments.py``), so they track the real UI payload.
@@ -50,7 +51,7 @@ def test_the_real_gallery_body_exports(template_id):
     assert body.get("identityConfig"), "the control: the real body carries the identity node the export used to refuse"
     bundle = CfnTemplateGenerator().generate(DeployRequest.model_validate(body))
     assert "Resources:" in bundle.template_yaml
-    # Nothing of the inert blocks leaks into the artifact: no OTLP wiring, no identity client.
+    # No external OTLP wiring or identity credentials are introduced.
     assert "OTEL_EXPORTER_OTLP" not in bundle.template_yaml
     assert body["identityConfig"]["clientId"] == "" and "clientSecretRef: ''" not in bundle.template_yaml
 
@@ -72,18 +73,18 @@ def _artifacts(body: dict) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("template_id", ["strands-gateway-agent", "customer-support-assistant"])
-def test_the_inert_blocks_change_no_artifact_at_all(template_id):
+def test_the_inert_identity_block_changes_no_artifact_at_all(template_id):
     """The positive proof, measured: every deterministic text artifact of the bundle is byte-identical
-    with and without the inert blocks. "Inert" is a claim about the artifacts, not about the template
-    text alone -- agent code, deploy/teardown scripts and README included."""
+    with and without inert identity. Observability is a real control, even with external
+    OTLP off: native usage metering must stay present."""
     body = _real_body(template_id)
-    stripped = {k: v for k, v in body.items() if k not in ("identityConfig", "observabilityConfig")}
+    stripped = {k: v for k, v in body.items() if k != "identityConfig"}
     assert stripped != body, "the control: the real body carried at least one of the blocks"
     with_blocks, without_blocks = _artifacts(body), _artifacts(stripped)
     assert with_blocks == with_blocks, "artifacts must be deterministic for the comparison to mean anything"
     assert _artifacts(body) == with_blocks
     differing = sorted(part for part in _TEXT_ARTIFACTS if with_blocks[part] != without_blocks[part])
-    assert differing == [], f"the inert blocks changed {differing}"
+    assert differing == [], f"the inert identity block changed {differing}"
 
 
 def test_the_inert_shapes_are_exactly_the_ones_the_ui_sends():
@@ -118,12 +119,6 @@ def test_the_inert_shapes_are_exactly_the_ones_the_ui_sends():
             },
             "identity_config",
         ),
-        ({"observabilityConfig": {"name": "o", "enableOtel": True}}, "observability_config"),
-        (
-            {"observabilityConfig": {"name": "o", "enableOtel": False, "otlpEndpoint": "https://o.example"}},
-            "observability_config",
-        ),
-        ({"observabilityConfig": {"name": "o", "enableOtel": False, "samplingRate": 0}}, "observability_config"),
     ],
 )
 def test_a_substantive_value_is_still_refused(override, field):
@@ -133,17 +128,20 @@ def test_a_substantive_value_is_still_refused(override, field):
     assert field in str(exc.value)
 
 
-def test_the_allow_list_is_exactly_two_fields():
-    assert _INERT_IS_EXPRESSIBLE == {"identity_config", "observability_config"}
+def test_only_identity_needs_the_inert_shape_allow_list():
+    assert _INERT_IS_EXPRESSIBLE == {"identity_config"}
 
 
 def test_an_inert_shape_of_a_non_allow_listed_field_is_still_refused():
-    # guardrails_config is not allow-listed: even an "off" shape is refused, because nobody has
-    # argued its inert shape is inert.
-    body = {**_real_body("strands-gateway-agent"), "guardrailsConfig": {"enabled": False}}
+    # Connector configuration has no emitter; it must not gain an inert-shape bypass
+    # just because Guardrails and observability are now faithfully exported.
+    body = {
+        **_real_body("strands-gateway-agent"),
+        "connectors": [{"connector_id": "slack", "name": "slack", "authMethod": "api_key"}],
+    }
     with pytest.raises(CfnExportUnsupportedError) as exc:
         CfnTemplateGenerator().generate(DeployRequest.model_validate(body))
-    assert "guardrails_config" in str(exc.value)
+    assert "connectors" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- the predicate

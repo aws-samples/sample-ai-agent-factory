@@ -76,6 +76,7 @@ from app.models.deployment_models import (
     validate_export_references,
 )
 from app.services import codegen_templates
+from app.services.cfn_observability import CfnObservabilityError, build_export_observability_env
 from app.services.code_generator import (
     PROVIDER_STRANDS_EXTRA,
     generate_agent_code,
@@ -85,6 +86,7 @@ from app.services.code_generator import (
     resolve_model_id,
 )
 from app.services.downloadable_artifact import build_artifact_zip
+from app.services.export_guardrails import GuardrailExportError, GuardrailExportPlan, prepare_guardrail_export
 from app.services.gateway_deployer import _default_lambda_tool_schema
 from app.services.litellm_gateway_deployer import resolve_gateway_provider, resolve_mcp_url
 from app.services.managed_web_search import (
@@ -97,7 +99,6 @@ from app.services.managed_web_search import (
     managed_web_search_requested,
 )
 from app.services.mcp_gateway_protocol import MCP_SUPPORTED_VERSIONS
-from app.services.observability import build_otel_env_vars
 from app.services.region_capabilities import SUPPORTED_SINGLE_REGION_RELEASES
 from app.services.region_models import current_region, is_inference_profile_id, repoint_regional_prefix
 from app.services.runtime_artifact import (
@@ -2638,7 +2639,10 @@ def _apply_naming_profile(template: dict, profile: CfnNamingProfile | None) -> N
         oauth["Scopes"] = [{"Fn::Sub": mcp_scope}]
 
     set_name("OnlineEvaluation", "OnlineEvaluationConfigName", "evaluation")
-    set_name("BedrockGuardrail", "Name", "guardrail")
+    # An explicit canvas Guardrail label has its own overridable, normalized
+    # physical-name parameter. A customer profile must not silently discard it.
+    if "GuardrailName" not in template.get("Parameters", {}):
+        set_name("BedrockGuardrail", "Name", "guardrail")
     set_name("AgentCoreRuntime", "AgentRuntimeName", "runtime")
     endpoint_name = set_name("RuntimeEndpoint", "Name", "runtimeEndpoint")
 
@@ -4781,6 +4785,8 @@ _EXPORT_HONOURS = frozenset(
         "mcp_server_config",
         "evaluation_config",
         "knowledge_base_config",
+        "guardrails_config",
+        "observability_config",
         "a2a_config",
         "data_retention_policy",
         # Emitted onto every taggable resource by _apply_resource_tags. Moved out of the
@@ -4797,13 +4803,12 @@ _EXPORT_HONOURS = frozenset(
 #: "this is none of the template's business" cannot be confused for one another.
 #: Fields the export does not express, but which the UI sends on EVERY request in an inert shape
 #: (F-G04-003): an identity node whose provider is selected but whose client id, secret reference
-#: and scopes are all empty, and an observability block with ``enableOtel: false``. Such a value
-#: changes nothing in the deployed graph -- the platform path does nothing with it either -- so
-#: refusing it would 400 every real export of two of the six gallery templates while protecting
-#: nobody. The SAME field with a substantive value (a client id, ``enableOtel: true``) is still
-#: refused. Allow-list on purpose: a new field is refused until someone adds it here with the
+#: and scopes are all empty. Such a value configures no identity behaviour, so refusing it
+#: would reject real gallery exports while protecting nobody. A substantive identity is
+#: still refused. Observability now has its own faithful export path, including explicitly
+#: disabled settings. Allow-list on purpose: a new field is refused until someone adds it here with the
 #: argument for why its inert shape is inert.
-_INERT_IS_EXPRESSIBLE: frozenset[str] = frozenset({"identity_config", "observability_config"})
+_INERT_IS_EXPRESSIBLE: frozenset[str] = frozenset({"identity_config"})
 #: Dict keys that only describe or select and never configure behaviour by themselves.
 _DESCRIPTIVE_KEYS: frozenset[str] = frozenset(
     {"name", "label", "description", "provider", "credentialtype", "type", "kind"}
@@ -4939,21 +4944,21 @@ def _reject_what_the_export_cannot_express(request: DeployRequest) -> None:
     emitted artifacts byte for byte. Ten fields changed NOTHING -- not the template, not
     ``deploy.sh``, not ``teardown.sh``, not the README::
 
-        identity_config  connectors  external_mcp_servers  guardrails_config
-        observability_config  resource_tags  tag_profile  target_account_id
+        identity_config  connectors  external_mcp_servers
+        tag_profile  target_account_id
         target_region  version_description
 
     ``DeployRequest.model_config`` is ``extra="forbid"``, so these are not stray keys being
     ignored -- they are declared, validated parts of the accepted contract. A caller who
-    sets ``guardrails_config`` and ``resource_tags`` and receives a template gets no
-    guardrails and no tags, and nothing anywhere says so. ``target_account_id`` dropping
+    sets an unrepresented control and receives a template gets no corresponding
+    protection, and nothing anywhere says so. ``target_account_id`` dropping
     means an export aimed at one account is byte-identical to one aimed at another.
 
     This is the same failure class as the LiteLLM gap: a canvas whose gateway provider was
     LiteLLM exported the AgentCore path anyway and dropped the proxy URL and virtual key,
     silently. That one is fixed by emitting the right thing (see ``_litellm_export_settings``).
-    Expressing ten more dimensions faithfully is a much larger piece of work, so this guard
-    is the half that lands first: refusing is honest, and an error the caller can read beats
+    Tags, naming, Guardrails and observability have since gained faithful emitters.
+    Remaining unsupported dimensions are still refused: an error the caller can read beats
     a template they will deploy believing it carries settings it does not.
 
     Deliberately keyed on "differs from the field's own default" rather than
@@ -5054,7 +5059,19 @@ class CfnTemplateGenerator:
         config = request.config
         deployment_name = _sanitize_gateway_name(config.name)
         template_id = request.template_id
-        connected_tools = request.connected_tools or []
+        connected_tools = list(request.connected_tools or [])
+        # A configured node is sufficient to request a Guardrail, even for API
+        # clients that omit the redundant connectedTools marker. Keep the IAM,
+        # resource and generated-code decisions on this same local tool list.
+        has_guardrails = bool(request.guardrails_config) or "guardrails" in connected_tools
+        if has_guardrails and "guardrails" not in connected_tools:
+            connected_tools.append("guardrails")
+        if has_guardrails and any(provider != "bedrock" for provider in canvas_model_providers(config)):
+            raise CfnExportUnsupportedError(
+                "CloudFormation Guardrail export requires every generated model, including "
+                "multi-agent sub-agents, to use Bedrock. A third-party sub-agent cannot "
+                "inherit Bedrock model input/output enforcement; no unguarded model was exported."
+            )
         gateway_config = request.gateway_config
         gateway_tools = request.gateway_tools or []
         custom_tools = request.custom_tools or []
@@ -5102,7 +5119,6 @@ class CfnTemplateGenerator:
         has_policy = policy_config is not None
         has_mcp_server = mcp_server_config is not None or template_id == "mcp-server-gateway-target"
         has_evaluation = evaluation_config is not None and evaluation_config.get("enabled", False)
-        has_guardrails = "guardrails" in connected_tools
         # The standalone MCP gallery runtime IS a model-free FastMCP tool server: agent.py
         # imports `mcp` and neither `strands` nor bedrock-runtime, so it never invokes a
         # model. Emitting a ModelId parameter, a MODEL_ID env var, or bedrock:InvokeModel
@@ -5247,10 +5263,13 @@ class CfnTemplateGenerator:
         )
         self._add_code_package(template, config, litellm_secret=is_litellm)
 
-        # Runtime IAM role (always needed). Forward the OTEL auth secret ARN
-        # if the user configured an OTLP backend that needs Bearer/Basic auth.
-        _obs = config.observability.model_dump() if getattr(config, "observability", None) else {}
-        _otel_secret_arn = _obs.get("auth_header_secret_arn") or _obs.get("authHeaderSecretArn")
+        # Resolve observability once: runtime env, secret IAM, and generated
+        # instrumentation must all describe the same effective configuration.
+        try:
+            _otel_env = build_export_observability_env(request, runtime_name=deployment_name)
+        except CfnObservabilityError as exc:
+            raise CfnExportUnsupportedError(str(exc)) from exc
+        _otel_secret_arn = _otel_env.get("OTEL_AUTH_SECRET_ARN")
         self._add_runtime_role(
             template,
             connected_tools,
@@ -5345,8 +5364,9 @@ class CfnTemplateGenerator:
             self._add_evaluation_role(template)
             self._add_evaluation(template, deployment_name, evaluation_config)
 
+        guardrail_plan = None
         if has_guardrails:
-            self._add_guardrail(template, deployment_name)
+            guardrail_plan = self._add_guardrail(template, deployment_name, request.guardrails_config)
 
         # Runtime + endpoint (always last — depends on everything above)
         self._add_runtime(
@@ -5361,6 +5381,8 @@ class CfnTemplateGenerator:
             kb_id_ref=kb_id_ref,
             is_standalone_mcp=is_standalone_mcp,
             provider_secret=has_provider_secret,
+            guardrail_plan=guardrail_plan,
+            otel_env=_otel_env,
         )
         self._add_runtime_endpoint(template, deployment_name)
         self._add_outputs(template, has_gateway, has_memory, has_mcp_server, is_litellm=is_litellm)
@@ -5459,11 +5481,7 @@ class CfnTemplateGenerator:
         logger.info("VPC placement knob applied to %s", ", ".join(vpc_lambdas) or "no functions")
 
         # Generate portable agent code
-        _obs_enabled = bool(
-            getattr(config, "observability", None)
-            or "observability" in (connected_tools or [])
-            or getattr(config, "enable_otel", False)
-        )
+        _obs_enabled = bool(_otel_env)
         # The template and the agent code must agree about which components exist.
         # `generate_agent_code` decides from the tool-id list alone ("gateway" in
         # tools, "memory" in tools, ...), while the template decides from the
@@ -5474,7 +5492,9 @@ class CfnTemplateGenerator:
         # a runtime holding the proxy URL and the key ARN in its environment and no
         # code that reads them. Reconcile here, off the booleans already computed,
         # so the two views cannot drift.
-        code_tools = list(connected_tools)
+        # Keep capability markers aligned with the effective telemetry plan.
+        # External OTLP being off does not disable the native usage bootstrap.
+        code_tools = [tool for tool in connected_tools if tool != "observability" or _obs_enabled]
         for flag, tool_id in ((has_gateway, "gateway"), (has_memory, "memory")):
             if flag and tool_id not in code_tools:
                 code_tools.append(tool_id)
@@ -6810,19 +6830,9 @@ class CfnTemplateGenerator:
                 }
             )
 
-        if "guardrails" in connected_tools:
-            statements.append(
-                {
-                    # This template creates no guardrail: the agent applies one that
-                    # already exists in the account and whose id it is given at
-                    # runtime, so there is no ARN to name at export time. Exact
-                    # actions, and neither of them can modify a guardrail.
-                    "Sid": "GuardrailsAccess",
-                    "Effect": "Allow",
-                    "Action": ["bedrock:ApplyGuardrail", "bedrock:GetGuardrail"],
-                    "Resource": "*",
-                }
-            )
+        # Guardrail data-plane permissions are added by _add_guardrail after
+        # resolving its created or existing ARN. Never grant account-wide
+        # ApplyGuardrail/GetGuardrail for a canvas with one known policy.
 
         if has_evaluation:
             statements.append(
@@ -6876,13 +6886,30 @@ class CfnTemplateGenerator:
             )
 
         if otel_secret_arn:
-            statements.append(
-                {
-                    "Sid": "OtelAuthHeaderSecret",
-                    "Effect": "Allow",
-                    "Action": ["secretsmanager:GetSecretValue"],
-                    "Resource": [otel_secret_arn],
-                }
+            statements.extend(
+                [
+                    {
+                        "Sid": "OtelAuthHeaderSecret",
+                        "Effect": "Allow",
+                        "Action": ["secretsmanager:GetSecretValue"],
+                        "Resource": [otel_secret_arn],
+                    },
+                    {
+                        "Sid": "OtelAuthHeaderDecrypt",
+                        "Effect": "Allow",
+                        "Action": ["kms:Decrypt"],
+                        # The receiving secret's key ARN is not known at export
+                        # time. Constrain the grant to Secrets Manager and this
+                        # exact secret's encryption context instead.
+                        "Resource": "*",
+                        "Condition": {
+                            "StringEquals": {
+                                "kms:ViaService": {"Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"},
+                                "kms:EncryptionContext:SecretARN": otel_secret_arn,
+                            }
+                        },
+                    },
+                ]
             )
 
         if provider_secret:
@@ -9900,39 +9927,74 @@ def handler(event, context):
     # Guardrails (standard Bedrock CFN)
     # ------------------------------------------------------------------
 
-    def _add_guardrail(self, template: dict, deployment_name: str) -> None:
-        """Add AWS::Bedrock::Guardrail + GuardrailVersion resources."""
-        template["Resources"]["BedrockGuardrail"] = {
-            "Type": "AWS::Bedrock::Guardrail",
-            "Properties": {
-                "Name": {"Fn::Sub": "${DeploymentName}-guardrail"},
-                "Description": {"Fn::Sub": "Guardrail for ${DeploymentName}"},
-                "BlockedInputMessaging": "Your request was blocked by a safety guardrail.",
-                "BlockedOutputsMessaging": "The response was blocked by a safety guardrail.",
-                "ContentPolicyConfig": {
-                    "FiltersConfig": [
-                        {"Type": "HATE", "InputStrength": "HIGH", "OutputStrength": "HIGH"},
-                        {"Type": "INSULTS", "InputStrength": "HIGH", "OutputStrength": "HIGH"},
-                        {"Type": "SEXUAL", "InputStrength": "HIGH", "OutputStrength": "HIGH"},
-                        {"Type": "VIOLENCE", "InputStrength": "HIGH", "OutputStrength": "HIGH"},
-                        {"Type": "MISCONDUCT", "InputStrength": "HIGH", "OutputStrength": "HIGH"},
-                        {"Type": "PROMPT_ATTACK", "InputStrength": "HIGH", "OutputStrength": "NONE"},
+    def _add_guardrail(
+        self,
+        template: dict,
+        deployment_name: str,
+        guardrails_config: dict | None = None,
+    ) -> GuardrailExportPlan:
+        """Emit the configured immutable policy and its exact runtime authority."""
+        try:
+            plan = prepare_guardrail_export(guardrails_config)
+        except GuardrailExportError as exc:
+            raise CfnExportUnsupportedError(str(exc)) from exc
+        template["Parameters"].update(plan.parameters)
+        if plan.conditions:
+            template.setdefault("Conditions", {}).update(plan.conditions)
+        if plan.mode == "create_new":
+            template["Resources"]["BedrockGuardrail"] = {
+                "Type": "AWS::Bedrock::Guardrail",
+                "Properties": {
+                    "Name": {"Fn::Sub": "${DeploymentName}-guardrail"},
+                    "Description": {"Fn::Sub": "Guardrail for ${DeploymentName}"},
+                    "BlockedInputMessaging": "Your request was blocked by a safety guardrail.",
+                    "BlockedOutputsMessaging": "The response was blocked by a safety guardrail.",
+                    **plan.properties,
+                    "Tags": [
+                        {"Key": "ManagedBy", "Value": "CloudFormation"},
+                        {"Key": "Stack", "Value": {"Ref": "AWS::StackName"}},
                     ],
                 },
-                "Tags": [
-                    {"Key": "ManagedBy", "Value": "CloudFormation"},
-                    {"Key": "Stack", "Value": {"Ref": "AWS::StackName"}},
-                ],
-            },
-        }
-        template["Resources"]["BedrockGuardrailVersion"] = {
-            "Type": "AWS::Bedrock::GuardrailVersion",
-            "DependsOn": ["BedrockGuardrail"],
-            "Properties": {
-                "GuardrailIdentifier": {"Fn::GetAtt": ["BedrockGuardrail", "GuardrailId"]},
-                "Description": "Initial version created by AgentCore Flows",
-            },
-        }
+            }
+            template["Resources"]["BedrockGuardrailVersion"] = {
+                "Type": "AWS::Bedrock::GuardrailVersion",
+                "Properties": {
+                    # GetAtt already orders version creation after the policy;
+                    # duplicating that edge with DependsOn triggers W3005.
+                    "GuardrailIdentifier": plan.guardrail_id,
+                    # Description is a replacement property. A changed policy
+                    # therefore creates a fresh immutable version rather than
+                    # leaving Runtime pinned to the preceding policy snapshot.
+                    "Description": f"Policy sha256:{plan.policy_digest}",
+                },
+            }
+        statements = template["Resources"]["RuntimeExecutionRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+            "Statement"
+        ]
+        statements.extend(
+            [
+                {
+                    "Sid": "GuardrailsAccess",
+                    "Effect": "Allow",
+                    "Action": ["bedrock:ApplyGuardrail", "bedrock:GetGuardrail"],
+                    "Resource": plan.guardrail_arn,
+                },
+                {
+                    "Sid": "RequireExportedGuardrailVersion",
+                    "Effect": "Deny",
+                    "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                    "Resource": "*",
+                    "Condition": {
+                        "StringNotEquals": {
+                            "bedrock:GuardrailIdentifier": {
+                                "Fn::Join": [":", [plan.guardrail_arn, plan.guardrail_version]]
+                            }
+                        }
+                    },
+                },
+            ]
+        )
+        return plan
 
     # ------------------------------------------------------------------
     # Runtime (native CFN)
@@ -9951,6 +10013,8 @@ def handler(event, context):
         kb_id_ref: dict | None = None,
         is_standalone_mcp: bool = False,
         provider_secret: bool = False,
+        guardrail_plan: GuardrailExportPlan | None = None,
+        otel_env: dict[str, str] | None = None,
     ) -> None:
         # Most ordering is already encoded by Ref/GetAtt in the properties below.
         # Keep only dependencies with no property reference of their own.
@@ -10060,22 +10124,13 @@ def handler(event, context):
             depends.append("McpServerGatewayTarget")
 
         if has_guardrails:
-            env_vars["GUARDRAIL_ID"] = {"Fn::GetAtt": ["BedrockGuardrail", "GuardrailId"]}
-            env_vars["GUARDRAIL_VERSION"] = {"Fn::GetAtt": ["BedrockGuardrailVersion", "Version"]}
+            plan = guardrail_plan or prepare_guardrail_export(None)
+            env_vars["GUARDRAIL_ID"] = plan.guardrail_id
+            env_vars["GUARDRAIL_VERSION"] = plan.guardrail_version
 
-        # Inject OTLP observability env vars via single source of truth.
-        # CFN exports favor a stable runtime name as deployment ID stand-in.
-        # NOTE: platform_defaults intentionally NOT passed here — CFN exports
-        # are designed to deploy in other AWS accounts that won't have this
-        # platform's SSM params. Per-canvas observability config is the only
-        # source for exports.
-        otel_env = build_otel_env_vars(
-            config.observability.model_dump() if getattr(config, "observability", None) else None,
-            runtime_name=deployment_name,
-            deployment_id=deployment_name,
-            enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
-        )
-        env_vars.update(otel_env)
+        # The caller resolves top-level/nested settings and disabled markers
+        # once, and derives runtime secret grants from this same environment.
+        env_vars.update(otel_env or {})
 
         runtime_resource = {
             "Type": "AWS::BedrockAgentCore::Runtime",
@@ -11575,6 +11630,9 @@ silently reuse the other's executable package.
 
         template_resources = (template or {}).get("Resources", {})
         template_parameters = (template or {}).get("Parameters", {})
+        runtime_env = (
+            template_resources.get("AgentCoreRuntime", {}).get("Properties", {}).get("EnvironmentVariables", {})
+        )
         resource_types = {
             resource.get("Type") for resource in template_resources.values() if isinstance(resource, dict)
         }
@@ -11609,6 +11667,10 @@ silently reuse the other's executable package.
             components.append("Online Evaluation")
         if "AWS::Bedrock::Guardrail" in resource_types:
             components.append("Bedrock Guardrail")
+        elif "GUARDRAIL_ID" in runtime_env:
+            components.append("Bedrock Guardrail (existing numbered version)")
+        if runtime_env.get("AGENT_OBSERVABILITY_ENABLED") == "true" or runtime_env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            components.append("Observability")
         if has_policy:
             components.extend(["PolicyEngine", "Policies"])
         if has_mcp_server:
@@ -12286,11 +12348,61 @@ qualifies. Send the same `SESSION_ID` as `--runtime-session-id` and in the paylo
                 invoke_memory_md=invoke_memory_md,
             )
 
+        control_md = ""
+        if "GUARDRAIL_ID" in runtime_env:
+            control_md += """## Exported Guardrail
+
+The runtime uses the selected Guardrail through both the model invocation and
+tool-boundary checks in `agent-code/agent.py`. Its IAM permissions are scoped to
+that Guardrail. The runtime pins a numbered version, never mutable `DRAFT`.
+For a newly created policy, the version snapshot changes when the policy changes;
+existing mode references your policy without modifying it.
+
+Content, PII, denied-topic, word and supported regex settings are represented in
+the stack, rather than replaced with a fixed default policy. An unsupported
+security setting is refused before an archive is returned.
+
+PII anonymization protects returned content, not arbitrary logs. Keep the
+generated log retention and access controls, and supply `CustomerManagedKeyArn`
+where customer-managed log encryption is required. Do not enable model payload
+logging or Guardrail trace output without reviewing the sensitive-data impact.
+
+"""
+        if runtime_env.get("AGENT_OBSERVABILITY_ENABLED") == "true" or runtime_env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+            control_md += """## Exported Observability
+
+The generated source initializes telemetry in-process; Python direct-code
+deployment does not rely on a container command or a nonexistent localhost OTLP
+collector. The runtime environment carries the effective canvas configuration.
+A nonempty top-level node takes precedence over nested runtime settings.
+
+Configured external OTLP endpoints retain their protocol, service name, sampling
+and resource attributes. Authentication is fetched at runtime through
+`OTEL_AUTH_SECRET_ARN`, when configured; the archive contains no authentication
+value. The destination must be reachable from the runtime and accept its
+configured telemetry protocol.
+
+The canvas's "Enable OTLP telemetry" switch controls external export. Turning it
+off does not remove native allowlisted usage metering from a configured
+observability node; no external endpoint or authentication grant is emitted.
+
+Without an external endpoint, enabled native usage telemetry writes allowlisted
+usage records to the governed runtime log group. That is not a claim that an
+external collector is configured or that full CloudWatch Transaction Search is
+enabled in the destination account. Account-wide tracing prerequisites must be
+configured separately by that account's operator.
+
+The stack does not reproduce the platform's tenant service, release slots,
+promotion evidence store or customer pipeline configuration.
+
+"""
+
         return f"""# AgentCore Stack: {deployment_name}
 
 Template: {template_id or "custom"}
 Components: {", ".join(components)}
 
+{control_md}
 ## Prerequisites
 
 1. AWS CLI v2 configured with credentials
