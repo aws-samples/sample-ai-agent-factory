@@ -119,7 +119,31 @@ export interface WorkstreamPermissionSetsProps {
    * placeholder useful pre-pipeline-deployment).
    */
   readonly approverPipelineNames?: readonly string[];
+
+  /**
+   * The subset of `targetAccountIds` a developer may emit IDE / local-run
+   * telemetry into (the workstream's NONPROD cell accounts). The Developer
+   * persona's `DeveloperTelemetryWrite` statement is then conditioned on
+   * `aws:PrincipalAccount`, so the same permission set assigned to the prod
+   * account grants no telemetry write there: a Cloud Login into production
+   * from an IDE cannot put developer spans into the production Dataset.
+   * When omitted the statement is still scoped to the
+   * `/agenticai/dev/<workstream>/*` log groups but applies in every target
+   * account; the "never Cloud Login into production" rule is then procedural.
+   */
+  readonly devTelemetryAccountIds?: readonly string[];
 }
+
+/**
+ * Log-group prefix for developer IDE / local-run telemetry (CloudWatch Omni
+ * GA developer loop). The runtime convention is
+ * `/agenticai/<env>/<tenant>/<agent>` with env in {nonprod, prod}; `dev` is
+ * a third env slot that no deployed stack ever uses, so a developer's
+ * `DeveloperTelemetryWrite` grant can never reach a runtime's log group,
+ * while the Omni centralization rule (`LogGroupName LIKE '/agenticai/%'`)
+ * still copies these groups into the hub under the developer's account.
+ */
+export const DEV_TELEMETRY_LOG_GROUP_PREFIX = '/agenticai/dev';
 
 /**
  * Renders the inline policy JSON (as a plain object) for one of the three
@@ -138,6 +162,11 @@ export function renderInlinePolicy(
      * workstream's pipeline. SEC (security review).
      */
     readonly workstreamId?: string;
+    /**
+     * Nonprod account ids the Developer telemetry write grant is pinned to
+     * (`aws:PrincipalAccount`). See `WorkstreamPermissionSetsProps`.
+     */
+    readonly devTelemetryAccountIds?: readonly string[];
   } = {},
 ): Record<string, unknown> {
   const registryArnScope = opts.platformAccountId
@@ -162,6 +191,20 @@ export function renderInlinePolicy(
     `arn:aws:codebuild:*:*:project/AgenticAI-${wsScope}-*`,
     `arn:aws:codebuild:*:*:project/${wsScope}-*`,
   ];
+  // CloudWatch Omni developer loop: an agent run from the IDE (Kiro / VS
+  // Code extension, or a plain `opentelemetry-instrument` run with Cloud
+  // Login into the nonprod cell) exports OTLP traces to X-Ray (`aws/spans`,
+  // Transaction Search) and OTLP logs into a log group the developer owns.
+  // The log-group grant is pinned to the workstream's `dev` prefix; the
+  // span grant has no resource-level scoping in X-Ray (`PutSpans` /
+  // `PutTraceSegments` are account-wide by design) so it is `*`.
+  const devTelemetryLogGroupArns = [
+    `arn:aws:logs:*:*:log-group:${DEV_TELEMETRY_LOG_GROUP_PREFIX}/${wsScope}/*`,
+  ];
+  const devTelemetryCondition =
+    opts.devTelemetryAccountIds && opts.devTelemetryAccountIds.length > 0
+      ? { StringEquals: { 'aws:PrincipalAccount': [...opts.devTelemetryAccountIds] } }
+      : undefined;
 
   if (persona === 'Developer') {
     return {
@@ -187,6 +230,31 @@ export function renderInlinePolicy(
             'xray:List*',
           ],
           Resource: '*',
+        },
+        {
+          Sid: 'DeveloperTelemetryWrite',
+          Effect: 'Allow',
+          // OTLP logs endpoint (`logs.<region>.amazonaws.com/v1/logs`) needs
+          // the group and the stream to exist (observed live: a missing
+          // stream is a 400 for every batch), hence Create* alongside Put.
+          // PutRetentionPolicy lets the developer keep dev groups short-lived.
+          // No Delete*, no resource policy, no subscription filter: those
+          // stay with the pipeline-owned stacks (and SCP-13 for Omni).
+          Action: [
+            'logs:CreateLogGroup',
+            'logs:CreateLogStream',
+            'logs:PutLogEvents',
+            'logs:PutRetentionPolicy',
+          ],
+          Resource: devTelemetryLogGroupArns,
+          ...(devTelemetryCondition ? { Condition: devTelemetryCondition } : {}),
+        },
+        {
+          Sid: 'DeveloperTelemetrySpans',
+          Effect: 'Allow',
+          Action: ['xray:PutSpans', 'xray:PutTraceSegments', 'xray:PutTelemetryRecords'],
+          Resource: '*',
+          ...(devTelemetryCondition ? { Condition: devTelemetryCondition } : {}),
         },
         {
           Sid: 'AgentStateRead',
@@ -418,6 +486,13 @@ export class WorkstreamPermissionSets extends Construct {
         `WorkstreamPermissionSets: sessionDuration must be ISO-8601 PT1H..PT12H; got '${props.sessionDuration}'`,
       );
     }
+    for (const acct of props.devTelemetryAccountIds ?? []) {
+      if (!props.targetAccountIds.includes(acct)) {
+        throw new Error(
+          `WorkstreamPermissionSets: devTelemetryAccountIds must be a subset of targetAccountIds; '${acct}' is not a target of workstream '${wsId}'.`,
+        );
+      }
+    }
 
     const sessionDuration = props.sessionDuration ?? 'PT8H';
 
@@ -439,6 +514,7 @@ export class WorkstreamPermissionSets extends Construct {
         platformAccountId: props.platformAccountId,
         approverPipelineNames: props.approverPipelineNames,
         workstreamId: wsId,
+        devTelemetryAccountIds: props.devTelemetryAccountIds,
       });
 
       const ps = new CfnPermissionSet(this, `PermissionSet${persona}`, {

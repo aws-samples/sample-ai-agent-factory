@@ -12,6 +12,7 @@ export {
   WorkstreamPermissionSets,
   renderInlinePolicy,
   PERSONA_PREFIX,
+  DEV_TELEMETRY_LOG_GROUP_PREFIX,
   type WorkstreamPersona,
   type WorkstreamPermissionSetsProps,
 } from './workstream-permission-sets';
