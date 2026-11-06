@@ -255,3 +255,32 @@ def test_centralization_rule_actions_require_rule_argument():
     args = mod.build_parser().parse_args(["--region", REGION, "centralization", "verify"])
     with pytest.raises(SystemExit, match="--rule is required"):
         mod.run(args, clients=mod.Clients(region=REGION))
+
+
+def test_rule_update_fails_closed_on_an_old_sdk_model():
+    class Shape:
+        def __init__(self, members):
+            self.members = members
+
+    class Model:
+        def shape_for(self, name):
+            full = {
+                "CentralizationRuleSource": {"Regions": 1, "Scope": 1, "SourceLogsConfiguration": 1, "SourceContextGraphConfiguration": 1},
+                "DestinationLogsConfiguration": {"LogsEncryptionConfiguration": 1, "TagPropagationConfiguration": 1},
+                "LogsEncryptionConfiguration": {"EncryptionStrategy": 1, "KmsKeyArn": 1, "EncryptionScope": 1},
+            }
+            return Shape(full[name])
+
+    class Meta:
+        service_model = Model()
+
+    class OldClient:
+        meta = Meta()
+
+    clients = mod.Clients(region=REGION, _obs=OldClient())
+    with pytest.raises(SystemExit, match="CentralizationRuleSource.SourceMetricsConfiguration"):
+        mod.enable_context_graph(clients, "agenticai-fleet-eu-west-1")
+
+    # The real botocore model in the test environment knows every member.
+    real, _, _ = _clients()
+    mod.assert_sdk_knows_rule_shape(real)

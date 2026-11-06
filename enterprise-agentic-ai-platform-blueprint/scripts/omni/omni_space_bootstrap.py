@@ -71,27 +71,38 @@ class Clients:
     """Lazily built boto3 clients; a test passes stubbed ones in."""
 
     region: str
+    profile: str | None = None
     _omni: Any = None
     _obs: Any = None
     _iam: Any = None
-    _factory: Callable[[str, str], Any] = field(default=lambda svc, region: boto3.client(svc, region_name=region))
+    _factory: Callable[[str, str], Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self._factory is None:
+            session = boto3.session.Session(profile_name=self.profile, region_name=self.region)
+            self._factory = lambda svc, region: session.client(svc, region_name=region)
+
+    @property
+    def factory(self) -> Callable[[str, str], Any]:
+        assert self._factory is not None
+        return self._factory
 
     @property
     def omni(self) -> Any:
         if self._omni is None:
-            self._omni = self._factory("cloudwatchomni", self.region)
+            self._omni = self.factory("cloudwatchomni", self.region)
         return self._omni
 
     @property
     def iam(self) -> Any:
         if self._iam is None:
-            self._iam = self._factory("iam", self.region)
+            self._iam = self.factory("iam", self.region)
         return self._iam
 
     @property
     def observabilityadmin(self) -> Any:
         if self._obs is None:
-            self._obs = self._factory("observabilityadmin", self.region)
+            self._obs = self.factory("observabilityadmin", self.region)
         return self._obs
 
 
@@ -324,8 +335,38 @@ def context_graph_enabled(rule: dict[str, Any]) -> bool:
     return "SourceContextGraphConfiguration" in (rule.get("CentralizationRule") or {}).get("Source", {})
 
 
+RULE_SHAPE_MEMBERS = {
+    "CentralizationRuleSource": ("SourceMetricsConfiguration", "SourceContextGraphConfiguration"),
+    "DestinationLogsConfiguration": ("TagPropagationConfiguration",),
+    "LogsEncryptionConfiguration": ("EncryptionScope",),
+}
+
+
+def assert_sdk_knows_rule_shape(clients: Clients) -> None:
+    """Fail closed before an update that re-submits a parsed rule.
+
+    botocore drops response members its service model does not know. A client
+    built from an older model would read the rule WITHOUT its metrics, tag
+    propagation or encryption-scope settings and the re-submit would silently
+    remove them (observed live: AWS CLI 2.34 hid all three while the raw
+    response carried them).
+    """
+    model = clients.observabilityadmin.meta.service_model
+    missing = [
+        f"{shape}.{member}"
+        for shape, members in RULE_SHAPE_MEMBERS.items()
+        for member in members
+        if member not in model.shape_for(shape).members
+    ]
+    if missing:
+        raise SystemExit(
+            "The installed botocore does not model " + ", ".join(missing) + "; upgrade boto3 before updating a centralization rule."
+        )
+
+
 def enable_context_graph(clients: Clients, rule_identifier: str) -> dict[str, Any]:
     """Idempotent: re-submit the rule with SourceContextGraphConfiguration present, nothing else changed."""
+    assert_sdk_knows_rule_shape(clients)
     current = get_centralization_rule(clients, rule_identifier)
     rule = current["CentralizationRule"]
     if context_graph_enabled(current):
@@ -378,6 +419,7 @@ def inventory(clients: Clients, domain_id: str, space_id: str, account_id: str) 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--region", required=True, help="Space Region (hub account credentials expected).")
+    parser.add_argument("--profile", help="Named AWS profile for the hub account (default: the ambient credentials).")
     sub = parser.add_subparsers(dest="command", required=True)
 
     di = sub.add_parser("dataset-integration", help="Create, verify or delete the Dataset integration.")
@@ -405,14 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def caller_account_id(region: str) -> str:
-    return boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+def caller_account_id(clients: Clients) -> str:
+    return clients.factory("sts", clients.region).get_caller_identity()["Account"]
 
 
 def run(args: argparse.Namespace, clients: Clients | None = None) -> dict[str, Any]:
-    clients = clients or Clients(region=args.region)
+    clients = clients or Clients(region=args.region, profile=getattr(args, "profile", None))
     if args.command == "dataset-integration":
-        account_id = args.account_id or caller_account_id(args.region)
+        account_id = args.account_id or caller_account_id(clients)
         arn = dataset_integration_arn(args.region, account_id)
         if args.action == "create":
             if not args.role_arn:
@@ -448,7 +490,7 @@ def run(args: argparse.Namespace, clients: Clients | None = None) -> dict[str, A
             return {"action": "enable-context-graph", **enable_context_graph(clients, args.rule)}
         return {"action": "verify-context-graph", **verify_context_graph(clients, args.rule)}
 
-    account_id = args.account_id or caller_account_id(args.region)
+    account_id = args.account_id or caller_account_id(clients)
     return {"action": "inventory", **inventory(clients, args.domain_id, args.space_id, account_id)}
 
 
