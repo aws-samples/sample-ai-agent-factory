@@ -147,9 +147,14 @@ def _event_name(record: dict[str, Any]) -> str:
 
 
 def _from_span_events(span: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Events on the span: OpenTelemetry `events`, plus `span_events`, where the evaluation
+    service attaches the GenAI log-event records it joined to the span (observed live: each
+    carries the record's `body` with input/output messages)."""
     inputs: list[str] = []
     outputs: list[str] = []
-    for event in span.get("events") or []:
+    for event in list(span.get("events") or []) + list(span.get("span_events") or []):
+        if not isinstance(event, dict):
+            continue
         name = _event_name(event)
         attributes = event.get("attributes") or {}
         if name in USER_EVENT_NAMES:
@@ -160,6 +165,9 @@ def _from_span_events(span: dict[str, Any]) -> tuple[list[str], list[str]]:
             text = _text(attributes.get("message") if "message" in attributes else attributes.get("content"))
             if text:
                 outputs.append(text)
+        body_inputs, body_outputs = _from_body(event)
+        inputs.extend(body_inputs)
+        outputs.extend(body_outputs)
     return inputs, outputs
 
 
@@ -298,6 +306,45 @@ def evaluate(payload: dict[str, Any], policy: dict[str, Any] | None = None) -> d
     return {"label": "PASS", "value": 1.0, "explanation": "All AgenticAI policy checks passed."}
 
 
+def payload_shape(payload: dict[str, Any], limit: int = 40) -> dict[str, Any]:
+    """Structure-only view of the payload for diagnostics: names, keys and counts, never content."""
+    records = (payload.get("evaluationInput") or {}).get("sessionSpans") or []
+    shapes = []
+    for record in records[:limit]:
+        body = record.get("body")
+        shapes.append({
+            "keys": sorted(record.keys()),
+            "name": record.get("name"),
+            "eventName": record.get("eventName"),
+            "scope": (record.get("scope") or {}).get("name"),
+            "attributeKeys": sorted((record.get("attributes") or {}).keys())[:25],
+            "bodyType": type(body).__name__,
+            "bodyKeys": sorted(body.keys()) if isinstance(body, dict) else None,
+            "events": [_event_name(e) for e in (record.get("events") or [])][:10],
+            "spanEvents": [
+                {
+                    "name": _event_name(e),
+                    "keys": sorted(e.keys())[:12],
+                    "attributeKeys": sorted((e.get("attributes") or {}).keys())[:12],
+                    "bodyKeys": sorted(e["body"].keys()) if isinstance(e.get("body"), dict) else type(e.get("body")).__name__,
+                }
+                for e in (record.get("span_events") or [])
+                if isinstance(e, dict)
+            ][:10],
+            "otherKeys": {
+                k: (sorted(v.keys())[:12] if isinstance(v, dict) else type(v).__name__)
+                for k, v in record.items()
+                if k in ("langfuse", "source", "input", "output", "messages")
+            },
+        })
+    return {
+        "evaluationLevel": payload.get("evaluationLevel"),
+        "target": payload.get("evaluationTarget"),
+        "records": len(records),
+        "shapes": shapes,
+    }
+
+
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     if event.get("schemaVersion") not in (None, "1.0"):
         return {
@@ -305,6 +352,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             "errorMessage": f"Unsupported evaluator payload schema {event.get('schemaVersion')!r}.",
         }
     try:
-        return evaluate(event)
+        result = evaluate(event)
+        if os.environ.get("POLICY_LOG_PAYLOAD_SHAPE") == "true" or "errorCode" in result:
+            # Structure only (no prompt or response text): enough to diagnose a contract mismatch.
+            print(json.dumps({"policyEvaluatorDiagnostics": payload_shape(event), "result": result.get("errorCode", result.get("label"))}))
+        return result
     except Exception as exc:  # noqa: BLE001 -- the contract requires an error envelope, never a raise
         return {"errorCode": "EVALUATOR_ERROR", "errorMessage": f"{type(exc).__name__}: {exc}"}

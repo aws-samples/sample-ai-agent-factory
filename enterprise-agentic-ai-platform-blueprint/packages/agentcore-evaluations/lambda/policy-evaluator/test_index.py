@@ -202,3 +202,19 @@ def test_tool_call_only_choice_is_not_output():
     ]
     payload = {"evaluationInput": {"sessionSpans": records}, "evaluationTarget": {"traceIds": ["t1"]}}
     assert index.evaluate(payload, _policy())["errorCode"] == "MISSING_OUTPUT_CONTENT"
+
+
+def test_reads_output_from_service_joined_span_events():
+    """Live shape (on-demand Evaluate, 2026-11-06): the service joins the GenAI log-event records
+    onto the span as `span_events`, each keeping the record's body with input/output messages."""
+    span = _agent_span("t1", "a1")
+    span["span_events"] = [{
+        "name": "strands.telemetry.tracer",
+        "attributes": {"event.name": "strands.telemetry.tracer", "session.id": "sess-1"},
+        "body": {
+            "input": {"messages": [{"role": "user", "content": ADVERSARIAL}]},
+            "output": {"messages": [{"role": "assistant", "content": json.dumps([{"text": "I'm sorry, I can't do that."}])}]},
+        },
+    }]
+    payload = {"evaluationInput": {"sessionSpans": [span]}, "evaluationTarget": {"traceIds": ["t1"]}}
+    assert index.evaluate(payload, _policy())["label"] == "PASS"
