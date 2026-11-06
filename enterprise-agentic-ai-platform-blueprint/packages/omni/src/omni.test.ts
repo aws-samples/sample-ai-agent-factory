@@ -248,6 +248,22 @@ describe('OmniHubSpaceConstruct', () => {
     expect(logsKey).toContain('"Key":"LogsManaged"');
   });
 
+  it('gives the operator role the documented trust: SourceAccount only, with session-tag, source-identity and context actions', () => {
+    const { t } = synth();
+    const operator = Object.values(t.findResources('AWS::IAM::Role')).find(
+      (r) => (r.Properties as any).RoleName === 'CloudWatchOmniOperatorRole',
+    )!.Properties as any;
+    const statements = operator.AssumeRolePolicyDocument.Statement as any[];
+    const actions = statements.flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(actions).toEqual(expect.arrayContaining(['sts:AssumeRole', 'sts:TagSession', 'sts:SetSourceIdentity', 'sts:SetContext']));
+    for (const st of statements) {
+      expect(st.Principal).toEqual({ Service: 'cloudwatch.amazonaws.com' });
+      expect(st.Condition).toEqual({ StringEquals: { 'aws:SourceAccount': '222222222222' } });
+    }
+    // A space/* SourceArn condition breaks GetSpaceCredentialsForOrganization (observed live).
+    expect(JSON.stringify(operator.AssumeRolePolicyDocument)).not.toContain('space/*');
+  });
+
   it('scopes the Dataset integration role to the hub log-group prefixes', () => {
     const { t } = synth();
     t.hasResourceProperties('AWS::IAM::Role', {

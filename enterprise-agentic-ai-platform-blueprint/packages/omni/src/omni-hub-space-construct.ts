@@ -141,19 +141,34 @@ export class OmniHubSpaceConstruct extends Construct {
     if (props.enableAwsIntegrationDiscovery) {
       operatorManagedPolicies.push(ManagedPolicy.fromAwsManagedPolicyName('CloudWatchOmniAWSIntegrationPolicy'));
     }
+    // The documented operator-role trust (CloudWatch Omni "cross-service confused
+    // deputy prevention"): the service assumes the role with session tags, a source
+    // identity and a session context, conditioned on aws:SourceAccount ONLY. A
+    // narrower aws:SourceArn on space/* breaks GetSpaceCredentialsForOrganization
+    // ("Unable to assume the data access role for this space", observed live).
     this.operatorRole = new Role(this, 'OperatorRole', {
       roleName: props.operatorRoleName ?? 'CloudWatchOmniOperatorRole',
       description: 'CloudWatch Omni space operator role (DataAccessRoleArn): the account-wide ceiling for every space in this account.',
-      assumedBy: new ServicePrincipal('cloudwatch.amazonaws.com', {
-        conditions: {
-          StringEquals: { 'aws:SourceAccount': stack.account },
-          ArnLike: { 'aws:SourceArn': spaceArnPattern },
-        },
+      assumedBy: new ServicePrincipal('cloudwatch.amazonaws.com').withSessionTags().withConditions({
+        StringEquals: { 'aws:SourceAccount': stack.account },
       }),
       managedPolicies: operatorManagedPolicies,
       permissionsBoundary: ManagedPolicy.fromAwsManagedPolicyName('CloudWatchOmniSpaceAccessPolicy'),
       maxSessionDuration: Duration.hours(1),
     });
+    // withSessionTags() adds sts:TagSession; the service also needs the two actions below.
+    const trust = this.operatorRole.assumeRolePolicy;
+    if (trust) {
+      trust.addStatements(
+        new PolicyStatement({
+          sid: 'OmniSourceIdentityAndContext',
+          effect: Effect.ALLOW,
+          principals: [new ServicePrincipal('cloudwatch.amazonaws.com')],
+          actions: ['sts:SetSourceIdentity', 'sts:SetContext'],
+          conditions: { StringEquals: { 'aws:SourceAccount': stack.account } },
+        }),
+      );
+    }
 
     const datasetPrefixes = props.datasetLogGroupPrefixes ?? [
       '/centralized/',
