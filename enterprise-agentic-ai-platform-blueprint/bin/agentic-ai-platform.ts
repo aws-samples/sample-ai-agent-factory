@@ -1427,7 +1427,43 @@ switch (stage) {
     }
 
     if (includeWorkload) {
+      // Golden-dataset promotion gate (docs/CLOUDWATCH_OMNI_INTEGRATION.md 3.1):
+      // naming a dataset version makes GoldenDatasetGate a mandatory Prod gate.
+      // The hub defaults to the Audit account in the deploy Region, where the
+      // omni-hub stage deployed the runner role for this pipeline's evaluation role.
+      const goldenDatasetId = app.node.tryGetContext("agenticai/goldenDatasetId");
+      const goldenDatasetVersion = app.node.tryGetContext("agenticai/goldenDatasetVersion");
+      if ((goldenDatasetId === undefined) !== (goldenDatasetVersion === undefined)) {
+        throw new Error(
+          "Context agenticai/goldenDatasetId and agenticai/goldenDatasetVersion must be set together.",
+        );
+      }
+      const goldenTrajectory = app.node.tryGetContext("agenticai/goldenTrajectoryEvaluator");
+      if (
+        goldenTrajectory !== undefined &&
+        !["Builtin.TrajectoryExactOrderMatch", "Builtin.TrajectoryInOrderMatch", "Builtin.TrajectoryAnyOrderMatch"].includes(String(goldenTrajectory))
+      ) {
+        throw new Error(
+          "Context agenticai/goldenTrajectoryEvaluator must be Builtin.TrajectoryExactOrderMatch, Builtin.TrajectoryInOrderMatch or Builtin.TrajectoryAnyOrderMatch.",
+        );
+      }
+      const goldenDataset =
+        goldenDatasetId !== undefined
+          ? {
+              datasetId: String(goldenDatasetId),
+              datasetVersion: String(goldenDatasetVersion),
+              hubAccountId: String(app.node.tryGetContext("agenticai/goldenHubAccountId") ?? auditAccount),
+              hubRegion: app.node.tryGetContext("agenticai/goldenHubRegion") as string | undefined,
+              runnerRoleName: app.node.tryGetContext("agenticai/goldenRunnerRoleName") as string | undefined,
+              trajectoryEvaluator: goldenTrajectory as
+                | "Builtin.TrajectoryExactOrderMatch"
+                | "Builtin.TrajectoryInOrderMatch"
+                | "Builtin.TrajectoryAnyOrderMatch"
+                | undefined,
+            }
+          : undefined;
       new WorkloadPipelineStack(app, "AgenticAI-WorkloadPipelineStack", {
+        goldenDataset,
         env: { account: platformNonprodAccount, region },
         githubRepo: githubRepo as string,
         githubBranch:
