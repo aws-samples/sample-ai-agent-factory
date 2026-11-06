@@ -569,6 +569,21 @@ def start_batch(
     return data.start_batch_evaluation(**kwargs)
 
 
+def ensure_result_log_group(logs, name: str, kms_key_arn: str, retention_days: int = 90, log: Callable[[str], None] = lambda s: None) -> str:
+    """Create the batch result group under the hub CMK before the service does so unencrypted (observed live:
+    a result group the service creates itself carries no customer key). Returns 'created', 'exists' or
+    'exists-unencrypted' (an existing group without the key is left alone and reported, never re-keyed here)."""
+    existing = [g for g in logs.describe_log_groups(logGroupNamePrefix=name).get("logGroups", []) if g["logGroupName"] == name]
+    if existing:
+        state = "exists" if existing[0].get("kmsKeyId") else "exists-unencrypted"
+        log(f"result log group {name} {state}")
+        return state
+    logs.create_log_group(logGroupName=name, kmsKeyId=kms_key_arn, tags={"agenticai:owner": "platform", "agenticai:purpose": "golden-gate"})
+    logs.put_retention_policy(logGroupName=name, retentionInDays=retention_days)
+    log(f"result log group {name} created under {kms_key_arn[-12:]} ({retention_days} days)")
+    return "created"
+
+
 def wait_batch(data, batch_id: str, timeout_s: int = 1800, interval_s: int = 30, sleep: Callable[[float], None] = time.sleep,
                log: Callable[[str], None] = lambda s: None) -> dict[str, Any]:
     deadline = time.time() + timeout_s
@@ -897,6 +912,8 @@ def cmd_gate(args: argparse.Namespace, clients: Clients) -> int:
         expected = {m["sessionId"]: len((m["groundTruth"]["inline"].get("turns") or [None])) for m in metadata}
         print(f"waiting up to {args.wait_for_sessions}s for the candidate sessions' traces in the source groups")
         wait_for_sessions(clients.logs, args.log_group, expected, start_s, end_s, args.wait_for_sessions, log=print)
+    if args.results_log_group and args.results_kms_key_arn:
+        ensure_result_log_group(clients.logs, args.results_log_group, args.results_kms_key_arn, log=print)
     started = start_batch(
         clients.data,
         name=args.name,
@@ -1018,6 +1035,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gate.add_argument("--evaluator", action="append", help=f"Repeatable. Default: {CORRECTNESS}, {GOAL_SUCCESS}, {HARMFULNESS}, {REFUSAL}.")
     gate.add_argument("--trajectory-evaluator", default=DEFAULT_TRAJECTORY_EVALUATOR, choices=TRAJECTORY_EVALUATORS)
     gate.add_argument("--results-log-group", help="Dedicated result log group; default: the service's own.")
+    gate.add_argument("--results-kms-key-arn",
+                      help="Create --results-log-group encrypted with this CMK before the batch starts if the group does not exist yet "
+                           "(the service otherwise creates it without a customer key; observed live).")
     gate.add_argument("--metrics-namespace")
     gate.add_argument("--timeout", type=int, default=1800)
     gate.add_argument("--poll-interval", type=int, default=30)

@@ -497,6 +497,12 @@ export interface WorkloadPipelineStackProps extends StackProps {
       | "Builtin.TrajectoryExactOrderMatch"
       | "Builtin.TrajectoryInOrderMatch"
       | "Builtin.TrajectoryAnyOrderMatch";
+    /**
+     * The hub centralized-logs CMK (`OmniCentralizedLogsKeyArn` output of the hub
+     * stack). When set, the gate creates its result group under this key before
+     * the service would create it unencrypted (observed live).
+     */
+    readonly resultsKmsKeyArn?: string;
   };
 
   /**
@@ -1084,6 +1090,9 @@ export class WorkloadPipelineStack extends Stack {
                 ' --log-group "$HUB_SPANS" --log-group "$HUB_RUNTIME_LOGS" --service-name "${RUNTIME_ID}.DEFAULT"' +
                 ' --name "$GATE_NAME" --trajectory-evaluator "$GOLDEN_TRAJECTORY_EVALUATOR"' +
                 ' --results-log-group "/agenticai/golden-gate/${EVAL_TENANT}-${EVAL_AGENT}" --metrics-namespace agenticai/golden-gate' +
+                // The hub CMK (OmniCentralizedLogsKeyArn output) when the operator supplied it: the
+                // result group is then created under the key before the service creates it unencrypted.
+                ' ${GOLDEN_RESULTS_KMS_KEY_ARN:+--results-kms-key-arn "$GOLDEN_RESULTS_KMS_KEY_ARN"}' +
                 " --evidence golden-gate-evidence.json",
             ],
             ...(evaluationRole ? { role: evaluationRole } : {}),
@@ -1106,6 +1115,7 @@ export class WorkloadPipelineStack extends Stack {
                   GOLDEN_RUNNER_ROLE_ARN: goldenRunnerRoleArn,
                   GOLDEN_TRAJECTORY_EVALUATOR:
                     golden.trajectoryEvaluator ?? "Builtin.TrajectoryAnyOrderMatch",
+                  GOLDEN_RESULTS_KMS_KEY_ARN: golden.resultsKmsKeyArn ?? "",
                 },
               },
             }),

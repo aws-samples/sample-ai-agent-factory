@@ -1455,6 +1455,7 @@ switch (stage) {
               hubAccountId: String(app.node.tryGetContext("agenticai/goldenHubAccountId") ?? auditAccount),
               hubRegion: app.node.tryGetContext("agenticai/goldenHubRegion") as string | undefined,
               runnerRoleName: app.node.tryGetContext("agenticai/goldenRunnerRoleName") as string | undefined,
+              resultsKmsKeyArn: app.node.tryGetContext("agenticai/goldenResultsKmsKeyArn") as string | undefined,
               trajectoryEvaluator: goldenTrajectory as
                 | "Builtin.TrajectoryExactOrderMatch"
                 | "Builtin.TrajectoryInOrderMatch"

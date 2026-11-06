@@ -515,3 +515,23 @@ def test_clients_assume_role_builds_the_session_from_sts_credentials(monkeypatch
     assert clients.session is not None
     assert captured["RoleArn"].endswith("GoldenGateRunner") and captured["RoleSessionName"] == "golden-dataset-gate"
     assert captured["sessions"][1] == {"region_name": REGION, "aws_access_key_id": "AKIA", "aws_secret_access_key": "s", "aws_session_token": "t"}
+
+
+def test_ensure_result_log_group_creates_under_the_cmk_and_leaves_an_existing_group_alone():
+    session = boto3.session.Session(region_name=REGION, aws_access_key_id="x", aws_secret_access_key="y")
+    logs = session.client("logs")
+    stub = Stubber(logs)
+    key = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/11111111-2222-3333-4444-555555555555"
+    stub.add_response("describe_log_groups", {"logGroups": []}, {"logGroupNamePrefix": "/agenticai/golden-gate/demo"})
+    stub.add_response("create_log_group", {}, {"logGroupName": "/agenticai/golden-gate/demo", "kmsKeyId": key,
+                                               "tags": {"agenticai:owner": "platform", "agenticai:purpose": "golden-gate"}})
+    stub.add_response("put_retention_policy", {}, {"logGroupName": "/agenticai/golden-gate/demo", "retentionInDays": 90})
+    stub.add_response("describe_log_groups", {"logGroups": [{"logGroupName": "/agenticai/golden-gate/demo", "kmsKeyId": key}]},
+                      {"logGroupNamePrefix": "/agenticai/golden-gate/demo"})
+    stub.add_response("describe_log_groups", {"logGroups": [{"logGroupName": "/agenticai/golden-gate/demo"}]},
+                      {"logGroupNamePrefix": "/agenticai/golden-gate/demo"})
+    with stub:
+        assert mod.ensure_result_log_group(logs, "/agenticai/golden-gate/demo", key) == "created"
+        assert mod.ensure_result_log_group(logs, "/agenticai/golden-gate/demo", key) == "exists"
+        assert mod.ensure_result_log_group(logs, "/agenticai/golden-gate/demo", key) == "exists-unencrypted"
+    stub.assert_no_pending_responses()
