@@ -50,6 +50,7 @@ import { Construct } from 'constructs';
 import { EvaluationExecutionRoleConstruct } from '@agenticai/agentcore-evaluations';
 
 import { assertOmniHostingRegion, assertOmniSpaceName } from './naming';
+import { OmniCentralizedLogsKeyConstruct } from './omni-centralized-logs-key-construct';
 
 export interface OmniHubSpaceConstructProps {
   /** Space name, `^[a-z0-9]+(-[a-z0-9]+)*$`, 3-64 chars. */
@@ -342,37 +343,9 @@ export class OmniHubSpaceConstruct extends Construct {
     });
     Tags.of(this.spaceKey).add('cw-omni', 'true');
 
-    this.centralizedLogsKey = new Key(this, 'CentralizedLogsKey', {
-      alias: `alias/agenticai/omni-centralized-logs-${stack.region}`,
-      description: 'Encrypts every destination log group created by the organization centralization rule in this hub.',
-      enableKeyRotation: true,
+    this.centralizedLogsKey = new OmniCentralizedLogsKeyConstruct(this, 'CentralizedLogs', {
       removalPolicy: keyRemovalPolicy,
-      policy: new PolicyDocument({
-        statements: [
-          new PolicyStatement({
-            sid: 'EnableRootKeyAdministration',
-            effect: Effect.ALLOW,
-            principals: [new AccountRootPrincipal()],
-            actions: ['kms:*'],
-            resources: ['*'],
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchLogsUse',
-            effect: Effect.ALLOW,
-            principals: [new ServicePrincipal(`logs.${stack.region}.amazonaws.com`)],
-            actions: ['kms:Encrypt*', 'kms:Decrypt*', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:Describe*'],
-            resources: ['*'],
-            conditions: {
-              ArnLike: {
-                'kms:EncryptionContext:aws:logs:arn': `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:*`,
-              },
-            },
-          }),
-        ],
-      }),
-    });
-    // The centralization service reads this tag to use the key for destination log groups.
-    Tags.of(this.centralizedLogsKey).add('LogsManaged', 'true');
+    }).key;
 
     // ------------------------------------------------------ transaction search
     if (props.enableTransactionSearch !== false) {
@@ -456,11 +429,5 @@ export class OmniHubSpaceConstruct extends Construct {
       ],
       true,
     );
-    NagSuppressions.addResourceSuppressions(this.centralizedLogsKey, [
-      {
-        id: 'AwsSolutions-KMS5',
-        reason: 'Key rotation is enabled; the CloudWatch Logs grant is conditioned on the encryption context of this account.',
-      },
-    ]);
   }
 }

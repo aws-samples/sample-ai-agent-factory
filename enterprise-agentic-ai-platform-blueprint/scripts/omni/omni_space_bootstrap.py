@@ -13,11 +13,17 @@ that have no CloudFormation resource type (ADR-15).
          users and groups by name through SearchPrincipals. Grants only ever
          add; `delete` removes exactly the customer-managed grants the file
          names and nothing else.
-    3. centralization      enable-context-graph | verify
-         Opt the organization centralization rule into Context Graph
-         centralization (cross-account application map). The Observability
-         Admin API accepts SourceContextGraphConfiguration but the published
-         CloudFormation schema does not yet, so it is applied here.
+    3. centralization      ensure-service-linked-roles | enable-context-graph | verify
+         ensure-service-linked-roles (PRE-deploy, destination account): create
+         AWSServiceRoleForObservabilityAdmin and
+         AWSServiceRoleForObservabilityAdmin_LogsCentralization when trusted
+         access was enabled through the Organizations API; the console creates
+         them itself. The rule's tag-propagation role trusts the second one and
+         IAM refuses a trust policy whose principal does not exist yet.
+         enable-context-graph: opt the organization centralization rule into
+         Context Graph centralization (cross-account application map). The
+         Observability Admin API accepts SourceContextGraphConfiguration but
+         the published CloudFormation schema does not yet, so it is applied here.
     4. inventory
          Read-only: the space, its grants and the Dataset integration, for
          the evidence bundle and for the zero-residue teardown check.
@@ -50,6 +56,11 @@ from botocore.exceptions import ClientError
 
 PERMISSIONS = ("SPACE_ADMIN", "READ", "READ_WRITE_DELETE", "CUSTOM")
 PRINCIPAL_TYPES = ("IDC_USER", "IDC_GROUP", "IAM_USER", "IAM_ROLE", "IAM_ROOT", "ACCESS_PROFILE", "ALERT", "AGENT")
+# (service principal, role name) pairs the console creates when trusted access is enabled there.
+CENTRALIZATION_SERVICE_LINKED_ROLES = (
+    ("observabilityadmin.amazonaws.com", "AWSServiceRoleForObservabilityAdmin"),
+    ("logs-centralization.observabilityadmin.amazonaws.com", "AWSServiceRoleForObservabilityAdmin_LogsCentralization"),
+)
 
 
 # --------------------------------------------------------------------------- clients
@@ -62,6 +73,7 @@ class Clients:
     region: str
     _omni: Any = None
     _obs: Any = None
+    _iam: Any = None
     _factory: Callable[[str, str], Any] = field(default=lambda svc, region: boto3.client(svc, region_name=region))
 
     @property
@@ -69,6 +81,12 @@ class Clients:
         if self._omni is None:
             self._omni = self._factory("cloudwatchomni", self.region)
         return self._omni
+
+    @property
+    def iam(self) -> Any:
+        if self._iam is None:
+            self._iam = self._factory("iam", self.region)
+        return self._iam
 
     @property
     def observabilityadmin(self) -> Any:
@@ -280,6 +298,24 @@ def delete_access_grants(clients: Clients, domain_id: str, space_id: str, grants
 # ------------------------------------------------------------- centralization rule
 
 
+def ensure_service_linked_role(clients: Clients, service_name: str, role_name: str) -> dict[str, Any]:
+    """CreateServiceLinkedRole wrapper, idempotent: IAM answers InvalidInput when the name is taken."""
+    try:
+        created = clients.iam.create_service_linked_role(AWSServiceName=service_name)
+        return {"service": service_name, "roleName": role_name, "result": "created", "roleArn": created["Role"]["Arn"]}
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        if error.get("Code") == "InvalidInput" and "has been taken" in error.get("Message", ""):
+            return {"service": service_name, "roleName": role_name, "result": "exists"}
+        raise
+
+
+def ensure_service_linked_roles(clients: Clients) -> dict[str, Any]:
+    """Create, in the destination account, the roles console-enabled trusted access would have created."""
+    roles = [ensure_service_linked_role(clients, service, role) for service, role in CENTRALIZATION_SERVICE_LINKED_ROLES]
+    return {"ok": True, "serviceLinkedRoles": roles}
+
+
 def get_centralization_rule(clients: Clients, rule_identifier: str) -> dict[str, Any]:
     return clients.observabilityadmin.get_centralization_rule_for_organization(RuleIdentifier=rule_identifier)
 
@@ -355,9 +391,12 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--space-id", required=True)
     ag.add_argument("--grants-file", required=True)
 
-    cz = sub.add_parser("centralization", help="Enable or verify Context Graph centralization on the rule.")
-    cz.add_argument("action", choices=("enable-context-graph", "verify"))
-    cz.add_argument("--rule", required=True, help="Centralization rule name or ARN.")
+    cz = sub.add_parser(
+        "centralization",
+        help="Create the service-linked roles (pre-deploy), or enable/verify Context Graph centralization on the rule.",
+    )
+    cz.add_argument("action", choices=("ensure-service-linked-roles", "enable-context-graph", "verify"))
+    cz.add_argument("--rule", help="Centralization rule name or ARN (enable-context-graph and verify).")
 
     inv = sub.add_parser("inventory", help="Read-only inventory for evidence and residue checks.")
     inv.add_argument("--domain-id", required=True)
@@ -401,6 +440,10 @@ def run(args: argparse.Namespace, clients: Clients | None = None) -> dict[str, A
         return {"action": "delete", **delete_access_grants(clients, args.domain_id, args.space_id, grants)}
 
     if args.command == "centralization":
+        if args.action == "ensure-service-linked-roles":
+            return {"action": "ensure-service-linked-roles", **ensure_service_linked_roles(clients)}
+        if not args.rule:
+            raise SystemExit(f"--rule is required for {args.action}")
         if args.action == "enable-context-graph":
             return {"action": "enable-context-graph", **enable_context_graph(clients, args.rule)}
         return {"action": "verify-context-graph", **verify_context_graph(clients, args.rule)}

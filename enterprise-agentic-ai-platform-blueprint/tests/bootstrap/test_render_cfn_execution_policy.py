@@ -305,6 +305,7 @@ def test_management_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     manage = by_sid["ManageOmniHubRoles"]
     assert all(":role/" in resource for resource in manage["Resource"])
     assert any(resource.endswith("role/CloudWatchOmniOperatorRole") for resource in manage["Resource"])
+    assert any(resource.endswith("role/CloudWatchOmniDomainAccessRole") for resource in manage["Resource"])
     assert any("AgentCoreEvaluationRole-omni-" in resource for resource in manage["Resource"])
     pass_role = by_sid["PassOmniHubRolesToServices"]
     assert pass_role["Action"] == "iam:PassRole"
@@ -312,6 +313,7 @@ def test_management_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     assert {"cloudwatch.amazonaws.com", "logs.amazonaws.com", "bedrock-agentcore.amazonaws.com"} <= services
     provision = by_sid["ProvisionOmniHubSpaceAndCentralization"]
     assert "cloudwatch:CreateSpace" in provision["Action"]
+    assert "cloudwatch:CreateDomainForOrganization" in provision["Action"]
     assert "observabilityadmin:CreateCentralizationRuleForOrganization" in provision["Action"]
     assert "xray:UpdateTraceSegmentDestination" in provision["Action"]
     # Never a bare cloudwatch:* or observabilityadmin:* in the hub statement.

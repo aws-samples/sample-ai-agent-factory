@@ -26,7 +26,14 @@
  */
 import { readFileSync } from "node:fs";
 
-import { App, Aspects, RemovalPolicy } from "aws-cdk-lib";
+import {
+  App,
+  Aspects,
+  CliCredentialsStackSynthesizer,
+  DefaultStackSynthesizer,
+  RemovalPolicy,
+  type IStackSynthesizer,
+} from "aws-cdk-lib";
 import { AwsSolutionsChecks, NIST80053R5Checks } from "cdk-nag";
 import "source-map-support/register";
 
@@ -346,6 +353,28 @@ function seedAvailabilityZoneContext(
   }
 }
 
+/**
+ * Synthesizer for the one-time organization-level Omni stages. The default is
+ * the bootstrap path (scoped CloudFormation execution role) used by every
+ * pipeline. Context `agenticai/omniSynthesizer=cli-credentials` deploys with
+ * the operator's own credentials instead: a documented break-glass for the
+ * management-account setup while the scoped bootstrap policy has not yet been
+ * re-rendered with the Omni role families
+ * (pipelines/bootstrap/render-cfn-execution-policy.py).
+ */
+function omniSynthesizer(): IStackSynthesizer {
+  const mode = app.node.tryGetContext("agenticai/omniSynthesizer");
+  if (mode === "cli-credentials") {
+    return new CliCredentialsStackSynthesizer();
+  }
+  if (mode !== undefined && mode !== "bootstrap") {
+    throw new Error(
+      "Context agenticai/omniSynthesizer must be 'bootstrap' (default) or 'cli-credentials'.",
+    );
+  }
+  return new DefaultStackSynthesizer();
+}
+
 /** The five mandatory allocation tags for shared Omni resources. */
 function omniAllocationTags(): Record<string, string> {
   return {
@@ -431,6 +460,7 @@ switch (stage) {
         account: process.env.CDK_DEFAULT_ACCOUNT,
         region: deploymentRegion(),
       },
+      synthesizer: omniSynthesizer(),
       domainName,
       identityCenterInstanceArn,
       allowIamSignIn: app.node.tryGetContext("agenticai/omniAllowIamSignIn") === true,
@@ -482,9 +512,17 @@ switch (stage) {
         ? (JSON.parse(judgeRaw) as string[])
         : undefined;
     const retainKeys = app.node.tryGetContext("agenticai/omniRetainKeys");
+    // Adopt mode: the hub account already hosts a space created outside the
+    // blueprint; deploy only the centralized-logs key and the rule around it.
+    const existingSpaceId = app.node.tryGetContext("agenticai/omniExistingSpaceId");
+    if (existingSpaceId !== undefined && typeof existingSpaceId !== "string") {
+      throw new Error("Context agenticai/omniExistingSpaceId must be the space id (UUID) as a string.");
+    }
     new OmniHubStack(app, `AgenticAI-Omni-HubStack-${deploymentRegion()}`, {
       env: { account: hubAccount, region: deploymentRegion() },
+      synthesizer: omniSynthesizer(),
       domainId,
+      existingSpaceId,
       spaceName: app.node.tryGetContext("agenticai/omniSpaceName"),
       allowModelInference:
         app.node.tryGetContext("agenticai/omniAllowModelInference") === true ||
@@ -496,6 +534,9 @@ switch (stage) {
       transactionSearchIndexingPercentage: readOptionalPercentage(
         "agenticai/transactionSearchIndexingPercentage",
       ),
+      enableTransactionSearch:
+        app.node.tryGetContext("agenticai/omniEnableTransactionSearch") !== false &&
+        app.node.tryGetContext("agenticai/omniEnableTransactionSearch") !== "false",
       keyRemovalPolicy:
         retainKeys === false || retainKeys === "false"
           ? RemovalPolicy.DESTROY
@@ -1451,7 +1492,7 @@ switch (stage) {
   }
   case undefined:
     throw new Error(
-      "Missing required CDK context 'stage'. Pass --context stage=<management|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
+      "Missing required CDK context 'stage'. Pass --context stage=<management|omni-domain|omni-hub|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
     );
   default:
     throw new Error(

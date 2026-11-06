@@ -218,3 +218,40 @@ def test_enable_context_graph_updates_rule_once():
     with obs:
         assert mod.enable_context_graph(clients, "agenticai-fleet-eu-west-1")["result"] == "enabled"
         assert mod.enable_context_graph(clients, "agenticai-fleet-eu-west-1")["result"] == "already-enabled"
+
+
+def test_ensure_service_linked_roles_is_idempotent_and_reraises_other_errors():
+    session = boto3.session.Session(region_name=REGION, aws_access_key_id="x", aws_secret_access_key="y")
+    iam = session.client("iam")
+    clients = mod.Clients(region=REGION, _iam=iam)
+    stub = Stubber(iam)
+    slr_arn = f"arn:aws:iam::{ACCOUNT}:role/aws-service-role/observabilityadmin.amazonaws.com/AWSServiceRoleForObservabilityAdmin"
+    stub.add_response(
+        "create_service_linked_role",
+        {"Role": {"Path": "/aws-service-role/observabilityadmin.amazonaws.com/", "RoleName": "AWSServiceRoleForObservabilityAdmin",
+                  "RoleId": "AROAEXAMPLEEXAMPLE12", "Arn": slr_arn, "CreateDate": NOW}},
+        {"AWSServiceName": "observabilityadmin.amazonaws.com"},
+    )
+    stub.add_client_error(
+        "create_service_linked_role",
+        service_error_code="InvalidInput",
+        service_message="Service role name AWSServiceRoleForObservabilityAdmin_LogsCentralization has been taken in this account, please try a different suffix.",
+        expected_params={"AWSServiceName": "logs-centralization.observabilityadmin.amazonaws.com"},
+    )
+    with stub:
+        result = mod.ensure_service_linked_roles(clients)
+    assert result["ok"] is True
+    assert [r["result"] for r in result["serviceLinkedRoles"]] == ["created", "exists"]
+    assert result["serviceLinkedRoles"][0]["roleArn"] == slr_arn
+
+    # Any other IAM error is not swallowed.
+    stub.add_client_error("create_service_linked_role", service_error_code="AccessDenied", service_message="denied",
+                          expected_params={"AWSServiceName": "observabilityadmin.amazonaws.com"})
+    with stub, pytest.raises(Exception, match="AccessDenied"):
+        mod.ensure_service_linked_role(clients, *mod.CENTRALIZATION_SERVICE_LINKED_ROLES[0])
+
+
+def test_centralization_rule_actions_require_rule_argument():
+    args = mod.build_parser().parse_args(["--region", REGION, "centralization", "verify"])
+    with pytest.raises(SystemExit, match="--rule is required"):
+        mod.run(args, clients=mod.Clients(region=REGION))

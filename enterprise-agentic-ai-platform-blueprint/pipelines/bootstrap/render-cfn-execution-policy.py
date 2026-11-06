@@ -447,6 +447,7 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     families; passing roles is pinned per consuming service.
     """
     omni_roles = [
+        iam_arn(account, "role/CloudWatchOmniDomainAccessRole"),
         iam_arn(account, "role/CloudWatchOmniOperatorRole"),
         iam_arn(account, f"role/CloudWatchOmniDatasetIntegrationRole-{region}"),
         iam_arn(account, "role/service-role/AgentCoreEvaluationRole-omni-*"),
@@ -457,6 +458,12 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             "Sid": "ProvisionOmniHubSpaceAndCentralization",
             "Effect": "Allow",
             "Action": [
+                "cloudwatch:CreateDomainForOrganization",
+                "cloudwatch:GetDomainForOrganization",
+                "cloudwatch:UpdateDomainForOrganization",
+                "cloudwatch:DeleteDomainForOrganization",
+                "cloudwatch:CreateDomainAccessGrantForOrganization",
+                "cloudwatch:DeleteDomainAccessGrantForOrganization",
                 "cloudwatch:CreateSpace",
                 "cloudwatch:GetSpace",
                 "cloudwatch:UpdateSpace",

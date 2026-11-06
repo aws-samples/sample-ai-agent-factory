@@ -29,4 +29,8 @@ export {
   type OmniCentralizationRuleConstructProps,
 } from './omni-centralization-rule-construct';
 export { OmniHubSpaceConstruct, type OmniHubSpaceConstructProps } from './omni-hub-space-construct';
+export {
+  OmniCentralizedLogsKeyConstruct,
+  type OmniCentralizedLogsKeyConstructProps,
+} from './omni-centralized-logs-key-construct';
 export { OmniDashboardConstruct, type OmniDashboardConstructProps } from './omni-dashboard-construct';

@@ -158,6 +158,54 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
     t.resourceCountIs("AWS::ObservabilityAdmin::OrganizationCentralizationRule", 0);
   });
 
+  it("adopts an existing space: only the centralized-logs key and the rule are deployed", () => {
+    const app = new App();
+    const stack = new OmniHubStack(app, "AdoptHub", {
+      env: { account: HUB, region: REGION },
+      domainId: "d-1a2b3c4d5e",
+      existingSpaceId: "2e98b6d1-0ebb-4359-a608-12a1147dc089",
+      keyRemovalPolicy: RemovalPolicy.DESTROY,
+      centralization: {
+        organizationId: "o-abc123def4",
+        sourceScope: "AccountId IN ('333333333333','444444444444')",
+        sourceRegions: ["eu-west-1"],
+      },
+      tags: TAGS,
+    });
+    const t = Template.fromStack(stack);
+    expect(stack.hub).toBeUndefined();
+    expect(stack.spaceId).toBe("2e98b6d1-0ebb-4359-a608-12a1147dc089");
+    t.resourceCountIs("AWS::CloudWatch::Space", 0);
+    t.resourceCountIs("AWS::XRay::TransactionSearchConfig", 0);
+    t.resourceCountIs("AWS::KMS::Key", 1);
+    t.hasResourceProperties("AWS::KMS::Key", {
+      Tags: Match.arrayWith([{ Key: "cost-centre", Value: "platform" }, { Key: "LogsManaged", Value: "true" }]),
+    });
+    t.resourceCountIs("AWS::ObservabilityAdmin::OrganizationCentralizationRule", 1);
+    // Only the tag-propagation role: no operator, Dataset or evaluation role is created around an adopted space.
+    const roles = Object.values(t.findResources("AWS::IAM::Role"));
+    expect(roles).toHaveLength(1);
+    const rule = Object.values(
+      t.findResources("AWS::ObservabilityAdmin::OrganizationCentralizationRule"),
+    )[0].Properties as any;
+    expect(rule.Rule.Destination.Account).toBe(HUB);
+    expect(JSON.stringify(rule.Rule.Destination.DestinationLogsConfiguration.LogsEncryptionConfiguration.KmsKeyArn)).toContain(
+      "Fn::GetAtt",
+    );
+    t.hasOutput("OmniSpaceId", { Value: "2e98b6d1-0ebb-4359-a608-12a1147dc089" });
+  });
+
+  it("refuses space-level settings next to an adopted space, and a malformed space id", () => {
+    const base = {
+      env: { account: HUB, region: REGION },
+      domainId: "d-1a2b3c4d5e",
+      existingSpaceId: "2e98b6d1-0ebb-4359-a608-12a1147dc089",
+    };
+    expect(() => new OmniHubStack(new App(), "A", { ...base, spaceName: "other" })).toThrow(/spaceName cannot be combined/);
+    expect(() => new OmniHubStack(new App(), "B", { ...base, allowModelInference: true })).toThrow(/allowModelInference/);
+    expect(() => new OmniHubStack(new App(), "C", { ...base, existingSpaceId: "not-a-uuid" })).toThrow(/must be a space id/);
+  });
+
   it("keeps judge inference off by default (ADR-16)", () => {
     const t = hubTemplate();
     const roles = Object.values(t.findResources("AWS::IAM::Role")).map((r) => r.Properties as any);
