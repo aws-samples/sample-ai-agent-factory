@@ -123,7 +123,15 @@ def _text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value.strip()
+        stripped = value.strip()
+        # Observed live: the distro serialises Strands message content as a JSON string of content
+        # blocks ('[{"text": "..."}]'); unwrap it so the dataset input is the prompt itself.
+        if stripped[:1] in ("[", "{"):
+            try:
+                return _text(json.loads(stripped))
+            except ValueError:
+                return stripped
+        return stripped
     if isinstance(value, dict):
         for key in ("text", "content", "message"):
             if key in value:
@@ -360,7 +368,15 @@ def _wait_dataset(control, dataset_id: str, version: str | None = None, timeout_
         kwargs = {"datasetId": dataset_id}
         if version is not None:
             kwargs["datasetVersion"] = version
-        described = control.get_dataset(**kwargs)
+        try:
+            described = control.get_dataset(**kwargs)
+        except ClientError as exc:
+            # Observed live: GetDataset on a version CreateDatasetVersion just returned answers
+            # ResourceNotFoundException for a few seconds before the version is readable.
+            if version is not None and exc.response["Error"]["Code"] == "ResourceNotFoundException" and time.time() < deadline:
+                sleep(5)
+                continue
+            raise
         status = described.get("status")
         if status in TERMINAL_DATASET_STATES:
             if status != "ACTIVE":

@@ -125,6 +125,35 @@ def test_build_scenario_returns_none_without_an_invoke_agent_turn():
     assert mod.build_scenario([{"traceId": "t", "spanId": "s", "name": "chat", "attributes": {}}], "g") is None
 
 
+def test_text_unwraps_json_encoded_content_blocks_as_the_distro_serialises_them():
+    # Observed live: Strands content arrives as the string '[{"text": "..."}]', not a list.
+    assert mod._text('[{"text": "What time is it right now in UTC?"}]') == "What time is it right now in UTC?"
+    assert mod._text('{"text": "plain object"}') == "plain object"
+    assert mod._text("[not json") == "[not json"
+    assert mod._text("  a sentence  ") == "a sentence"
+    record = {"body": {"input": {"messages": [{"role": "user", "content": '[{"text": "Count the words."}]'}]},
+                       "output": {"messages": [{"role": "assistant", "content": '[{"text": "Two words."}]'}]}}}
+    assert mod._messages_from_record(record) == (["Count the words."], ["Two words."])
+
+
+def test_wait_dataset_tolerates_the_version_read_lag_after_create_dataset_version():
+    client, stub = _control()
+    stub.add_client_error("get_dataset", service_error_code="ResourceNotFoundException", service_message="Dataset version 1 not found",
+                          expected_params={"datasetId": DATASET_ID, "datasetVersion": "1"})
+    stub.add_response("get_dataset", _dataset("ACTIVE", version="1", example_count=2), {"datasetId": DATASET_ID, "datasetVersion": "1"})
+    with stub:
+        described = mod._wait_dataset(client, DATASET_ID, version="1", sleep=lambda _s: None)
+    assert described["datasetVersion"] == "1"
+    stub.assert_no_pending_responses()
+
+
+def test_wait_dataset_does_not_swallow_a_missing_draft():
+    client, stub = _control()
+    stub.add_client_error("get_dataset", service_error_code="ResourceNotFoundException", service_message="no such dataset")
+    with stub, pytest.raises(Exception, match="ResourceNotFoundException"):
+        mod._wait_dataset(client, DATASET_ID, sleep=lambda _s: None)
+
+
 def test_messages_skip_tool_results_and_empty_blocks():
     record = {"body": {"input": {"messages": [
         {"role": "user", "content": [{"toolResult": {"toolUseId": "1", "content": [{"text": "12:00"}]}}]},
