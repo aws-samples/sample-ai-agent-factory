@@ -9,7 +9,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { CfnResource } from 'aws-cdk-lib';
+import { CfnResource, Validations } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 
 export interface OmniDashboardConstructProps {
@@ -54,6 +54,12 @@ export class OmniDashboardConstruct extends Construct {
     this.dashboard = new CfnResource(this, 'Dashboard', {
       type: 'AWS::CloudWatch::OmniDashboard',
       properties,
+    });
+    // The CDK CloudFormation validator's bundled schema predates AWS::CloudWatch::OmniDashboard;
+    // CloudFormation itself validates the resource at deploy time.
+    Validations.of(this.dashboard).acknowledge({
+      id: 'CloudFormation-Validate::F3006',
+      reason: 'SEC-036: AWS::CloudWatch::OmniDashboard is a 2026 resource type absent from the bundled validator schema; the live deploy is the schema gate.',
     });
   }
 }

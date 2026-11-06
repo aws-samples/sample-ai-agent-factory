@@ -91,7 +91,7 @@ describe('OmniCentralizationRuleConstruct', () => {
     destinationLogsKmsKeyArn: 'arn:aws:kms:eu-west-1:222222222222:key/11111111-2222-3333-4444-555555555555',
   };
 
-  it('centralizes only blueprint log groups, all metrics and the context graph, encrypting every destination group', () => {
+  it('centralizes only blueprint log groups and all metrics, encrypting every destination group', () => {
     const stack = hubStack();
     new OmniCentralizationRuleConstruct(stack, 'Rule', { ...base, organizationId: 'o-abc123def4' });
     const t = Template.fromStack(stack);
@@ -100,7 +100,8 @@ describe('OmniCentralizationRuleConstruct', () => {
       .Properties as any;
     expect(rule.RuleName).toBe('agenticai-fleet-eu-west-1');
     expect(rule.Rule.Source.Regions).toEqual(['eu-west-1', 'eu-west-3']);
-    expect(rule.Rule.Source.SourceContextGraphConfiguration).toEqual({});
+    // Context Graph stays off in CloudFormation until the published schema lists the property.
+    expect(rule.Rule.Source.SourceContextGraphConfiguration).toBeUndefined();
     expect(rule.Rule.Source.SourceMetricsConfiguration).toEqual({ MetricsSelectionCriteria: '*' });
     const selection: string = rule.Rule.Source.SourceLogsConfiguration.LogGroupSelectionCriteria;
     for (const pattern of BLUEPRINT_CENTRALIZED_LOG_GROUP_PATTERNS) {
@@ -133,8 +134,17 @@ describe('OmniCentralizationRuleConstruct', () => {
     expect(roleJson).toContain(`:iam::${HUB.account}:role/aws-service-role/logs-centralization.observabilityadmin.amazonaws.com/`);
     expect(rule.Rule.Destination.DestinationLogsConfiguration.TagPropagationConfiguration).toEqual({
       DestinationRoleArn: expect.anything(),
-      TagConflictResolutionStrategy: 'SKIP',
+      TagConflictResolutionStrategy: 'UPDATE_SYNC',
     });
+  });
+
+  it('emits the Context Graph opt-in only when explicitly requested', () => {
+    const stack = hubStack();
+    new OmniCentralizationRuleConstruct(stack, 'Rule', { ...base, centralizeContextGraph: true });
+    const rule = Object.values(
+      Template.fromStack(stack).findResources('AWS::ObservabilityAdmin::OrganizationCentralizationRule'),
+    )[0].Properties as any;
+    expect(rule.Rule.Source.SourceContextGraphConfiguration).toEqual({});
   });
 
   it('refuses an implicit all-log-groups selection and a tag-propagation role in the wrong account', () => {

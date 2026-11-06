@@ -13,7 +13,12 @@ that have no CloudFormation resource type (ADR-15).
          users and groups by name through SearchPrincipals. Grants only ever
          add; `delete` removes exactly the customer-managed grants the file
          names and nothing else.
-    3. inventory
+    3. centralization      enable-context-graph | verify
+         Opt the organization centralization rule into Context Graph
+         centralization (cross-account application map). The Observability
+         Admin API accepts SourceContextGraphConfiguration but the published
+         CloudFormation schema does not yet, so it is applied here.
+    4. inventory
          Read-only: the space, its grants and the Dataset integration, for
          the evidence bundle and for the zero-residue teardown check.
 
@@ -272,6 +277,40 @@ def delete_access_grants(clients: Clients, domain_id: str, space_id: str, grants
     return {"deleted": deleted, "absent": absent, "refusedSystemManaged": refused}
 
 
+# ------------------------------------------------------------- centralization rule
+
+
+def get_centralization_rule(clients: Clients, rule_identifier: str) -> dict[str, Any]:
+    return clients.observabilityadmin.get_centralization_rule_for_organization(RuleIdentifier=rule_identifier)
+
+
+def context_graph_enabled(rule: dict[str, Any]) -> bool:
+    return "SourceContextGraphConfiguration" in (rule.get("CentralizationRule") or {}).get("Source", {})
+
+
+def enable_context_graph(clients: Clients, rule_identifier: str) -> dict[str, Any]:
+    """Idempotent: re-submit the rule with SourceContextGraphConfiguration present, nothing else changed."""
+    current = get_centralization_rule(clients, rule_identifier)
+    rule = current["CentralizationRule"]
+    if context_graph_enabled(current):
+        return {"result": "already-enabled", "ruleArn": current.get("RuleArn")}
+    updated = {**rule, "Source": {**rule["Source"], "SourceContextGraphConfiguration": {}}}
+    response = clients.observabilityadmin.update_centralization_rule_for_organization(
+        RuleIdentifier=rule_identifier, Rule=updated
+    )
+    return {"result": "enabled", "ruleArn": response.get("RuleArn")}
+
+
+def verify_context_graph(clients: Clients, rule_identifier: str) -> dict[str, Any]:
+    current = get_centralization_rule(clients, rule_identifier)
+    return {
+        "ok": context_graph_enabled(current),
+        "ruleArn": current.get("RuleArn"),
+        "ruleHealth": current.get("RuleHealth"),
+        "failureReason": current.get("FailureReason"),
+    }
+
+
 # ------------------------------------------------------------------------ inventory
 
 
@@ -316,6 +355,10 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--space-id", required=True)
     ag.add_argument("--grants-file", required=True)
 
+    cz = sub.add_parser("centralization", help="Enable or verify Context Graph centralization on the rule.")
+    cz.add_argument("action", choices=("enable-context-graph", "verify"))
+    cz.add_argument("--rule", required=True, help="Centralization rule name or ARN.")
+
     inv = sub.add_parser("inventory", help="Read-only inventory for evidence and residue checks.")
     inv.add_argument("--domain-id", required=True)
     inv.add_argument("--space-id", required=True)
@@ -356,6 +399,11 @@ def run(args: argparse.Namespace, clients: Clients | None = None) -> dict[str, A
         if args.action == "verify":
             return {"action": "verify", **verify_access_grants(clients, args.domain_id, args.space_id, grants)}
         return {"action": "delete", **delete_access_grants(clients, args.domain_id, args.space_id, grants)}
+
+    if args.command == "centralization":
+        if args.action == "enable-context-graph":
+            return {"action": "enable-context-graph", **enable_context_graph(clients, args.rule)}
+        return {"action": "verify-context-graph", **verify_context_graph(clients, args.rule)}
 
     account_id = args.account_id or caller_account_id(args.region)
     return {"action": "inventory", **inventory(clients, args.domain_id, args.space_id, account_id)}

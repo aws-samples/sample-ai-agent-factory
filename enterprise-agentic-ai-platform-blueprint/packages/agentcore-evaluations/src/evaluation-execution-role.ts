@@ -165,6 +165,11 @@ export class EvaluationExecutionRoleConstruct extends Construct {
           reason:
             'SEC-030: logs:DescribeLogGroups/StartQuery/GetQueryResults have no resource-level scoping that the AgentCore Evaluations service accepts (documented prerequisite shape); result writes are scoped to /aws/bedrock-agentcore/evaluations/* and explicitly named groups; index-policy actions are scoped to the span log groups; judge and Lambda grants are exact ARNs and absent by default.',
         },
+        {
+          id: 'NIST.800.53.R5-IAMNoInlinePolicy',
+          reason:
+            'SEC-030: the execution policy is role-specific (exact span groups, result groups, judge and Lambda ARNs) and is deleted with the role; a shared managed policy would widen reuse of these grants.',
+        },
       ],
       true,
     );

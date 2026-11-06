@@ -31,7 +31,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { CfnOutput, CfnResource, Duration, RemovalPolicy, Stack, Tags, Token } from 'aws-cdk-lib';
+import { CfnOutput, CfnResource, Duration, RemovalPolicy, Stack, Tags, Token, Validations } from 'aws-cdk-lib';
 import {
   AccountRootPrincipal,
   ArnPrincipal,
@@ -403,6 +403,12 @@ export class OmniHubSpaceConstruct extends Construct {
     if (this.transactionSearch) {
       this.space.node.addDependency(this.transactionSearch);
     }
+    // The CDK CloudFormation validator's bundled schema predates AWS::CloudWatch::Space;
+    // CloudFormation itself validates the resource at deploy time.
+    Validations.of(this.space).acknowledge({
+      id: 'CloudFormation-Validate::F3006',
+      reason: 'SEC-036: AWS::CloudWatch::Space is a 2026 resource type absent from the bundled validator schema; the live deploy is the schema gate.',
+    });
     this.spaceId = this.space.getAtt('SpaceId').toString();
     this.spaceArn = this.space.getAtt('Arn').toString();
 
@@ -441,6 +447,11 @@ export class OmniHubSpaceConstruct extends Construct {
           id: 'AwsSolutions-IAM5',
           reason:
             'SEC-035: logs:IntegrateWithDataset is scoped to the hub log-group prefixes; cloudwatch:PutRecords has no resource type (documented Dataset integration shape).',
+        },
+        {
+          id: 'NIST.800.53.R5-IAMNoInlinePolicy',
+          reason:
+            'SEC-035: the forwarding policy names this hub\'s exact log-group prefixes and is deleted with the role; it is not reusable by any other principal.',
         },
       ],
       true,

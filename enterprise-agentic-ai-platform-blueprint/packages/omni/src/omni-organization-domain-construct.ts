@@ -19,7 +19,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { CfnOutput, CfnResource, Stack, Tags } from 'aws-cdk-lib';
+import { CfnOutput, CfnResource, Stack, Tags, Validations } from 'aws-cdk-lib';
 import { ManagedPolicy, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -112,6 +112,12 @@ export class OmniOrganizationDomainConstruct extends Construct {
     });
     this.domain.node.addDependency(this.domainAccessRole);
 
+    // The CDK CloudFormation validator's bundled schema predates AWS::CloudWatch::DomainForOrganization;
+    // CloudFormation itself validates the resource at deploy time.
+    Validations.of(this.domain).acknowledge({
+      id: 'CloudFormation-Validate::F3006',
+      reason: 'SEC-036: AWS::CloudWatch::DomainForOrganization is a 2026 resource type absent from the bundled validator schema; the live deploy is the schema gate.',
+    });
     this.domainId = this.domain.getAtt('DomainId').toString();
     this.domainEndpointUrl = this.domain.getAtt('DomainEndpointUrl').toString();
 

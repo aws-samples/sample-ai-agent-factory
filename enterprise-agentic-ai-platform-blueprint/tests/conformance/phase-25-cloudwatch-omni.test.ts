@@ -139,7 +139,7 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
     expect(rule.Rule.Destination.Account).toBe(HUB);
     expect(rule.Rule.Destination.Region).toBe(REGION);
     expect(rule.Rule.Source.Regions).toEqual(["eu-west-1", "eu-west-3"]);
-    expect(rule.Rule.Source.SourceContextGraphConfiguration).toEqual({});
+    expect(rule.Rule.Source.SourceContextGraphConfiguration).toBeUndefined();
     const enc = rule.Rule.Destination.DestinationLogsConfiguration.LogsEncryptionConfiguration;
     expect(enc.EncryptionStrategy).toBe("CUSTOMER_MANAGED");
     expect(enc.EncryptionScope).toBe("NEW_DESTINATION_LOG_GROUPS");

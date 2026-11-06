@@ -16,10 +16,10 @@
  *   - metrics are centralized (the service currently supports only `*`);
  *   - a backup Region is opt-in because it is a billable second copy.
  *
- * The pinned aws-cdk-lib L1 (CfnOrganizationCentralizationRule) lacks
- * `SourceContextGraphConfiguration`, and CDK's override merge drops the empty
- * structure the API expects, so the rule is declared with CfnResource against
- * the documented CloudFormation schema (capitalised property names).
+ * The rule is declared with CfnResource against the documented CloudFormation
+ * schema (capitalised property names) so the construct can carry properties
+ * the pinned aws-cdk-lib L1 (CfnOrganizationCentralizationRule) does not yet
+ * model, and because CDK's override merge drops empty structures.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -73,8 +73,21 @@ export interface OmniCentralizationRuleConstructProps {
   readonly logGroupPatterns?: readonly string[];
   /** Destination log-group name pattern. Default keeps account and Region. */
   readonly destinationLogGroupPattern?: string;
-  /** Centralize the Context Graph (cross-account application map). Default true. */
+  /**
+   * Centralize the Context Graph (cross-account application map). The
+   * Observability Admin API accepts `SourceContextGraphConfiguration`, but the
+   * published CloudFormation schema for OrganizationCentralizationRule does not
+   * yet, so this defaults to FALSE and is applied post-deploy by
+   * `scripts/omni/omni_space_bootstrap.py centralization enable-context-graph`.
+   * Set true only once the CloudFormation schema lists the property.
+   */
   readonly centralizeContextGraph?: boolean;
+  /**
+   * How propagated source tags meet existing destination tags. Default
+   * `UPDATE_SYNC` (add and update the five allocation tags, never remove
+   * hub-local tags). Allowed: IN_SYNC | ADD_ONLY | UPDATE_SYNC.
+   */
+  readonly tagConflictResolutionStrategy?: 'IN_SYNC' | 'ADD_ONLY' | 'UPDATE_SYNC';
   /** Centralize metrics. Default true. */
   readonly centralizeMetrics?: boolean;
   /** Optional backup Region (billable second copy). */
@@ -176,6 +189,10 @@ export class OmniCentralizationRuleConstruct extends Construct {
             id: 'AwsSolutions-IAM5',
             reason: 'SEC-033: tag actions are scoped to destination log groups under the /centralized/ prefix in the hub account; the Region is a wildcard because the rule can carry a backup Region.',
           },
+          {
+            id: 'NIST.800.53.R5-IAMNoInlinePolicy',
+            reason: 'SEC-033: the tag-propagation policy is specific to this rule\'s destination prefix and is deleted with the role.',
+          },
         ],
         true,
       );
@@ -198,7 +215,7 @@ export class OmniCentralizationRuleConstruct extends Construct {
     if (props.centralizeMetrics !== false) {
       source.SourceMetricsConfiguration = { MetricsSelectionCriteria: '*' };
     }
-    if (props.centralizeContextGraph !== false) {
+    if (props.centralizeContextGraph === true) {
       // Empty structure: its presence opts the rule into Context Graph centralization.
       source.SourceContextGraphConfiguration = {};
     }
@@ -223,7 +240,7 @@ export class OmniCentralizationRuleConstruct extends Construct {
     if (tagPropagationRoleArn) {
       destinationLogsConfiguration.TagPropagationConfiguration = {
         DestinationRoleArn: tagPropagationRoleArn,
-        TagConflictResolutionStrategy: 'SKIP',
+        TagConflictResolutionStrategy: props.tagConflictResolutionStrategy ?? 'UPDATE_SYNC',
       };
     }
     const destination: Record<string, unknown> = {

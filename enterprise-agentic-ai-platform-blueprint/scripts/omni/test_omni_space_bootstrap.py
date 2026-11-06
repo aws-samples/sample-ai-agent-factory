@@ -194,3 +194,27 @@ def test_inventory_handles_missing_space():
     with omni, obs:
         result = mod.inventory(clients, DOMAIN, SPACE, ACCOUNT)
     assert result == {"space": None, "accessGrants": [], "datasetIntegration": None}
+
+
+RULE_ARN = f"arn:aws:observabilityadmin:{REGION}:{ACCOUNT}:organization-centralization-rule/agenticai-fleet-eu-west-1"
+RULE_BODY = {
+    "Source": {"Regions": [REGION], "Scope": "AccountId IN ('444444444444')",
+               "SourceLogsConfiguration": {"LogGroupSelectionCriteria": "LogGroupName LIKE '/agenticai/%'", "EncryptedLogGroupStrategy": "ALLOW"}},
+    "Destination": {"Account": ACCOUNT, "Region": REGION},
+}
+
+
+def test_enable_context_graph_updates_rule_once():
+    clients, _, obs = _clients()
+    obs.add_response("get_centralization_rule_for_organization",
+                     {"RuleArn": RULE_ARN, "RuleName": "agenticai-fleet-eu-west-1", "CentralizationRule": RULE_BODY, "RuleHealth": "HEALTHY"},
+                     {"RuleIdentifier": "agenticai-fleet-eu-west-1"})
+    expected = {**RULE_BODY, "Source": {**RULE_BODY["Source"], "SourceContextGraphConfiguration": {}}}
+    obs.add_response("update_centralization_rule_for_organization", {"RuleArn": RULE_ARN},
+                     {"RuleIdentifier": "agenticai-fleet-eu-west-1", "Rule": expected})
+    obs.add_response("get_centralization_rule_for_organization",
+                     {"RuleArn": RULE_ARN, "RuleName": "agenticai-fleet-eu-west-1", "CentralizationRule": expected, "RuleHealth": "HEALTHY"},
+                     {"RuleIdentifier": "agenticai-fleet-eu-west-1"})
+    with obs:
+        assert mod.enable_context_graph(clients, "agenticai-fleet-eu-west-1")["result"] == "enabled"
+        assert mod.enable_context_graph(clients, "agenticai-fleet-eu-west-1")["result"] == "already-enabled"
