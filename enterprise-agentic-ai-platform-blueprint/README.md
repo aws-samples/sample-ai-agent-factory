@@ -303,7 +303,8 @@ The following services form this repository's deployable and live-tested AWS ref
 | Networking                   | Amazon VPC, VPC endpoints, security groups                                                 |
 | Tool execution               | AWS Lambda                                                                                 |
 | Data and encryption          | AWS KMS, Amazon S3, Amazon DynamoDB, AWS Secrets Manager, Amazon ECR                       |
-| Observability                | Amazon CloudWatch, CloudWatch Logs, OAM, AWS X-Ray and Transaction Search when enabled     |
+| Observability                | Amazon CloudWatch, CloudWatch Logs, OAM, AWS X-Ray and Transaction Search when enabled; CloudWatch Omni (hub space, organization centralization rule) when adopted |
+| Agent evaluation             | Amazon Bedrock AgentCore Evaluations (built-in, third-party and code-based evaluators), surfaced in CloudWatch Omni or the CloudWatch GenAI Observability console |
 | Security posture             | AWS CloudTrail, AWS Config, Security Hub, GuardDuty, Inspector                             |
 | Cost governance              | AWS Budgets, Cost and Usage Reports, allocation tags                                       |
 
@@ -638,6 +639,16 @@ OAM links share Logs, Metrics, and Traces. Verify central visibility by owning a
 
 Gateway application logs require a CloudWatch Logs delivery. Gateway spans require Transaction Search and a `TRACES` delivery. Transaction Search changes account-wide behavior and incurs cost, so it is opt-in. Allow for regional propagation, correlate admitted and throttled requests, and restore every temporary source, destination, delivery, resource policy, log group, and account setting.
 
+#### CloudWatch Omni (optional hub model)
+
+CloudWatch Omni adds an off-console, SSO-fronted fleet experience (agent traces, sessions, topology, natural-language queries, evaluations) on top of the telemetry the blueprint already emits. It does not read OAM links: a space reads only the CloudWatch Dataset of the account and Region that host it, so the blueprint feeds one **hub space per Region** in the Audit/Observability account through one **organization centralization rule** (logs, metrics, traces and the Context Graph; destination log groups named by source account and Region; every copy encrypted under the hub CMK). OAM links stay in place for the CloudWatch console GenAI Observability view. See [`docs/CLOUDWATCH_OMNI_INTEGRATION.md`](docs/CLOUDWATCH_OMNI_INTEGRATION.md), the `omni-domain` and `omni-hub` CDK stages, `@agenticai/omni`, and ADR-15 to ADR-19.
+
+Adopting Omni changes two defaults for the accounts it observes: Transaction Search must be on in every source account (`agenticai/enableTransactionSearch`), and a version under evaluation must keep prompt and response content in spans (`agenticai/runtimeKeepPromptContentInSpans`) with declared PII attributes redacted in-process (`agenticai/runtimeRedactSpanAttributes`). Both remain explicit opt-ins (ADR-13, ADR-18).
+
+#### Production evaluation options
+
+Continuous production evaluation runs through Amazon Bedrock AgentCore Evaluations in either of two supported shapes (ADR-17): **option A, CloudWatch Omni**, where the hub space runs online evaluations over centralized spans and shows scores beside the traces; or **option B, AgentCore native**, where each cell deploys `AgentCoreOnlineEvaluationConstruct` in the account that owns its spans and reads results in the CloudWatch GenAI Observability console across OAM links. Both use the same evaluator catalog (`@agenticai/agentcore-evaluations`), the same execution-role shape, the same deterministic code-based policy evaluator, and the same result contract (OpenTelemetry GenAI evaluation events in CloudWatch Logs plus CloudWatch metrics, alarmed into the evaluation-gates failures topic). The legacy `@agenticai/online-evaluation` Lambda watchdog remains outside the support envelope and is superseded by both options.
+
 ### 9.3 Incident ownership
 
 | Signal                           | Primary owner       | First moves                                                                                                   |
@@ -833,8 +844,13 @@ The load-bearing decisions are consolidated here so this README remains the sing
 10. **Memory namespaces are static at synth except for runtime actor scope.** Dynamic tenant or agent namespace substitution is not permitted.
 11. **Rate limiting is not authorization.** It is approximate, fail-open shaping with fail-closed compensating controls.
 12. **Every behavior claim is evidence bounded.** Region, revision, identity, positive twin, denial, rollback, observability, and teardown belong to the claim.
-13. **Transaction Search is opt-in.** It is account-wide and billable.
+13. **Transaction Search is opt-in.** It is account-wide and billable. CloudWatch Omni and AgentCore Evaluations both require it in every account whose traces they read; adopting either turns the opt-in on for those accounts, never for the fleet by default.
 14. **The Lambda Cedar wrapper remains a rollback control.** Native PolicyEngine adoption does not silently delete it.
+15. **CloudWatch Omni is adopted as a hub, hosted in the Audit/Observability account, fed by one organization centralization rule.** Omni does not read OAM links. The Audit account acts as CloudWatch delegated administrator and owns the rule, the space, its grants and keys; only the organization domain is created from the management account. OAM links remain for the console GenAI Observability view. Per-cell spaces are the documented fallback only for a cell whose data classification forbids central custody of prompt and response content after capture-time redaction.
+16. **Judge-model inference for custom evaluators is off by default.** Custom model-as-judge evaluators invoke Bedrock directly from an execution role and bypass the Inference Gateway (D-01). The shipped default runs built-in, third-party and code-based evaluators only. A customer may enable judge inference per hub or cell as governance-plane traffic, restricted to exact allow-listed, same-Region models, attributed to the platform cost centre, and proven by an adversarial denial test.
+17. **Two production-evaluation options share one catalog and one result contract.** Option A (CloudWatch Omni online evaluations in the hub space) and option B (AgentCore online evaluation configurations deployed in the cell) are both supported; neither replaces the pre-promotion deployed-runtime gate, which stays the promotion decision.
+18. **Span content is a per-version decision.** Prompt and response content enters telemetry only where the cell's data classification allows it for the version under evaluation (`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT`); declared PII attributes are redacted in-process before export (`AWS_REDACT_SPAN_ATTRIBUTES`). Redaction is irreversible and redacted traces score blank. Data scopes on grants filter rows, not fields, and do not filter DevOps Agent investigation content.
+19. **A Region without CloudWatch Omni fails closed.** Paris (eu-west-3), Milan, Spain and Zurich cannot host a space. A cell there may centralize into another Region's hub only after an explicit, recorded residency and data-transfer decision; the pipeline refuses it otherwise.
 
 Reopen a decision when a proposed change alters a trust boundary, ownership model, shared-service failure domain, provider, Region, or compensating control.
 
@@ -867,6 +883,8 @@ The complete **AWS reference implementation shipped by this repository** is vali
 - Legacy direct-Bedrock evaluation, online-evaluation, ECS LiteLLM, and direct circuit-breaker paths that rely on cross-Region profiles.
 - VPC Lattice private endpoints.
 - Transaction Search enabled by default.
+- CloudWatch Omni hub, organization centralization rule, Omni online evaluations and AgentCore-native online evaluation configurations until their live gates pass (cross-account evaluation over centralized spans, grant isolation, CMK fail-closed, SCP denials, teardown to zero residue). The constructs ship synth-validated; see `docs/CLOUDWATCH_OMNI_INTEGRATION.md`.
+- CloudWatch Omni in Paris (eu-west-3), Milan, Spain or Zurich: no hosting Region exists; cross-Region centralization is a customer residency decision.
 - Native Gateway rate limiting as a hard quota or authorization control.
 - Automatic retirement of the Lambda Cedar wrapper.
 - A compliance certification, availability SLA, or guarantee that future AWS changes preserve behavior.

@@ -156,6 +156,36 @@ OAM_SOURCE_LINK_ACTIONS = [
     "xray:Link",
 ]
 
+# ADR-13/ADR-15: a cell or hub may opt into Transaction Search declaratively
+# (AWS::XRay::TransactionSearchConfig). These are the exact account-wide
+# settings that resource manages; nothing else in xray is granted here.
+TRANSACTION_SEARCH_ACTIONS = [
+    "xray:GetTraceSegmentDestination",
+    "xray:UpdateTraceSegmentDestination",
+    "xray:GetIndexingRules",
+    "xray:UpdateIndexingRule",
+    "logs:PutResourcePolicy",
+    "logs:DescribeResourcePolicies",
+    "logs:DeleteResourcePolicy",
+]
+
+# ADR-15: CloudWatch Omni hub (Audit/Observability account). The cloudwatch
+# namespace is already fully granted to the hub by ProvisionGovernanceTelemetryStacks;
+# the Observability Admin actions below are the ones the organization
+# centralization rule, the Dataset integration and the delegated-administrator
+# path need. Access grants and the Dataset integration are applied post-deploy by
+# scripts/omni/omni_space_bootstrap.py with the operator's own credentials.
+OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS = [
+    "observabilityadmin:CreateCentralizationRuleForOrganization",
+    "observabilityadmin:UpdateCentralizationRuleForOrganization",
+    "observabilityadmin:DeleteCentralizationRuleForOrganization",
+    "observabilityadmin:GetCentralizationRuleForOrganization",
+    "observabilityadmin:ListCentralizationRulesForOrganization",
+    "observabilityadmin:ListTagsForResource",
+    "observabilityadmin:TagResource",
+    "observabilityadmin:UntagResource",
+]
+
 
 def workstream_policy(account: str) -> dict[str, Any]:
     return {
@@ -180,6 +210,7 @@ def workstream_policy(account: str) -> dict[str, Any]:
                     "lambda:*",
                     "logs:*",
                     *OAM_SOURCE_LINK_ACTIONS,
+                    *TRANSACTION_SEARCH_ACTIONS,
                     "s3:*",
                     "secretsmanager:*",
                     "servicequotas:*",
@@ -258,6 +289,7 @@ def platform_policy(
                     "lambda:*",
                     "logs:*",
                     *OAM_SOURCE_LINK_ACTIONS,
+                    *TRANSACTION_SEARCH_ACTIONS,
                     "s3:*",
                     "secretsmanager:*",
                     "servicequotas:*",
@@ -407,6 +439,99 @@ def platform_policy(
     }
 
 
+def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
+    """ADR-15 CloudWatch Omni hub (OmniHubStack) in the Audit/Observability account.
+
+    The space, its roles and keys, Transaction Search and the organization
+    centralization rule. Role management is pinned to the exact Omni role
+    families; passing roles is pinned per consuming service.
+    """
+    omni_roles = [
+        iam_arn(account, "role/CloudWatchOmniOperatorRole"),
+        iam_arn(account, f"role/CloudWatchOmniDatasetIntegrationRole-{region}"),
+        iam_arn(account, "role/service-role/AgentCoreEvaluationRole-omni-*"),
+        iam_arn(account, "role/AgenticAI-Omni-HubStack-*"),
+    ]
+    return [
+        {
+            "Sid": "ProvisionOmniHubSpaceAndCentralization",
+            "Effect": "Allow",
+            "Action": [
+                "cloudwatch:CreateSpace",
+                "cloudwatch:GetSpace",
+                "cloudwatch:UpdateSpace",
+                "cloudwatch:DeleteSpace",
+                "cloudwatch:ListSpaces",
+                "cloudwatch:CreateOmniDashboard",
+                "cloudwatch:GetOmniDashboard",
+                "cloudwatch:UpdateOmniDashboard",
+                "cloudwatch:DeleteOmniDashboard",
+                "cloudwatch:TagResource",
+                "cloudwatch:UntagResource",
+                "cloudwatch:ListTagsForResource",
+                *OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS,
+                *TRANSACTION_SEARCH_ACTIONS,
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "ManageOmniHubRoles",
+            "Effect": "Allow",
+            "Action": [
+                "iam:AttachRolePolicy",
+                "iam:CreateRole",
+                "iam:DeleteRole",
+                "iam:DeleteRolePolicy",
+                "iam:DetachRolePolicy",
+                "iam:GetRole",
+                "iam:GetRolePolicy",
+                "iam:ListAttachedRolePolicies",
+                "iam:ListInstanceProfilesForRole",
+                "iam:ListRolePolicies",
+                "iam:PutRolePermissionsBoundary",
+                "iam:DeleteRolePermissionsBoundary",
+                "iam:PutRolePolicy",
+                "iam:TagRole",
+                "iam:UntagRole",
+                "iam:UpdateAssumeRolePolicy",
+                "iam:UpdateRole",
+                "iam:UpdateRoleDescription",
+            ],
+            "Resource": omni_roles,
+        },
+        {
+            "Sid": "PassOmniHubRolesToServices",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": omni_roles,
+            "Condition": {
+                "StringEquals": {
+                    "iam:PassedToService": [
+                        "cloudwatch.amazonaws.com",
+                        "logs.amazonaws.com",
+                        "bedrock-agentcore.amazonaws.com",
+                        "logs-centralization.observabilityadmin.amazonaws.com",
+                    ]
+                }
+            },
+        },
+        {
+            "Sid": "CreateOmniServiceLinkedRoles",
+            "Effect": "Allow",
+            "Action": "iam:CreateServiceLinkedRole",
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "iam:AWSServiceName": [
+                        "omni.cloudwatch.amazonaws.com",
+                        "logs-centralization.observabilityadmin.amazonaws.com",
+                    ]
+                }
+            },
+        },
+    ]
+
+
 def management_policy(account: str, region: str) -> dict[str, Any]:
     destination_role = iam_arn(account, "role/AgenticAI-LogArchive-CWLDestinationRole")
     provider_role = iam_arn(
@@ -421,6 +546,7 @@ def management_policy(account: str, region: str) -> dict[str, Any]:
                 "Action": ["kms:*", "logs:*", "oam:*", "s3:*"],
                 "Resource": "*",
             },
+            *omni_hub_statements(account, region),
             {
                 "Sid": "ReadCdkBootstrapVersion",
                 "Effect": "Allow",

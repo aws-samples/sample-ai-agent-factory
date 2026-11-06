@@ -42,7 +42,10 @@ describe('EMEA Region resolution', () => {
       'utf8',
     );
     expect(source).not.toMatch(/CDK_DEFAULT_REGION\s*\?\?/);
-    expect(source.match(/deploymentRegion\(\)[,;]/g)).toHaveLength(8);
+    // One resolver call per stage env plus the omni-hub stack-name suffix:
+    // management, omni-domain, omni-hub (env + stack id), platform, workload,
+    // d03-platform, d03-workload, d03-workstream-gateway, pipeline.
+    expect(source.match(/deploymentRegion\(\)[,;]/g)).toHaveLength(9);
   });
 
   it('keeps repository context from silently pinning a deployment Region', () => {
