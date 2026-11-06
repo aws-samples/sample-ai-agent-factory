@@ -98,6 +98,16 @@ export interface OrganizationConstructProps {
    */
   readonly approvedAgentCoreVpceIds?: readonly string[];
   readonly approvedBedrockVpceIds?: readonly string[];
+
+  /**
+   * Emit SCP-13 (CloudWatch Omni telemetry lockdown, ADR-15). Opt-in: it
+   * spends one of the nine SCP slots a target can hold. Default false.
+   */
+  readonly enableOmniTelemetryLockdown?: boolean;
+  /** Pipeline role-name patterns exempted by SCP-13 (default: the CDK cfn-exec role). */
+  readonly omniPipelineRoleNamePatterns?: readonly string[];
+  /** Exact break-glass role names exempted by SCP-13 (default none). */
+  readonly omniBreakGlassRoleNames?: readonly string[];
 }
 
 export class OrganizationConstruct extends Construct {
@@ -159,6 +169,9 @@ export class OrganizationConstruct extends Construct {
       approvedGuardrailIds: props.approvedGuardrailIds,
       approvedAgentCoreVpceIds: props.approvedAgentCoreVpceIds,
       approvedBedrockVpceIds: props.approvedBedrockVpceIds,
+      enableOmniTelemetryLockdown: props.enableOmniTelemetryLockdown,
+      omniPipelineRoleNamePatterns: props.omniPipelineRoleNamePatterns,
+      omniBreakGlassRoleNames: props.omniBreakGlassRoleNames,
     });
 
     const scpMap = new Map<string, CfnPolicy>();

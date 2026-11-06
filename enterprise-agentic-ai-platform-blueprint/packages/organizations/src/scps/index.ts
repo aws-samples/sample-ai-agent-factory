@@ -13,7 +13,10 @@
  *   - SCP-09 locks down AgentCore Gateway mutation to the platform admin role.
  *   - SCP-10 restricts Lambda invocations from D-03 runtime roles to the set
  *     of catalogued tool target ARNs.
- * SCPs 03, 04 and 09-12 are conditionally emitted — callers wire them through
+ * SCP-13 (ADR-15) keeps a Workstream cell from switching off the telemetry the
+ * CloudWatch Omni hub depends on (domains, spaces, Transaction Search, Runtime
+ * deliveries); only the Workload pipeline may touch them.
+ * SCPs 03, 04 and 09-13 are conditionally emitted — callers wire them through
  * `buildScpSet` options; if the inputs are absent a synth-time warning is
  * logged. SCP-03/04 are VPC-mode controls and need explicit endpoint ids.
  * Organizations allows at most 10 SCPs per target including FullAWSAccess
@@ -35,6 +38,7 @@ import { scp09GatewayMutationLockdown } from "./scp-09-gateway-mutation-lockdown
 import { scp10ToolInvokeAllowlist } from "./scp-10-tool-invoke-allowlist";
 import { scp11RegistryMutationLockdown } from "./scp-11-registry-mutation-lockdown";
 import { scp12DeveloperPlatformTagDeny } from "./scp-12-developer-platform-tag-deny";
+import { scp13OmniTelemetryLockdown } from "./scp-13-omni-telemetry-lockdown";
 
 /**
  * A single SCP definition: stable id, display name, rendered JSON body.
@@ -142,6 +146,17 @@ export interface BuildScpSetOptions {
   readonly approvedBedrockVpceIds?: readonly string[];
   /** Platform pipeline role-name patterns exempted by SCP-11 (default: CDK cfn-exec role). */
   readonly registryPipelineRoleNamePatterns?: readonly string[];
+  /**
+   * When `true`, SCP-13 (CloudWatch Omni telemetry lockdown, ADR-15) is
+   * emitted: cells cannot create Omni domains, hand-make spaces or grants,
+   * or switch off Transaction Search and Runtime log deliveries. Opt-in
+   * because it spends one of the nine SCP slots a target can hold.
+   */
+  readonly enableOmniTelemetryLockdown?: boolean;
+  /** Pipeline role-name patterns exempted by SCP-13 (default: CDK cfn-exec role, any account). */
+  readonly omniPipelineRoleNamePatterns?: readonly string[];
+  /** Exact break-glass role names exempted by SCP-13 (default none). */
+  readonly omniBreakGlassRoleNames?: readonly string[];
 }
 
 export function buildScpSet(
@@ -243,6 +258,15 @@ export function buildScpSet(
     set.push(
       scp12DeveloperPlatformTagDeny({
         developerPermissionSetPrefix: opts.developerPermissionSetPrefix,
+      }),
+    );
+  }
+
+  if (opts.enableOmniTelemetryLockdown) {
+    set.push(
+      scp13OmniTelemetryLockdown({
+        pipelineRoleNamePatterns: opts.omniPipelineRoleNamePatterns,
+        breakGlassRoleNames: opts.omniBreakGlassRoleNames,
       }),
     );
   }

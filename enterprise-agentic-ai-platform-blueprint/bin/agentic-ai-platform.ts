@@ -434,6 +434,7 @@ switch (stage) {
   case "management": {
     const attachToWorkloadsOu: boolean =
       app.node.tryGetContext("agenticai/attachScpsToWorkloadsOu") === true;
+    const breakGlassRaw = app.node.tryGetContext("agenticai/omniBreakGlassRoleNames");
     new OrgStack(app, "AgenticAI-Management-OrgStack", {
       env: {
         account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -441,6 +442,15 @@ switch (stage) {
       },
       platformGuardrailAdminRoleArn: guardrailAdminRoleArn(),
       attachToWorkloadsOu,
+      // ADR-15: SCP-13 keeps cells from switching off the telemetry the Omni hub depends on.
+      enableOmniTelemetryLockdown:
+        app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === true ||
+        app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === "true",
+      omniBreakGlassRoleNames: Array.isArray(breakGlassRaw)
+        ? breakGlassRaw.map(String)
+        : typeof breakGlassRaw === "string" && breakGlassRaw.trim().length > 0
+          ? breakGlassRaw.split(",").map((r) => r.trim()).filter(Boolean)
+          : undefined,
     });
     break;
   }

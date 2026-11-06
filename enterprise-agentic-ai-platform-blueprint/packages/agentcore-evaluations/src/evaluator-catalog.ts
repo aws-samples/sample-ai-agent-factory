@@ -45,7 +45,18 @@ export const BUILTIN_EVALUATORS = {
   toolSelectionAccuracy: 'Builtin.ToolSelectionAccuracy',
   /** Tool-call level. The agent extracted tool parameters accurately. */
   toolParameterAccuracy: 'Builtin.ToolParameterAccuracy',
+  /** Tool-call level. The SKILL.md the agent loaded fits the task (one result per skill invocation). */
+  skillSelectionAccuracy: 'Builtin.SkillSelectionAccuracy',
+  /** Tool-call level. How fully the agent followed the loaded skill's steps (judged on the full session). */
+  skillInstructionFollowing: 'Builtin.SkillInstructionFollowing',
 } as const;
+
+/**
+ * The service's 17 built-in evaluators are the 15 ids above plus the two
+ * ground-truth variants (Correctness and Goal success rate "with ground
+ * truth"), which reuse `Builtin.Correctness` / `Builtin.GoalSuccessRate` fed
+ * with `evaluationReferenceInputs` and are therefore not separate entries.
+ */
 
 export type BuiltinEvaluatorId =
   (typeof BUILTIN_EVALUATORS)[keyof typeof BUILTIN_EVALUATORS];
