@@ -95,6 +95,10 @@
       "@agenticai/tenant-quota-guard/*": ["packages/tenant-quota-guard/src/*"],
       "@agenticai/otel-genai-semconv": ["packages/otel-genai-semconv/src/index.ts"],
       "@agenticai/otel-genai-semconv/*": ["packages/otel-genai-semconv/src/*"],
+      "@agenticai/agentcore-evaluations": ["packages/agentcore-evaluations/src/index.ts"],
+      "@agenticai/agentcore-evaluations/*": ["packages/agentcore-evaluations/src/*"],
+      "@agenticai/omni": ["packages/omni/src/index.ts"],
+      "@agenticai/omni/*": ["packages/omni/src/*"],
       "@agenticai/catalogue-drift-detector": ["packages/catalogue-drift-detector/src/index.ts"],
       "@agenticai/catalogue-drift-detector/*": ["packages/catalogue-drift-detector/src/*"]
     }
