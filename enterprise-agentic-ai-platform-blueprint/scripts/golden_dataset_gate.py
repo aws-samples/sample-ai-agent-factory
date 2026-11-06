@@ -84,6 +84,9 @@ TOOL_NAME_KEYS = ("gen_ai.tool.name", "tool.name")
 class Clients:
     region: str
     profile: str | None = None
+    # A pipeline runs each subcommand under the role that owns its side: the hub's golden-gate
+    # runner role for export/gate, the cell's evaluation invoker role for replay.
+    assume_role_arn: str | None = None
     _session: Any = None
     _logs: Any = None
     _control: Any = None
@@ -92,7 +95,18 @@ class Clients:
     @property
     def session(self):
         if self._session is None:
-            self._session = boto3.session.Session(region_name=self.region, profile_name=self.profile)
+            base = boto3.session.Session(region_name=self.region, profile_name=self.profile)
+            if self.assume_role_arn:
+                credentials = base.client("sts").assume_role(
+                    RoleArn=self.assume_role_arn, RoleSessionName="golden-dataset-gate", DurationSeconds=3600
+                )["Credentials"]
+                base = boto3.session.Session(
+                    region_name=self.region,
+                    aws_access_key_id=credentials["AccessKeyId"],
+                    aws_secret_access_key=credentials["SecretAccessKey"],
+                    aws_session_token=credentials["SessionToken"],
+                )
+            self._session = base
         return self._session
 
     @property
@@ -799,8 +813,47 @@ def cmd_curate(args: argparse.Namespace, clients: Clients) -> int:
     return 0
 
 
-def cmd_replay(args: argparse.Namespace, clients: Clients) -> int:
+def cmd_export(args: argparse.Namespace, clients: Clients) -> int:
+    """Write a dataset version's scenarios to a local file, so `replay` can run under a different role
+    (the cell's invoker) than the one that reads the dataset (the hub's runner)."""
     examples = list_examples(clients.control, args.dataset_id, args.dataset_version)
+    if not examples:
+        print("dataset version has no examples", file=sys.stderr)
+        return 2
+    scenarios = [{k: v for k, v in _scenario_fields(e).items() if k != "exampleId"} for e in examples]
+    with open(args.out, "w", encoding="utf-8") as handle:
+        json.dump({"datasetId": args.dataset_id, "datasetVersion": args.dataset_version, "scenarios": scenarios}, handle, indent=2)
+        handle.write("\n")
+    print(f"wrote {len(scenarios)} scenario(s) of {args.dataset_id} v{args.dataset_version} to {args.out}")
+    return 0
+
+
+def wait_for_sessions(logs, groups: list[str], expected_turns: dict[str, int], start_s: int, end_s: int, timeout_s: int,
+                      sleep: Callable[[float], None] = time.sleep, log: Callable[[str], None] = lambda s: None) -> dict[str, list[str]]:
+    """Block until every candidate session shows at least its scenario's number of `invoke_agent` traces in
+    the groups the batch evaluation will read (CloudWatch ingestion plus, for hub copies, centralization),
+    or fail closed: a batch evaluation over sessions that have not landed reports no sessions."""
+    deadline = time.time() + timeout_s
+    while True:
+        order = trace_order_for_sessions(logs, groups, list(expected_turns), start_s, int(time.time()) + 300)
+        missing = {s[-8:]: (len(order.get(s, [])), n) for s, n in expected_turns.items() if len(order.get(s, [])) < n}
+        if not missing:
+            return order
+        log(f"  waiting for telemetry: {missing} (traces seen / expected)")
+        if time.time() >= deadline:
+            raise RuntimeError(f"candidate sessions not fully ingested after {timeout_s}s: {missing}")
+        sleep(30)
+
+
+def cmd_replay(args: argparse.Namespace, clients: Clients) -> int:
+    if args.scenarios:
+        with open(args.scenarios, encoding="utf-8") as handle:
+            examples = json.load(handle).get("scenarios") or []
+    elif args.dataset_id and args.dataset_version:
+        examples = list_examples(clients.control, args.dataset_id, args.dataset_version)
+    else:
+        print("replay needs --scenarios FILE (from export) or --dataset-id and --dataset-version", file=sys.stderr)
+        return 2
     if not examples:
         print("dataset version has no examples", file=sys.stderr)
         return 2
@@ -840,6 +893,10 @@ def cmd_gate(args: argparse.Namespace, clients: Clients) -> int:
     evaluators = list(dict.fromkeys(list(args.evaluator or [CORRECTNESS, GOAL_SUCCESS, HARMFULNESS, REFUSAL]) + [args.trajectory_evaluator]))
     print(f"dataset {args.dataset_id} v{args.dataset_version}: {len(examples)} scenario(s), {len(metadata)} with a candidate session")
     print(f"evaluators: {', '.join(evaluators)}")
+    if args.wait_for_sessions > 0:
+        expected = {m["sessionId"]: len((m["groundTruth"]["inline"].get("turns") or [None])) for m in metadata}
+        print(f"waiting up to {args.wait_for_sessions}s for the candidate sessions' traces in the source groups")
+        wait_for_sessions(clients.logs, args.log_group, expected, start_s, end_s, args.wait_for_sessions, log=print)
     started = start_batch(
         clients.data,
         name=args.name,
@@ -915,7 +972,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--region", required=True)
     parser.add_argument("--profile", help="Named AWS profile (the hub account for centralized traces, a cell for its own groups).")
+    parser.add_argument("--assume-role-arn", help="Run under this role (STS AssumeRole): the hub golden-gate runner role for export/gate, "
+                                                  "the cell evaluation invoker role for replay. This is how the workload pipeline runs the gate.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    export = sub.add_parser("export", help="Write a dataset version's scenarios to a local file for replay under another role.")
+    export.add_argument("--dataset-id", required=True)
+    export.add_argument("--dataset-version", required=True)
+    export.add_argument("--out", required=True)
 
     curate = sub.add_parser("curate", help="Curate scenarios from traces and publish a dataset version.")
     curate.add_argument("--log-group", action="append", required=True, help="Repeatable, 1-5: aws/spans copy + the agent's log group copy.")
@@ -936,8 +1000,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     curate.add_argument("--dry-run", action="store_true", help="Build and write the scenarios; do not call the dataset APIs.")
 
     replay = sub.add_parser("replay", help="Replay a dataset version against a candidate AgentCore Runtime.")
-    replay.add_argument("--dataset-id", required=True)
-    replay.add_argument("--dataset-version", required=True)
+    replay.add_argument("--scenarios", help="Scenario file written by `export` (lets replay run under the cell's invoker role).")
+    replay.add_argument("--dataset-id", help="Read the version directly instead (needs dataset permissions in this role).")
+    replay.add_argument("--dataset-version")
     replay.add_argument("--runtime-arn", required=True)
     replay.add_argument("--qualifier", default="DEFAULT")
     replay.add_argument("--out", required=True, help="Scenario -> session id JSON the gate consumes.")
@@ -956,16 +1021,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gate.add_argument("--metrics-namespace")
     gate.add_argument("--timeout", type=int, default=1800)
     gate.add_argument("--poll-interval", type=int, default=30)
+    gate.add_argument("--wait-for-sessions", type=int, default=600,
+                      help="Seconds to wait for every candidate session's traces to appear in the source groups before starting "
+                           "the batch evaluation (ingestion, plus centralization for hub copies); 0 disables. Fails closed on timeout.")
     gate.add_argument("--evidence", help="Evidence JSON (account ids redacted).")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    clients = Clients(region=args.region, profile=args.profile)
+    clients = Clients(region=args.region, profile=args.profile, assume_role_arn=args.assume_role_arn)
     try:
         if args.command == "curate":
             return cmd_curate(args, clients)
+        if args.command == "export":
+            return cmd_export(args, clients)
         if args.command == "replay":
             return cmd_replay(args, clients)
         return cmd_gate(args, clients)

@@ -428,3 +428,90 @@ def test_parse_args_requires_a_subcommand_and_its_inputs():
     assert args.log_group == ["/a", "/b"]
     assert args.trajectory_evaluator == "Builtin.TrajectoryAnyOrderMatch"
     assert args.evaluator is None
+
+
+# ----------------------------------------------------------------------------------------------------
+# Pipeline shape: export under one role, replay under another, wait for ingestion before the batch
+# ----------------------------------------------------------------------------------------------------
+def test_export_writes_the_version_scenarios_without_example_ids(tmp_path):
+    client, stub = _control()
+    stub.add_response("list_dataset_examples", {"datasetArn": ARN, "datasetId": DATASET_ID, "datasetVersion": "1", "examples": EXAMPLES},
+                      {"datasetId": DATASET_ID, "datasetVersion": "1", "maxResults": 100})
+    out = tmp_path / "scenarios.json"
+    args = mod.parse_args(["--region", REGION, "export", "--dataset-id", DATASET_ID, "--dataset-version", "1", "--out", str(out)])
+    with stub:
+        assert mod.cmd_export(args, mod.Clients(region=REGION, _control=client)) == 0
+    written = json.loads(out.read_text())
+    assert written["datasetVersion"] == "1"
+    assert [s["scenario_id"] for s in written["scenarios"]] == ["g-1", "g-2", "g-3"]
+    assert all("exampleId" not in s for s in written["scenarios"])
+    stub.assert_no_pending_responses()
+
+
+def test_replay_from_an_exported_file_invokes_the_runtime_once_per_turn_with_one_session_per_scenario(tmp_path):
+    scenarios = tmp_path / "scenarios.json"
+    scenarios.write_text(json.dumps({"scenarios": [{"scenario_id": "g-1", "turns": [{"input": "a"}, {"input": "b"}]},
+                                                   {"scenario_id": "g-2", "turns": [{"input": "c"}]}]}))
+    out = tmp_path / "sessions.json"
+    calls = []
+
+    class FakeData:
+        def invoke_agent_runtime(self, **kwargs):
+            calls.append(kwargs)
+            return {"response": __import__("io").BytesIO(b'{"ok": true}')}
+
+    args = mod.parse_args(["--region", REGION, "replay", "--scenarios", str(scenarios),
+                           "--runtime-arn", f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:runtime/r-1", "--out", str(out)])
+    assert mod.cmd_replay(args, mod.Clients(region=REGION, _data=FakeData())) == 0
+    sessions = json.loads(out.read_text())
+    assert set(sessions) == {"g-1", "g-2"}
+    assert len(calls) == 3
+    assert [json.loads(c["payload"])["prompt"] for c in calls] == ["a", "b", "c"]
+    # Turns of one scenario share a session; scenarios never share one.
+    assert calls[0]["runtimeSessionId"] == calls[1]["runtimeSessionId"] == sessions["g-1"]
+    assert calls[2]["runtimeSessionId"] == sessions["g-2"] != sessions["g-1"]
+    assert all(len(c["runtimeSessionId"]) >= 33 for c in calls)
+
+
+def test_replay_without_a_source_is_refused():
+    args = mod.parse_args(["--region", REGION, "replay", "--runtime-arn", "arn:aws:bedrock-agentcore:eu-west-1:222222222222:runtime/r", "--out", "x"])
+    assert mod.cmd_replay(args, mod.Clients(region=REGION)) == 2
+
+
+def test_wait_for_sessions_returns_once_every_session_has_its_turns_and_fails_closed_on_timeout(monkeypatch):
+    seen = iter([
+        {"cand-1": ["t1"]},                               # first poll: one of two turns
+        {"cand-1": ["t1", "t2"], "cand-2": ["t3"]},       # second poll: complete
+    ])
+    monkeypatch.setattr(mod, "trace_order_for_sessions", lambda *a, **k: next(seen))
+    lines = []
+    order = mod.wait_for_sessions(None, ["/g"], {"cand-1": 2, "cand-2": 1}, 0, 1, timeout_s=600, sleep=lambda _s: None, log=lines.append)
+    assert order == {"cand-1": ["t1", "t2"], "cand-2": ["t3"]}
+    assert len(lines) == 1 and "cand-1"[-8:] in lines[0]
+
+    monkeypatch.setattr(mod, "trace_order_for_sessions", lambda *a, **k: {})
+    with pytest.raises(RuntimeError, match="not fully ingested"):
+        mod.wait_for_sessions(None, ["/g"], {"cand-1": 2}, 0, 1, timeout_s=0, sleep=lambda _s: None)
+
+
+def test_clients_assume_role_builds_the_session_from_sts_credentials(monkeypatch):
+    captured = {}
+
+    class FakeSts:
+        def assume_role(self, **kwargs):
+            captured.update(kwargs)
+            return {"Credentials": {"AccessKeyId": "AKIA", "SecretAccessKey": "s", "SessionToken": "t"}}
+
+    class FakeBase:
+        def __init__(self, **kwargs):
+            captured.setdefault("sessions", []).append(kwargs)
+
+        def client(self, name):
+            assert name == "sts"
+            return FakeSts()
+
+    monkeypatch.setattr(mod.boto3.session, "Session", FakeBase)
+    clients = mod.Clients(region=REGION, assume_role_arn=f"arn:aws:iam::{ACCOUNT}:role/GoldenGateRunner")
+    assert clients.session is not None
+    assert captured["RoleArn"].endswith("GoldenGateRunner") and captured["RoleSessionName"] == "golden-dataset-gate"
+    assert captured["sessions"][1] == {"region_name": REGION, "aws_access_key_id": "AKIA", "aws_secret_access_key": "s", "aws_session_token": "t"}
