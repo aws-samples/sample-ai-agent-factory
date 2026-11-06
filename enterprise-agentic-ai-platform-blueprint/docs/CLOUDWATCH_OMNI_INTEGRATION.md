@@ -69,7 +69,7 @@ The centralization rule replicates the blueprint's log groups (`/agenticai/*`, `
      --domain-id d-... --space-id <OmniSpaceId output> --grants-file assets/omni/grants.json
    python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 inventory --domain-id d-... --space-id <id>
    ```
-   Start from `assets/omni/grants.example.json`. Put a data scope on every grant a scoped team receives, including group grants: grants only add, and one unscoped grant restores the full view.
+   Start from `assets/omni/grants.example.json`. Put a data scope on every grant a scoped team receives, including group grants: grants only add, and one unscoped grant restores the full view. `SearchPrincipals` resolves Identity Center users and groups by display name only; an IAM principal is not searchable (observed live: zero matches for an existing role) and must be given as `principalId` = the role ARN, which is also how the service-managed `OmniDefaults-Space-Admin` grant names the creating role.
 
    **3a. Adopt mode.** When the hub account already hosts a space (and so cannot take the organization domain), pass the space id instead of the space settings; the stack then owns only the centralized-logs CMK and the rule, and refuses `omniSpaceName`, `omniAllowModelInference`, `omniJudgeModelArns`, `omniEnableAwsIntegrationDiscovery` and `transactionSearchIndexingPercentage`:
    ```bash
