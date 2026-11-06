@@ -77,9 +77,12 @@ const online = new AgentCoreOnlineEvaluationConstruct(stack, "OnlineEvaluation",
   configName: "agenticai_omni_validation",
   executionRole: executionRole.role,
   serviceName,
+  // Spans AND the log group that receives the GenAI prompt/completion log events (for an agent on
+  // Runtime this is its runtime log group); the evaluator reads both and fails the trace without the events.
+  logGroupNames: ["aws/spans", agentLogGroup.logGroupName],
   evaluatorIds: [policy.evaluatorId],
   samplingPercentage: 100,
-  sessionTimeoutMinutes: 1,
+  sessionTimeoutMinutes: 5,
   description: "CloudWatch Omni live validation: model-free policy evaluator over the validation agent's spans.",
 });
 online.node.addDependency(policy.evaluator);

@@ -105,6 +105,93 @@ def _attribute(span: dict[str, Any], keys: Iterable[str]) -> str | None:
     return None
 
 
+# The service hands a code-based evaluator the raw records it collected for the
+# session: ADOT span records from `aws/spans` AND the GenAI log-event records
+# from the agent's log group (the AWS Distro for OpenTelemetry moves prompt and
+# completion content out of the spans into those records). Content therefore
+# arrives in one of three places, and the evaluator reads all of them:
+#   1. span attributes (gen_ai.output.messages, ...)           -- INPUT/OUTPUT_ATTRIBUTE_KEYS
+#   2. span events (gen_ai.user.message / gen_ai.choice / ...)  -- normalized service format
+#   3. log-event records: body.input / body.output (Strands via the distro) or the
+#      per-message bodies the botocore Bedrock instrumentation writes
+#      (gen_ai.user.message, gen_ai.assistant.message, gen_ai.choice).
+USER_EVENT_NAMES = ("gen_ai.user.message",)
+ASSISTANT_EVENT_NAMES = ("gen_ai.choice", "gen_ai.assistant.message")
+
+
+def _text(value: Any) -> str:
+    """Flatten the message-content shapes seen live into plain text (never raises)."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                return _text(json.loads(stripped))
+            except (ValueError, TypeError):
+                return value
+        return value
+    if isinstance(value, list):
+        return " ".join(part for part in (_text(v) for v in value) if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "message"):
+            if key in value:
+                return _text(value[key])
+        return ""
+    return str(value)
+
+
+def _event_name(record: dict[str, Any]) -> str:
+    attributes = record.get("attributes") or {}
+    return str(record.get("eventName") or record.get("name") or attributes.get("event.name") or "")
+
+
+def _from_span_events(span: dict[str, Any]) -> tuple[list[str], list[str]]:
+    inputs: list[str] = []
+    outputs: list[str] = []
+    for event in span.get("events") or []:
+        name = _event_name(event)
+        attributes = event.get("attributes") or {}
+        if name in USER_EVENT_NAMES:
+            text = _text(attributes.get("content"))
+            if text:
+                inputs.append(text)
+        elif name in ASSISTANT_EVENT_NAMES:
+            text = _text(attributes.get("message") if "message" in attributes else attributes.get("content"))
+            if text:
+                outputs.append(text)
+    return inputs, outputs
+
+
+def _from_body(record: dict[str, Any]) -> tuple[list[str], list[str]]:
+    body = record.get("body")
+    if not isinstance(body, dict):
+        return [], []
+    inputs: list[str] = []
+    outputs: list[str] = []
+    for message in ((body.get("input") or {}).get("messages") or []):
+        if isinstance(message, dict) and message.get("role", "user") in ("user", "human"):
+            text = _text(message.get("content"))
+            if text:
+                inputs.append(text)
+    for message in ((body.get("output") or {}).get("messages") or []):
+        if isinstance(message, dict):
+            text = _text(message.get("content"))
+            if text:
+                outputs.append(text)
+    if "input" not in body and "output" not in body:
+        name = _event_name(record)
+        if name in USER_EVENT_NAMES:
+            text = _text(body.get("content"))
+            if text:
+                inputs.append(text)
+        elif name in ASSISTANT_EVENT_NAMES:
+            text = _text(body.get("message") if "message" in body else body.get("content"))
+            if text:
+                outputs.append(text)
+    return inputs, outputs
+
+
 def _target_spans(payload: dict[str, Any]) -> list[dict[str, Any]]:
     spans = (payload.get("evaluationInput") or {}).get("sessionSpans") or []
     target = payload.get("evaluationTarget") or {}
@@ -134,6 +221,10 @@ def collect_turn(spans: list[dict[str, Any]]) -> dict[str, Any]:
         assistant = _attribute(span, OUTPUT_ATTRIBUTE_KEYS)
         if assistant:
             outputs.append(assistant)
+        event_inputs, event_outputs = _from_span_events(span)
+        body_inputs, body_outputs = _from_body(span)
+        inputs.extend(event_inputs + body_inputs)
+        outputs.extend(event_outputs + body_outputs)
         tool = _attribute(span, TOOL_NAME_ATTRIBUTE_KEYS)
         if tool:
             tools.append(tool)
@@ -191,7 +282,11 @@ def evaluate(payload: dict[str, Any], policy: dict[str, Any] | None = None) -> d
     if not turn["output"]:
         return {
             "errorCode": "MISSING_OUTPUT_CONTENT",
-            "errorMessage": "Target spans carry no assistant output; enable content capture (AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true) for evaluated versions.",
+            "errorMessage": (
+                "No assistant output in the target's span attributes, span events or GenAI log-event records; "
+                "keep content in spans for evaluated versions (AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true) and include "
+                "the agent's log group in the online evaluation data source."
+            ),
         }
     failures = []
     for name, check in CHECKS:

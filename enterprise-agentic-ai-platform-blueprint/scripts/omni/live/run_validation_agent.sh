@@ -41,8 +41,13 @@ export OTEL_PYTHON_CONFIGURATOR=aws_configurator
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_TRACES_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=none
-export OTEL_LOGS_EXPORTER=none
+# The logs exporter matters: AgentCore Evaluations reads the GenAI prompt/completion LOG EVENTS that
+# the distro's LLO handler mirrors out of the spans (Runtime does the same into its runtime log
+# group). Without them every sampled trace fails with LogEventMissingException and no result is written.
+export OTEL_LOGS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="https://xray.${region}.amazonaws.com/v1/traces"
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="https://logs.${region}.amazonaws.com/v1/logs"
+export OTEL_EXPORTER_OTLP_LOGS_HEADERS="x-aws-log-group=${log_group},x-aws-log-stream=otel/${service_name},x-aws-metric-namespace=agenticai-validation"
 export OTEL_RESOURCE_ATTRIBUTES="service.name=${service_name},aws.log.group.names=${log_group},agenticai.validation=omni"
 export OTEL_TRACES_SAMPLER=always_on
 export AGENT_OBSERVABILITY_ENABLED=true

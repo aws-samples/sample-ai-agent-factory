@@ -126,13 +126,18 @@ def eval_results(logs, group: str, since_ms: int) -> list[dict[str, Any]]:
             body = json.loads(e["message"])
         except json.JSONDecodeError:
             continue
-        attrs = body.get("attributes") or body.get("body", {}).get("attributes") or body
-        flat = json.dumps(attrs)
+        # Live shape (2026-11): one OTLP log record per evaluated trace, attributes carry
+        # gen_ai.evaluation.name, session.id, the evaluator/config ARNs, the rating scale and either
+        # a score (gen_ai.evaluation.score.*) or error.type (e.g. MISSING_OUTPUT_CONTENT when the
+        # GenAI log events were not available for the trace).
+        attrs = body.get("attributes") or {}
         found.append({
-            "evaluator": attrs.get("gen_ai.evaluation.name") or attrs.get("evaluator_name") or attrs.get("evaluatorName"),
-            "label": attrs.get("gen_ai.evaluation.score.label") or attrs.get("label"),
-            "value": attrs.get("gen_ai.evaluation.score.value") or attrs.get("value"),
-            "hasExplanation": "explanation" in flat.lower(),
+            "evaluator": attrs.get("gen_ai.evaluation.name"),
+            "label": attrs.get("gen_ai.evaluation.score.label"),
+            "value": attrs.get("gen_ai.evaluation.score.value"),
+            "errorType": attrs.get("error.type"),
+            "level": attrs.get("aws.bedrock_agentcore.evaluation_level"),
+            "sessionSuffix": str(attrs.get("session.id", ""))[-6:],
         })
     return found
 
@@ -210,9 +215,17 @@ def run_gates(a: argparse.Namespace) -> dict[str, Any]:
     result_group = f"/aws/bedrock-agentcore/evaluations/results/{a.online_config_id}"
     results = eval_results(cell_logs, result_group, since_ms)
     hub_results = count_events(hub_logs, destination_name(a.cell_account, region, result_group), since_ms)
-    labels = sorted({str(r["label"]) for r in results if r.get("label") is not None})
-    gates.append({"id": "G5-option-b-results", "ok": len(results) > 0 and hub_results > 0,
-                  "cellResultEvents": len(results), "labels": labels[:10], "hubCentralizedResultEvents": hub_results})
+    scored = [r for r in results if r.get("errorType") is None and (r.get("label") is not None or r.get("value") is not None)]
+    error_types: dict[str, int] = {}
+    for r in results:
+        if r.get("errorType"):
+            error_types[r["errorType"]] = error_types.get(r["errorType"], 0) + 1
+    labels = sorted({str(r["label"]) for r in scored if r.get("label") is not None})
+    # A pass needs at least one SCORED trace (an error row proves the pipeline ran, not the evaluator).
+    gates.append({"id": "G5-option-b-results", "ok": len(scored) > 0 and hub_results > 0,
+                  "cellResultEvents": len(results), "scored": len(scored), "labels": labels[:10],
+                  "errorTypes": error_types, "evaluators": sorted({str(r["evaluator"]) for r in results}),
+                  "hubCentralizedResultEvents": hub_results})
 
     # G6
     if plat_logs is not None:

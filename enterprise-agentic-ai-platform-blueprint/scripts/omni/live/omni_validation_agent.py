@@ -133,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
     logs = session.client("logs")
     account = session.client("sts").get_caller_identity()["Account"]
     session_id = args.session_id or str(uuid.uuid4())
+    # The OTLP logs endpoint writes into an EXISTING stream named by x-aws-log-stream (the launcher
+    # sets it to otel/<service>); create it up front or every GenAI log batch is refused with 400.
+    try:
+        logs.create_log_stream(logGroupName=args.log_group, logStreamName=f"otel/{args.service_name}")
+    except logs.exceptions.ResourceAlreadyExistsException:
+        pass
     agent = build_agent(args.model_id, args.region, args.service_name, session_id, boto_session=session)
     stream = f"{args.service_name}/{dt.datetime.now(dt.timezone.utc):%Y%m%d}/{session_id}"
 
