@@ -13,6 +13,8 @@
  */
 import { Stack, type StackProps } from "aws-cdk-lib";
 import { CfnTransactionSearchConfig } from "aws-cdk-lib/aws-xray";
+
+import { TransactionSearchConstruct } from "@agenticai/omni";
 import { OamSourceLinkConstruct } from "@agenticai/observability";
 import { Construct } from "constructs";
 
@@ -61,11 +63,11 @@ export class WorkstreamObservabilityStack extends Stack {
           "WorkstreamObservabilityStack: transactionSearchIndexingPercentage must be between 0 and 100.",
         );
       }
-      this.transactionSearch = new CfnTransactionSearchConfig(
-        this,
-        "TransactionSearch",
-        { indexingPercentage: indexing },
-      );
+      // ADR-13 amended: the resource policy for X-Ray is created first; a bare
+      // TransactionSearchConfig is refused (403) in an account that never had it on.
+      this.transactionSearch = new TransactionSearchConstruct(this, "TransactionSearch", {
+        indexingPercentage: indexing,
+      }).config;
     }
   }
 }

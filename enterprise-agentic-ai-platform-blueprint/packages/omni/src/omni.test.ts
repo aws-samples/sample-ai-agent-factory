@@ -15,6 +15,7 @@ import {
   OmniOrganizationDomainConstruct,
   assertOmniDomainName,
   assertOmniHostingRegion,
+  TransactionSearchConstruct,
 } from './index';
 
 const HUB = { account: '222222222222', region: 'eu-west-1' };
@@ -297,5 +298,33 @@ describe('OmniDashboardConstruct', () => {
     expect(
       () => new OmniDashboardConstruct(hubStack(), 'D', { name: 'x', spaceId: 's', body: {} }),
     ).toThrow(/refuses an empty dashboard body/);
+  });
+});
+
+
+describe('TransactionSearchConstruct', () => {
+  it('creates the X-Ray resource policy before the Transaction Search config (live 403 without it)', () => {
+    const stack = new Stack(new App(), 'Ts', { env: { account: '222222222222', region: 'eu-west-1' } });
+    new TransactionSearchConstruct(stack, 'TransactionSearch', { indexingPercentage: 5 });
+    const t = Template.fromStack(stack);
+    t.resourceCountIs('AWS::Logs::ResourcePolicy', 1);
+    t.resourceCountIs('AWS::XRay::TransactionSearchConfig', 1);
+    const policy = Object.values(t.findResources('AWS::Logs::ResourcePolicy'))[0].Properties as any;
+    expect(policy.PolicyName).toBe('AgenticAI-TransactionSearch-Ts');
+    // The partition is a deploy-time token, so the document renders as Fn::Join; assert on its text.
+    const doc = JSON.stringify(policy.PolicyDocument);
+    expect(doc).toContain('"Service":"xray.amazonaws.com"');
+    expect(doc).toContain('logs:PutLogEvents');
+    expect(doc).toContain(':logs:eu-west-1:222222222222:log-group:aws/spans:*');
+    expect(doc).toContain(':logs:eu-west-1:222222222222:log-group:/aws/application-signals/data:*');
+    expect(doc).toContain('"aws:SourceAccount":"222222222222"');
+    const config = Object.values(t.findResources('AWS::XRay::TransactionSearchConfig'))[0] as any;
+    expect(config.Properties.IndexingPercentage).toBe(5);
+    expect(config.DependsOn).toEqual(expect.arrayContaining([expect.stringMatching(/XRayLogsPolicy/)]));
+  });
+
+  it('refuses an out-of-range indexing percentage', () => {
+    const stack = new Stack(new App(), 'Ts2', { env: { account: '222222222222', region: 'eu-west-1' } });
+    expect(() => new TransactionSearchConstruct(stack, 'Bad', { indexingPercentage: 101 })).toThrow(/between 0 and 100/);
   });
 });

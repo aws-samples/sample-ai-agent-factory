@@ -22,13 +22,13 @@
  */
 import { App, CfnOutput, CliCredentialsStackSynthesizer, RemovalPolicy, Stack, Tags } from "aws-cdk-lib";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
-import { CfnTransactionSearchConfig } from "aws-cdk-lib/aws-xray";
 
 import {
   AgentCoreOnlineEvaluationConstruct,
   EvaluationExecutionRoleConstruct,
   PolicyCodeEvaluatorConstruct,
 } from "@agenticai/agentcore-evaluations";
+import { TransactionSearchConstruct } from "@agenticai/omni";
 
 const app = new App();
 const account = String(app.node.tryGetContext("account") ?? "");
@@ -47,7 +47,7 @@ const stack = new Stack(app, "AgenticAI-OmniValidation-Cell", {
 
 // ADR-13 amended: Transaction Search is opt-in per cell and required for Omni-observed accounts.
 if (manageTransactionSearch) {
-  new CfnTransactionSearchConfig(stack, "TransactionSearch", { indexingPercentage: 1 });
+  new TransactionSearchConstruct(stack, "TransactionSearch", { indexingPercentage: 1 });
 }
 
 // Blueprint-prefixed log group the validation agent writes to (log centralization evidence).

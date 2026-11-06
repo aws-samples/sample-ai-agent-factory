@@ -121,6 +121,8 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
       EncryptionConfiguration: { EncryptionStrategy: "CUSTOMER_MANAGED", KmsKeyArn: Match.anyValue() },
     });
     t.resourceCountIs("AWS::XRay::TransactionSearchConfig", 1);
+    // The console-created X-Ray resource policy, declared explicitly (live 403 without it).
+    t.resourceCountIs("AWS::Logs::ResourcePolicy", 1);
     t.resourceCountIs("AWS::KMS::Key", 2);
     t.resourceCountIs("AWS::ObservabilityAdmin::OrganizationCentralizationRule", 1);
     const roles = Object.values(t.findResources("AWS::IAM::Role")).map(
@@ -219,6 +221,7 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
 describe("Phase 25 — Workstream cell: Transaction Search stays opt-in (ADR-13)", () => {
   it("emits no Transaction Search config by default", () => {
     observabilityTemplate().resourceCountIs("AWS::XRay::TransactionSearchConfig", 0);
+    observabilityTemplate().resourceCountIs("AWS::Logs::ResourcePolicy", 0);
     observabilityTemplate().resourceCountIs("AWS::Oam::Link", 1);
   });
 
@@ -226,6 +229,7 @@ describe("Phase 25 — Workstream cell: Transaction Search stays opt-in (ADR-13)
     const t = observabilityTemplate(true);
     t.resourceCountIs("AWS::XRay::TransactionSearchConfig", 1);
     t.hasResourceProperties("AWS::XRay::TransactionSearchConfig", { IndexingPercentage: 1 });
+    t.resourceCountIs("AWS::Logs::ResourcePolicy", 1);
     t.resourceCountIs("AWS::Oam::Link", 1);
   });
 });

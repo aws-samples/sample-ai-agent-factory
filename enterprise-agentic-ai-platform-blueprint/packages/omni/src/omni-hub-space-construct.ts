@@ -51,6 +51,7 @@ import { EvaluationExecutionRoleConstruct } from '@agenticai/agentcore-evaluatio
 
 import { assertOmniHostingRegion, assertOmniSpaceName } from './naming';
 import { OmniCentralizedLogsKeyConstruct } from './omni-centralized-logs-key-construct';
+import { TransactionSearchConstruct } from './transaction-search-construct';
 
 export interface OmniHubSpaceConstructProps {
   /** Space name, `^[a-z0-9]+(-[a-z0-9]+)*$`, 3-64 chars. */
@@ -349,9 +350,10 @@ export class OmniHubSpaceConstruct extends Construct {
 
     // ------------------------------------------------------ transaction search
     if (props.enableTransactionSearch !== false) {
-      this.transactionSearch = new CfnTransactionSearchConfig(this, 'TransactionSearch', {
+      // Resource policy for X-Ray first, then the config (fails 403 without it in a fresh account).
+      this.transactionSearch = new TransactionSearchConstruct(this, 'TransactionSearch', {
         indexingPercentage: indexing,
-      });
+      }).config;
     }
 
     // ---------------------------------------------------------------- space
