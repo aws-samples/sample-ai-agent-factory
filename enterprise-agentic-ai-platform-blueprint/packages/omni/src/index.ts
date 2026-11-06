@@ -34,4 +34,8 @@ export {
   type OmniCentralizedLogsKeyConstructProps,
 } from './omni-centralized-logs-key-construct';
 export { OmniDashboardConstruct, type OmniDashboardConstructProps } from './omni-dashboard-construct';
+export {
+  OmniGoldenGateRunnerRoleConstruct,
+  type OmniGoldenGateRunnerRoleConstructProps,
+} from './omni-golden-gate-runner-role-construct';
 export * from './transaction-search-construct';

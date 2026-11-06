@@ -7,10 +7,14 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
+import { Key } from 'aws-cdk-lib/aws-kms';
+
 import {
   BLUEPRINT_CENTRALIZED_LOG_GROUP_PATTERNS,
   OmniCentralizationRuleConstruct,
   OmniDashboardConstruct,
+  OmniGoldenGateRunnerRoleConstruct,
+  type OmniGoldenGateRunnerRoleConstructProps,
   OmniHubSpaceConstruct,
   OmniOrganizationDomainConstruct,
   assertOmniDomainName,
@@ -345,5 +349,99 @@ describe('TransactionSearchConstruct', () => {
   it('refuses an out-of-range indexing percentage', () => {
     const stack = new Stack(new App(), 'Ts2', { env: { account: '222222222222', region: 'eu-west-1' } });
     expect(() => new TransactionSearchConstruct(stack, 'Bad', { indexingPercentage: 101 })).toThrow(/between 0 and 100/);
+  });
+});
+
+
+describe('OmniGoldenGateRunnerRoleConstruct', () => {
+  const PIPELINE_ROLE = 'arn:aws:iam::222222222222:role/AgenticAI-acme-EvaluationGateRole';
+  const OTHER_PIPELINE_ROLE = 'arn:aws:iam::222222222222:role/AgenticAI-retail-EvaluationGateRole';
+
+  function synthRunner(props: Partial<OmniGoldenGateRunnerRoleConstructProps> = {}): Template {
+    const app = new App();
+    const stack = new Stack(app, 'Hub', { env: { account: '333333333333', region: 'eu-west-1' } });
+    const key = new Key(stack, 'HubKey');
+    new OmniGoldenGateRunnerRoleConstruct(stack, 'Runner', {
+      trustedPrincipalArns: [PIPELINE_ROLE],
+      centralizedLogsKey: key,
+      ...props,
+    });
+    return Template.fromStack(stack);
+  }
+
+  function runnerPolicy(template: Template): Array<{ Sid: string; Action: string[] | string; Resource: unknown; Condition?: unknown }> {
+    const roles = template.findResources('AWS::IAM::Role');
+    const role = Object.values(roles)[0] as { Properties: { Policies: Array<{ PolicyDocument: { Statement: never[] } }> } };
+    return role.Properties.Policies[0].PolicyDocument.Statement;
+  }
+
+  it('is assumable only by the named pipeline roles, through their account with aws:PrincipalArn pinned', () => {
+    const template = synthRunner({ trustedPrincipalArns: [PIPELINE_ROLE, OTHER_PIPELINE_ROLE] });
+    template.hasResourceProperties('AWS::IAM::Role', {
+      RoleName: 'AgenticAIGoldenGateRunner-eu-west-1',
+      MaxSessionDuration: 3600,
+      AssumeRolePolicyDocument: {
+        Statement: [
+          Match.objectLike({
+            Action: 'sts:AssumeRole',
+            Principal: { AWS: Match.objectLike({ 'Fn::Join': Match.anyValue() }) },
+            Condition: { ArnEquals: { 'aws:PrincipalArn': [PIPELINE_ROLE, OTHER_PIPELINE_ROLE] } },
+          }),
+        ],
+      },
+    });
+    const trust = JSON.stringify(template.toJSON());
+    expect(trust).toContain(':iam::222222222222:root');
+    expect(trust).not.toContain('"Principal":{"AWS":"*"}');
+  });
+
+  it('scopes reads to the named source accounts\' centralized copies and writes to one result prefix', () => {
+    const statements = runnerPolicy(synthRunner({ sourceAccountIds: ['444444444444', '555555555555'] }));
+    const query = statements.find((s) => s.Sid === 'SourceCopiesQuery')!;
+    const resources = JSON.stringify(query.Resource);
+    expect(resources).toContain('log-group:/centralized/444444444444/*');
+    expect(resources).toContain('log-group:/centralized/555555555555/*');
+    expect(resources).toContain('log-group:/agenticai/golden-gate/*');
+    expect(resources).not.toContain('log-group:/centralized/*"');
+    expect(resources).not.toContain('log-group:*');
+    const write = statements.find((s) => s.Sid === 'ResultGroupWrite')!;
+    expect(JSON.stringify(write.Resource)).toContain('log-group:/agenticai/golden-gate/*');
+    expect(JSON.stringify(write.Resource)).not.toContain('/centralized/');
+    expect(write.Action).not.toContain('logs:DeleteLogGroup');
+  });
+
+  it('falls back to every centralized copy when no source accounts are named', () => {
+    const statements = runnerPolicy(synthRunner());
+    const query = statements.find((s) => s.Sid === 'SourceCopiesQuery')!;
+    expect(JSON.stringify(query.Resource)).toContain('log-group:/centralized/*');
+  });
+
+  it('pins the batch-evaluation actions to the Region, PutMetricData to the namespace and KMS to the Logs service', () => {
+    const statements = runnerPolicy(synthRunner({ metricsNamespace: 'agenticai/acme-gate' }));
+    const batch = statements.find((s) => s.Sid === 'BatchEvaluationLifecycle')!;
+    expect(batch.Action).toEqual(
+      expect.arrayContaining(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:GetBatchEvaluation']),
+    );
+    expect(batch.Condition).toEqual({ StringEquals: { 'aws:RequestedRegion': 'eu-west-1' } });
+    const metrics = statements.find((s) => s.Sid === 'ResultMetrics')!;
+    expect(metrics.Condition).toEqual({ StringEquals: { 'cloudwatch:namespace': 'agenticai/acme-gate' } });
+    const kms = statements.find((s) => s.Sid === 'HubKeyThroughLogs')!;
+    expect(kms.Condition).toEqual({ StringEquals: { 'kms:ViaService': 'logs.eu-west-1.amazonaws.com' } });
+    expect(kms.Action).not.toContain('kms:*');
+    const dataset = statements.find((s) => s.Sid === 'DatasetVersionRead')!;
+    expect(JSON.stringify(dataset.Resource)).toContain(':bedrock-agentcore:eu-west-1:333333333333:dataset/*');
+    // Nothing here lets the runner invoke the candidate or mutate datasets/evaluators.
+    const allActions = statements.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    for (const forbidden of ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:CreateDataset', 'bedrock-agentcore:DeleteDataset',
+      'bedrock-agentcore:CreateEvaluator', 'bedrock-agentcore:*', 'logs:*', 'logs:DeleteLogGroup', 'logs:PutResourcePolicy']) {
+      expect(allActions).not.toContain(forbidden);
+    }
+  });
+
+  it('rejects an empty trust list, a non-role principal, a bad source account and a malformed result prefix', () => {
+    expect(() => synthRunner({ trustedPrincipalArns: [] })).toThrow(/at least one pipeline role ARN/);
+    expect(() => synthRunner({ trustedPrincipalArns: ['arn:aws:iam::222222222222:user/alice'] })).toThrow(/must be an IAM role ARN/);
+    expect(() => synthRunner({ sourceAccountIds: ['12345'] })).toThrow(/12 digits/);
+    expect(() => synthRunner({ resultLogGroupPrefix: 'agenticai/golden-gate' })).toThrow(/start and end with/);
   });
 });
