@@ -62,7 +62,10 @@ import {
   type GatewayPolicyEngineMode,
 } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { D03WorkstreamRegistryRolesStack } from "../apps/workload-account/lib/d03-workstream-registry-roles-stack";
-import { D03WorkstreamRuntimeMemoryStack } from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
+import {
+  D03WorkstreamRuntimeMemoryStack,
+  type RuntimeTelemetryConfig,
+} from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { gatewayModelPrice } from "@agenticai/platform-baselines";
 import {
@@ -114,6 +117,8 @@ export interface WorkloadStageProps extends StageProps {
   readonly evaluationInvokerPrincipalArn?: string;
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
+  /** ADR-18 span content contract for the pipeline Runtime. */
+  readonly runtimeTelemetry?: RuntimeTelemetryConfig;
 }
 
 /** Platform inference inputs threaded into the generated-agent Runtime. */
@@ -182,6 +187,7 @@ export class WorkloadDeploymentStage extends Stage {
                 ? this.buildGeneratedAgentRuntimeConfig(props)
                 : undefined,
             evaluationInvokerPrincipalArn: props.evaluationInvokerPrincipalArn,
+            telemetry: props.runtimeTelemetry,
           },
         );
         this.runtimeMemoryStack.addDependency(this.gatewayStack);
@@ -264,6 +270,13 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
   readonly workloadProdAccountId: string;
   /** Regional Management/Governance OAM sink shared by distinct Workstream accounts. */
   readonly auditOamSinkArn?: string;
+  /**
+   * Enable X-Ray Transaction Search in every distinct Workstream account and
+   * Region (required for CloudWatch Omni traces and trace centralization).
+   * Opt-in, ADR-13/ADR-15. Default false.
+   */
+  readonly enableTransactionSearch?: boolean;
+  readonly transactionSearchIndexingPercentage?: number;
   readonly nonprodContext: GaRegistryConsumerContext;
   readonly prodContext: GaRegistryConsumerContext;
   readonly enablePipelineRuntimeMemory?: boolean;
@@ -323,6 +336,9 @@ export class WorkstreamRegistryRolesStage extends Stage {
               region: props.gatewayRegion,
             },
             sinkArn: auditOamSinkArn,
+            enableTransactionSearch: props.enableTransactionSearch,
+            transactionSearchIndexingPercentage:
+              props.transactionSearchIndexingPercentage,
             resourceTags: {
               applicationId: props.applicationId,
               agentId: props.agentId,
@@ -428,6 +444,11 @@ export interface WorkloadPipelineStackProps extends StackProps {
   /** Account-specific AZ names produced by read-only preflight. */
   readonly workloadProdAvailabilityZones: readonly string[];
   readonly auditOamSinkArn?: string;
+  /** Opt-in Transaction Search for every distinct Workstream account and Region (ADR-13/ADR-15). */
+  readonly enableTransactionSearch?: boolean;
+  readonly transactionSearchIndexingPercentage?: number;
+  /** ADR-18 span content contract for the pipeline Runtime (both environments). */
+  readonly runtimeTelemetry?: RuntimeTelemetryConfig;
   readonly notificationEmail?: string;
 
   /**
@@ -820,6 +841,9 @@ export class WorkloadPipelineStack extends Stack {
           workloadNonprodAccountId: props.workloadNonprodEnv.account,
           workloadProdAccountId: props.workloadProdEnv.account,
           auditOamSinkArn: props.auditOamSinkArn,
+          enableTransactionSearch: props.enableTransactionSearch,
+          transactionSearchIndexingPercentage:
+            props.transactionSearchIndexingPercentage,
           nonprodContext: props.gaRegistry.nonprod,
           prodContext: props.gaRegistry.prod,
           enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
@@ -878,6 +902,7 @@ export class WorkloadPipelineStack extends Stack {
         ? evaluationRoleArn
         : undefined,
       auditOamSinkArn: props.auditOamSinkArn,
+      runtimeTelemetry: props.runtimeTelemetry,
       notificationEmail: props.notificationEmail,
     });
     this.pipeline.addStage(nonprodStage);
@@ -1045,6 +1070,7 @@ export class WorkloadPipelineStack extends Stack {
       agentImageVariant: props.agentImageVariant,
       generatedAgentInference: props.generatedAgentInference?.prod,
       auditOamSinkArn: props.auditOamSinkArn,
+      runtimeTelemetry: props.runtimeTelemetry,
       notificationEmail: props.notificationEmail,
     });
 
@@ -1196,6 +1222,22 @@ export class WorkloadPipelineStack extends Stack {
     }
     if (props.auditOamSinkArn) {
       derived["agenticai/auditOamSinkArn"] = props.auditOamSinkArn;
+    }
+    if (props.enableTransactionSearch) {
+      derived["agenticai/enableTransactionSearch"] = "true";
+      if (props.transactionSearchIndexingPercentage !== undefined) {
+        derived["agenticai/transactionSearchIndexingPercentage"] = String(
+          props.transactionSearchIndexingPercentage,
+        );
+      }
+    }
+    if (props.runtimeTelemetry?.keepPromptContentInSpans) {
+      derived["agenticai/runtimeKeepPromptContentInSpans"] = "true";
+    }
+    if (props.runtimeTelemetry?.redactSpanAttributes?.length) {
+      derived["agenticai/runtimeRedactSpanAttributes"] = JSON.stringify(
+        props.runtimeTelemetry.redactSpanAttributes,
+      );
     }
     if (props.notificationEmail) {
       derived["agenticai/notificationEmail"] = props.notificationEmail;
