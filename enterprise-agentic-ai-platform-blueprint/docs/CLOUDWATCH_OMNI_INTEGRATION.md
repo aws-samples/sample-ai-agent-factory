@@ -44,13 +44,14 @@ The centralization rule replicates the blueprint's log groups (`/agenticai/*`, `
      The command is idempotent (`created` or `exists` per role).
    - After trusted access is enabled the service initializes centralization across the organization. Until it finishes, `CreateCentralizationRuleForOrganization` answers HTTP 400 `Centralization is currently initializing. Please try again later.` and the hub stack rolls back. In the live run the state did not clear by itself in 35 minutes; disabling and re-enabling trusted access for `observabilityadmin.amazonaws.com` (with the service-linked roles already present) cleared it within five minutes. Suspended accounts in the organization are the documented cause of a longer stall.
    - **One domain per organization.** An account-level Omni domain already present in the management account blocks `CreateDomainForOrganization` (HTTP 409 `A domain already exists for this organization`). Either delete that domain first or run the hub stage in adopt mode against its space (step 3a).
-2. **Management account.**
+2. **Management account, in the Identity Center instance's PRIMARY Region.** The service refuses the domain anywhere else (`CreateDomainForOrganization` 400 `Domain must be created in the Identity Center instance's primary region (us-east-1). Current region is eu-west-1.`, observed live); the spaces may still live in the hub Region. Pass that Region explicitly:
    ```bash
-   npx cdk deploy --context stage=omni-domain \
+   CDK_DEFAULT_REGION=us-east-1 npx cdk deploy --context stage=omni-domain \
+     --context agenticai/defaultRegion=us-east-1 \
      --context agenticai/omniDomainName=<org-unique-name> \
      --context agenticai/identityCenterInstanceArn=arn:aws:sso:::instance/ssoins-...
    ```
-   Record the `OmniDomainId` output.
+   Record the `OmniDomainId` output. The sign-in URL is `https://<domain-id>.cloudwatch-omni.global.app.aws` (the domain id, not the name).
 3. **Audit account (hub Region).**
    ```bash
    npx cdk deploy --context stage=omni-hub \

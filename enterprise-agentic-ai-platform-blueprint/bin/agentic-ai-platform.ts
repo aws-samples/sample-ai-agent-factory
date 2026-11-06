@@ -445,7 +445,9 @@ switch (stage) {
     break;
   }
   case "omni-domain": {
-    // ADR-15 — CloudWatch Omni organization domain. Management account only.
+    // ADR-15 — CloudWatch Omni organization domain. Management account only, and
+    // in the Identity Center instance's PRIMARY Region (the service refuses any
+    // other Region); set CDK_DEFAULT_REGION / agenticai/defaultRegion accordingly.
     const domainName = app.node.tryGetContext("agenticai/omniDomainName");
     const identityCenterInstanceArn = app.node.tryGetContext(
       "agenticai/identityCenterInstanceArn",
