@@ -41,6 +41,8 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 import datetime as dt
 import json
 import sys
@@ -48,7 +50,11 @@ import time
 from typing import Any
 
 import boto3
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from botocore.exceptions import ClientError
+
+import omni_live_gates_ext as ext
 
 TERMINAL = ("Complete", "COMPLETE", "Failed", "FAILED", "Cancelled", "CANCELLED", "Timeout", "TIMEOUT")
 # The blueprint's default destination pattern (OmniCentralizationRuleConstruct). Note that a source
@@ -259,6 +265,20 @@ def run_gates(a: argparse.Namespace) -> dict[str, Any]:
         gates.append({"id": "G7-isolation", "ok": rule_read["denied"] and copy_read["denied"],
                       "memberReadsOrganizationRule": rule_read, "memberReadsHubCopy": copy_read})
 
+    # ---- second set (G8-G11), each only when its flags are given
+    if a.option_a_config_id:
+        gates.append(ext.gate_option_a(hub_logs, a.option_a_config_id, since_ms))
+    if a.metrics_function_name:
+        gates.append(ext.gate_metrics_centralized(client(a.hub_profile, region, "cloudwatch"), a.metrics_function_name, a.cell_account))
+    if a.hub_space_key_arn:
+        gates.append(ext.gate_cmk_fail_closed(hub_logs, client(a.hub_profile, region, "kms"), a.hub_key_arn, a.hub_space_key_arn,
+                                              "/agenticai/omni-validation/cmk-twin"))
+    if a.fail_verdict_session_id:
+        gates.append(ext.gate_live_fail_verdict(
+            client(a.cell_profile, region, "lambda"), cell_logs, client(a.cell_profile, region, "bedrock-agentcore"),
+            a.cell_evaluator_function, a.cell_evaluator_id, a.fail_verdict_session_id,
+            ["aws/spans", a.agent_log_group], int(time.time() - a.since_minutes * 60)))
+
     return {"ranAt": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "region": region,
             "hub": suffix(hub_account), "sinceMinutes": a.since_minutes, "gates": gates, "ok": all(g["ok"] for g in gates)}
 
@@ -279,10 +299,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hub-key-arn", required=True)
     p.add_argument("--online-config-id", required=True)
     p.add_argument("--since-minutes", type=int, default=120)
+    p.add_argument("--option-a-config-id", help="G8: hub (option A) online evaluation config id.")
+    p.add_argument("--metrics-function-name", help="G9: a Lambda that exists only in the cell (its metrics must appear in the hub).")
+    p.add_argument("--hub-space-key-arn", help="G10: the hub SPACE key (no Logs principal) used as the refused twin.")
+    p.add_argument("--fail-verdict-session-id", help="G11: a live session id to evaluate on demand with a tightened budget.")
+    p.add_argument("--cell-evaluator-id", help="G11: the cell policy evaluator id.")
+    p.add_argument("--cell-evaluator-function", default="cloudwatchCodeEvaluator-omni-validation", help="G11: the evaluator Lambda name.")
     p.add_argument("--out")
     args = p.parse_args(argv)
     if args.platform_profile and not args.platform_account:
         p.error("--platform-account is required with --platform-profile")
+    if args.fail_verdict_session_id and not args.cell_evaluator_id:
+        p.error("--cell-evaluator-id is required with --fail-verdict-session-id")
     return args
 
 
