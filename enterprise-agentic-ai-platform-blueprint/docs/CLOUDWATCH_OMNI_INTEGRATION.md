@@ -122,47 +122,64 @@ Positive test, adversarial twin and mutation fixture for each:
 10. Teardown: evaluations, grants, Dataset integration, space, rule, keys (scheduled), destination log groups removed; Transaction Search restored; zero residue.
 11. Cost: measured ingestion, first-copy and storage, scan allowance, evaluation charges for one representative cell.
 
-## 5. Live validation (2026-11-06, eu-west-1)
+## 5. Live validation (2026-11-06, eu-west-1, two runs)
 
-The hub model and option B were exercised end to end in a three-account organization: the management account as hub (adopt mode against a pre-existing account-level space), one Platform-role member and one Workstream-role member as sources. The harness lives in `scripts/omni/live/` and every step is a real API call; nothing is mocked.
+The hub model and both evaluation options were exercised end to end in a three-account organization (management, one Platform-role member, one Workstream-role member). The harness lives in `scripts/omni/live/`; every step is a real API call and every gate a real round-trip. Evidence carries account suffixes only.
+
+**Run 1 (adopt mode).** Hub = the management account, adopting a pre-existing account-level space (`agenticai/omniExistingSpaceId`); both members as sources. Gates G1-G7 passed: centralization of spans, blueprint log groups and option B results into hub-CMK-encrypted `/centralized/...` groups with propagated allocation tags, rule `Healthy`, an Omni telemetry query over the hub Dataset grouped by source account, a second source account, member-account isolation (`AccessDeniedException` on the rule and on the hub copies), option B scoring a real agent session `PASS` 1.0.
+
+**Run 2 (organization domain, the blueprint's placement).** The account-level domain was deleted (one domain per organization), the `omni-domain` stage deployed in the management account's Identity Center primary Region (us-east-1), and the `omni-hub` stage in DEFAULT mode in the Platform member registered as `observabilityadmin` delegated administrator, standing in for the Audit account; the Workstream member as source.
 
 ```bash
-# hub account (management or delegated administrator)
-python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 --profile <hub> centralization ensure-service-linked-roles
-npx cdk deploy --profile <hub> -c stage=omni-hub -c agenticai/omniHubAccountId=<hub> -c agenticai/omniDomainId=d-... \
-  -c agenticai/omniExistingSpaceId=<space uuid> -c agenticai/organizationId=o-... \
-  -c "agenticai/omniSourceScope=AccountId IN ('<platform>','<workstream>')" -c agenticai/omniSourceRegions=eu-west-1 \
+# management account: trusted access, service-linked roles, organization domain (Identity Center primary Region)
+python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 --profile <mgmt> centralization ensure-service-linked-roles
+CDK_DEFAULT_REGION=us-east-1 npx cdk deploy --profile <mgmt> -c stage=omni-domain -c agenticai/defaultRegion=us-east-1 \
+  -c agenticai/omniDomainName=<name> -c agenticai/identityCenterInstanceArn=arn:aws:sso:::instance/ssoins-... \
+  -c agenticai/omniSynthesizer=cli-credentials AgenticAI-Management-OmniDomainStack
+aws organizations register-delegated-administrator --account-id <audit> --service-principal observabilityadmin.amazonaws.com
+
+# audit (hub) account: space + roles + keys + Transaction Search + rule, then the two post-deploy operations
+python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 --profile <audit> centralization ensure-service-linked-roles
+npx cdk deploy --profile <audit> -c stage=omni-hub -c agenticai/omniHubAccountId=<audit> -c agenticai/omniDomainId=<OmniDomainId> \
+  -c agenticai/organizationId=o-... -c "agenticai/omniSourceScope=AccountId IN ('<workstream>')" -c agenticai/omniSourceRegions=eu-west-1 \
   -c agenticai/omniRetainKeys=false -c agenticai/omniSynthesizer=cli-credentials AgenticAI-Omni-HubStack-eu-west-1
+python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 --profile <audit> dataset-integration create --role-arn <OmniDatasetIntegrationRoleArn>
+python3 scripts/omni/omni_space_bootstrap.py --region eu-west-1 --profile <audit> access-grants apply --domain-id <id> --space-id <id> --grants-file grants.json
 
 # workstream cell: Transaction Search opt-in, policy code evaluator, execution role, online evaluation (option B)
-npx cdk deploy --profile <cell> --app "npx ts-node -r tsconfig-paths/register scripts/omni/live/cell_validation_app.ts" \
-  -c account=<workstream> -c region=eu-west-1 AgenticAI-OmniValidation-Cell
+npx cdk deploy --profile <cell> --app "npx ts-node -r tsconfig-paths/register scripts/omni/live/cell_validation_app.ts" -c account=<workstream> -c region=eu-west-1 AgenticAI-OmniValidation-Cell
+AGENT_PYTHON=<python with strands-agents + aws-opentelemetry-distro> bash scripts/omni/live/run_validation_agent.sh --profile <cell> --region eu-west-1 --log-group /agenticai/omni-validation/omni-validation-agent --rounds 2
 
-# a real Strands agent (Amazon Nova Micro, two tools, one adversarial turn) instrumented with ADOT, run anywhere
-AGENT_PYTHON=<python with strands-agents + aws-opentelemetry-distro> bash scripts/omni/live/run_validation_agent.sh \
-  --profile <cell> --region eu-west-1 --log-group /agenticai/omni-validation/omni-validation-agent --rounds 2
-
-# the gates (evidence carries account suffixes only)
-python3 scripts/omni/live/omni_live_gates.py --region eu-west-1 --hub-profile <hub> --cell-profile <cell> \
-  --platform-profile <platform> --cell-account <workstream> --platform-account <platform> \
-  --hub-key-arn <OmniCentralizedLogsKeyArn output> --online-config-id <OnlineEvaluationConfigId output> --out omni-gates.json
+# option A: an online evaluation inside the hub space over the CENTRALIZED groups, with the space's evaluation role
+#   (bedrock-agentcore-control CreateOnlineEvaluationConfig, enableOnCreate=true, Builtin.Refusal + Builtin.Helpfulness)
+# gates
+python3 scripts/omni/live/omni_live_gates.py --region eu-west-1 --hub-profile <audit> --cell-profile <cell> --cell-account <workstream> \
+  --hub-key-arn <OmniCentralizedLogsKeyArn> --online-config-id <cell config> --option-a-config-id <hub config> \
+  --metrics-function-name cloudwatchCodeEvaluator-omni-validation --hub-space-key-arn <space key> \
+  --fail-verdict-session-id <session> --cell-evaluator-id <PolicyEvaluatorId> --out omni-gates.json
 ```
 
-What passed, with the figures from the run:
+Run 2 results (all nine gates pass):
 
 | Gate | Result |
 | --- | --- |
-| G1 cell telemetry | 200 spans for the validation service in the cell's `aws/spans` (`gen_ai.*`, `session.id`, `aws.service.type=gen_ai_agent`), 20 structured turn events in `/agenticai/omni-validation/...` |
-| G2 hub copies | both destination groups created by the rule in the hub, 200 and 20 events copied, every group encrypted under the hub CMK, the five allocation tags propagated to the copy of the tagged source group (`TagPropagationStatus: Healthy`) |
-| G3 rule | `RuleHealth: Healthy` on `agenticai-fleet-eu-west-1`; the live rule carries `SourceMetricsConfiguration`, `EncryptionScope: NEW_DESTINATION_LOG_GROUPS` and the tag-propagation role |
-| G4 Omni Dataset | an Omni telemetry query (`SELECT @aws.account, @logGroupName, COUNT(*) FROM default WHERE @timestamp BETWEEN ... AND @logGroupName LIKE '/centralized/%'`) over the hub Dataset returned rows for both source accounts and none for the hub itself |
-| G5 option B | the AgentCore online evaluation sampled the agent's traces, invoked the model-free policy code evaluator (Lambda `cloudwatchCodeEvaluator-omni-validation`) and wrote one result record per trace to `/aws/bedrock-agentcore/evaluations/results/<config id>`; the result group was itself centralized into the hub. The first cycles scored `error.type=MISSING_OUTPUT_CONTENT` because the evaluator read span attributes only (§3); after the fix the on-demand `Evaluate` API scored all four traces of a session `PASS` (1.0), the adversarial turn included because the agent refused, and the online configuration scored the next session the same way |
-| G6 second source | three probe events written to `/agenticai/omni-validation/platform-probe` in the Platform member appeared under `/centralized/<platform>/eu-west-1/...` within one minute |
-| G7 isolation | from the Platform member: `GetCentralizationRuleForOrganization` -> HTTP 403 `AccessDeniedException`; `FilterLogEvents` on the hub's centralized span group -> `AccessDeniedException` |
+| G1 cell telemetry | 200 spans for the validation agent (Amazon Nova Micro, two tools, one adversarial turn) in the cell's `aws/spans`, turn events in `/agenticai/omni-validation/...` |
+| G2 hub copies | both destination groups created by the rule, events copied, encrypted under the hub's centralized-logs CMK, allocation tags propagated (`TagPropagationStatus: Healthy`) |
+| G3 rule | `RuleHealth: Healthy`, created by the delegated administrator, destination = hub |
+| G4 Omni Dataset | an Omni telemetry query over the hub Dataset returned the centralized rows keyed by the source account |
+| G5 option B | the cell's online evaluation scored the session 8x `PASS` 1.0 through the code-based policy evaluator; the result group was itself centralized |
+| G8 option A | the online evaluation created **in the hub space** (space evaluation role, centralized groups as data source) scored the same live session: `Builtin.Refusal` Yes (adversarial turn) / No, `Builtin.Helpfulness` Very Helpful 0.83 / Neutral 0.5 |
+| G9 metrics | the cell-only evaluator Lambda's `AWS/Lambda` metrics are listed in the hub (10 metrics) with the source in `:@aws.account` / `:@aws.region` dimensions |
+| G10 CMK fail-closed | `AssociateKmsKey` with the space key (no Logs principal) refused `AccessDeniedException`; with the centralized-logs key accepted; key tagged `LogsManaged=true`, rotation on |
+| G11 live FAIL verdict | with `POLICY_MAX_OUTPUT_CHARS=10` the evaluator returned `FAIL` 0.0 (`bounded_output`) on a live trace through the on-demand `Evaluate` API; `PASS` 1.0 again after the budget was restored |
 
-Not covered by this run, and still outside the support envelope: option A (an online evaluation created inside the space; the pre-existing account-level domain in the test organization blocked the organization domain), grant isolation through Identity Center principals (the adopted space signs in through IAM), the CMK fail-closed and SCP gates, metrics centralization inspection, a `FAIL` verdict from the policy evaluator on live traffic (covered by its unit tests only), and cost measurement.
+Also proven in run 2: `GetSpaceCredentialsForOrganization` (SPACE_OPERATION) from the management account returns `CloudWatchOmniOperatorRole` credentials that read the centralized groups, once the operator role carries the documented trust (§6).
 
-Teardown order used: delete `AgenticAI-OmniValidation-Cell` (removes the online evaluation, evaluator, Lambda, role and flips Transaction Search back off), delete `AgenticAI-Omni-HubStack-eu-west-1` (rule, tag-propagation role, CMK scheduled for deletion), delete the `/centralized/...` destination groups and the Platform probe group by hand (the rule never deletes what it created), restore the Transaction Search indexing baseline, and remove the two service-linked roles only if nothing else in the account uses centralization.
+Findings that changed the blueprint during run 2 (all committed with tests): the organization domain must live in the Identity Center primary Region; the management account cannot host a space; `AWS::XRay::TransactionSearchConfig` needs the X-Ray CloudWatch Logs resource policy first (`TransactionSearchConstruct`); the operator role trust must be `aws:SourceAccount` only with the four `sts:*` actions; IAM principals are granted by ARN, not through `SearchPrincipals`; centralized metrics are hub-owned and visible only with `IncludeLinkedAccounts=True`.
+
+Not covered: Identity Center user/group grants (the validation signed in through IAM), SCP denials, cost measurement, a backup Region.
+
+Teardown order (zero residue reached, verified with a three-account inventory): delete the hub online evaluation (it holds the stack's evaluation role), destroy the cell stack (Transaction Search reverts to the cell's prior state by itself), delete the script-created grant and the Dataset integration, destroy the hub stack (space, rule, roles, keys scheduled for deletion), restore the hub account's indexing rule (`UpdateIndexingRule` to its baseline), destroy the domain stack (us-east-1), delete the `/centralized/...` and evaluation result log groups the services created, deregister the delegated administrator, disable trusted access, delete the service-linked roles the run created.
 
 ## 6. Known limits (2026-11)
 
