@@ -530,6 +530,27 @@ switch (stage) {
     if (existingSpaceId !== undefined && typeof existingSpaceId !== "string") {
       throw new Error("Context agenticai/omniExistingSpaceId must be the space id (UUID) as a string.");
     }
+    // Golden-dataset gate (docs section 3.1): the workload pipeline evaluation
+    // role ARN(s) allowed to assume the hub runner role, and the cell accounts
+    // whose centralized copies it may read. Comma-separated strings.
+    const readList = (key: string): string[] | undefined => {
+      const raw = app.node.tryGetContext(key);
+      if (raw === undefined) return undefined;
+      const values = Array.isArray(raw)
+        ? raw.map(String)
+        : String(raw).split(",").map((v) => v.trim()).filter(Boolean);
+      if (values.length === 0) {
+        throw new Error(`Context ${key} must be a non-empty comma-separated list.`);
+      }
+      return values;
+    };
+    const goldenGateRunnerPrincipalArns = readList("agenticai/omniGoldenGateRunnerPrincipalArns");
+    const goldenGateSourceAccountIds = readList("agenticai/omniGoldenGateSourceAccountIds");
+    if (goldenGateSourceAccountIds && !goldenGateRunnerPrincipalArns) {
+      throw new Error(
+        "Context agenticai/omniGoldenGateSourceAccountIds needs agenticai/omniGoldenGateRunnerPrincipalArns (the pipeline roles allowed to assume the runner).",
+      );
+    }
     new OmniHubStack(app, `AgenticAI-Omni-HubStack-${deploymentRegion()}`, {
       env: { account: hubAccount, region: deploymentRegion() },
       synthesizer: omniSynthesizer(),
@@ -553,6 +574,12 @@ switch (stage) {
         retainKeys === false || retainKeys === "false"
           ? RemovalPolicy.DESTROY
           : RemovalPolicy.RETAIN,
+      goldenGate: goldenGateRunnerPrincipalArns
+        ? {
+            runnerPrincipalArns: goldenGateRunnerPrincipalArns,
+            sourceAccountIds: goldenGateSourceAccountIds,
+          }
+        : undefined,
       tags: omniAllocationTags(),
     });
     break;

@@ -208,6 +208,41 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
     expect(() => new OmniHubStack(new App(), "C", { ...base, existingSpaceId: "not-a-uuid" })).toThrow(/must be a space id/);
   });
 
+  it("creates the golden-gate runner role only when pipeline principals are named, in both modes, scoped to the named cells", () => {
+    const pipelineRole = "arn:aws:iam::111111111111:role/AgenticAI-acme-EvaluationGateRole";
+    const template = Template.fromStack(
+      new OmniHubStack(new App(), "HubGate", {
+        env: { account: HUB, region: REGION },
+        domainId: "d-1a2b3c4d5e",
+        keyRemovalPolicy: RemovalPolicy.DESTROY,
+        goldenGate: { runnerPrincipalArns: [pipelineRole], sourceAccountIds: ["444444444444"] },
+        tags: TAGS,
+      }),
+    );
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: `AgenticAIGoldenGateRunner-${REGION}`,
+      AssumeRolePolicyDocument: {
+        Statement: [Match.objectLike({ Condition: { ArnEquals: { "aws:PrincipalArn": [pipelineRole] } } })],
+      },
+    });
+    const text = JSON.stringify(template.toJSON());
+    expect(text).toContain("log-group:/centralized/444444444444/*");
+    expect(text).toContain("OmniGoldenGateRunnerRoleArn");
+    // Adopt mode: the runner still exists, keyed to the stack's own centralized-logs key.
+    const adoptTemplate = Template.fromStack(
+      new OmniHubStack(new App(), "AdoptHubGate", {
+        env: { account: HUB, region: REGION },
+        domainId: "d-1a2b3c4d5e",
+        existingSpaceId: "2e98b6d1-0ebb-4359-a608-12a1147dc089",
+        goldenGate: { runnerPrincipalArns: [pipelineRole] },
+      }),
+    );
+    adoptTemplate.resourceCountIs("AWS::IAM::Role", 1);
+    expect(JSON.stringify(adoptTemplate.toJSON())).toContain("log-group:/centralized/*");
+    // Default: no runner role.
+    expect(JSON.stringify(hubTemplate().toJSON())).not.toContain("AgenticAIGoldenGateRunner");
+  });
+
   it("keeps judge inference off by default (ADR-16)", () => {
     const t = hubTemplate();
     const roles = Object.values(t.findResources("AWS::IAM::Role")).map((r) => r.Properties as any);

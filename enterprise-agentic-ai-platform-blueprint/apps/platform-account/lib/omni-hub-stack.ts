@@ -38,6 +38,7 @@ import { Construct } from "constructs";
 import {
   OmniCentralizationRuleConstruct,
   OmniCentralizedLogsKeyConstruct,
+  OmniGoldenGateRunnerRoleConstruct,
   OmniHubSpaceConstruct,
 } from "@agenticai/omni";
 
@@ -82,6 +83,20 @@ export interface OmniHubStackProps extends StackProps {
   readonly enableTransactionSearch?: boolean;
   /** Keep keys when the stack is deleted. Default RETAIN; use DESTROY for throwaway validation. */
   readonly keyRemovalPolicy?: RemovalPolicy;
+  /**
+   * Golden-dataset promotion gate (`scripts/golden_dataset_gate.py`, docs
+   * section 3.1): the workload pipeline evaluation role ARN(s) allowed to
+   * assume the hub's `AgenticAIGoldenGateRunner-<region>` role, which reads
+   * the dataset version and the candidate's centralized copies and runs the
+   * batch evaluation. Omit to create no runner role.
+   */
+  readonly goldenGate?: {
+    readonly runnerPrincipalArns: readonly string[];
+    /** Cell account ids whose centralized copies the runner may query. Default: all. */
+    readonly sourceAccountIds?: readonly string[];
+    readonly resultLogGroupPrefix?: string;
+    readonly metricsNamespace?: string;
+  };
   readonly tags?: Record<string, string>;
 }
 
@@ -93,6 +108,8 @@ export class OmniHubStack extends Stack {
   /** Destination CMK for every log group the centralization rule creates. */
   readonly centralizedLogsKey: Key;
   readonly centralization?: OmniCentralizationRuleConstruct;
+  /** Hub role the workload pipeline assumes for the golden-dataset gate. Undefined when `goldenGate` is omitted. */
+  readonly goldenGateRunner?: OmniGoldenGateRunnerRoleConstruct;
 
   constructor(scope: Construct, id: string, props: OmniHubStackProps) {
     const {
@@ -106,6 +123,7 @@ export class OmniHubStack extends Stack {
       transactionSearchIndexingPercentage,
       enableTransactionSearch,
       keyRemovalPolicy,
+      goldenGate,
       tags,
       ...stackProps
     } = props;
@@ -177,6 +195,17 @@ export class OmniHubStack extends Stack {
         },
       );
       this.centralization.node.addDependency(this.hub ?? this.centralizedLogsKey);
+    }
+
+    if (goldenGate) {
+      this.goldenGateRunner = new OmniGoldenGateRunnerRoleConstruct(this, "GoldenGateRunner", {
+        trustedPrincipalArns: goldenGate.runnerPrincipalArns,
+        centralizedLogsKey: this.centralizedLogsKey,
+        sourceAccountIds: goldenGate.sourceAccountIds,
+        resultLogGroupPrefix: goldenGate.resultLogGroupPrefix,
+        metricsNamespace: goldenGate.metricsNamespace,
+        tags,
+      });
     }
   }
 }
