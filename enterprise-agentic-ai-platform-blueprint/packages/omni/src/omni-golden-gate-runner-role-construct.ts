@@ -128,17 +128,17 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
             new PolicyStatement({
               sid: 'BatchEvaluationLifecycle',
               effect: Effect.ALLOW,
-              // The batch-evaluation resource has no documented ARN format for
-              // IAM scoping (the service reports `batch-evaluate/<name>-<n>`);
-              // the actions are pinned to this Region instead.
+              // The documented minimum policy for batch evaluations scopes these
+              // actions to `batch-evaluate/*` in the account and Region
+              // (AgentCore developer guide, batch evaluation prerequisites).
               actions: [
                 'bedrock-agentcore:StartBatchEvaluation',
                 'bedrock-agentcore:GetBatchEvaluation',
                 'bedrock-agentcore:ListBatchEvaluations',
+                'bedrock-agentcore:StopBatchEvaluation',
                 'bedrock-agentcore:DeleteBatchEvaluation',
               ],
-              resources: ['*'],
-              conditions: { StringEquals: { 'aws:RequestedRegion': stack.region } },
+              resources: [`arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:batch-evaluate/*`],
             }),
             new PolicyStatement({
               sid: 'SourceCopiesQuery',
@@ -192,7 +192,7 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs; batch-evaluation actions have no documented resource ARN and are pinned to the Region; logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeQueries have no resource type; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
+            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs and batch-evaluation actions to its batch-evaluate/* ARNs (the documented minimum policy); logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeQueries have no resource type; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
         },
         {
           id: 'NIST.800.53.R5-IAMNoInlinePolicy',

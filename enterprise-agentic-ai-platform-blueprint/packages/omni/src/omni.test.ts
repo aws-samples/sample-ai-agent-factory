@@ -420,9 +420,11 @@ describe('OmniGoldenGateRunnerRoleConstruct', () => {
     const statements = runnerPolicy(synthRunner({ metricsNamespace: 'agenticai/acme-gate' }));
     const batch = statements.find((s) => s.Sid === 'BatchEvaluationLifecycle')!;
     expect(batch.Action).toEqual(
-      expect.arrayContaining(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:GetBatchEvaluation']),
+      expect.arrayContaining(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:GetBatchEvaluation', 'bedrock-agentcore:StopBatchEvaluation']),
     );
-    expect(batch.Condition).toEqual({ StringEquals: { 'aws:RequestedRegion': 'eu-west-1' } });
+    // The documented minimum policy scopes batch evaluations to batch-evaluate/* in the account and Region.
+    expect(JSON.stringify(batch.Resource)).toContain(':bedrock-agentcore:eu-west-1:333333333333:batch-evaluate/*');
+    expect(batch.Resource).not.toBe('*');
     const metrics = statements.find((s) => s.Sid === 'ResultMetrics')!;
     expect(metrics.Condition).toEqual({ StringEquals: { 'cloudwatch:namespace': 'agenticai/acme-gate' } });
     const kms = statements.find((s) => s.Sid === 'HubKeyThroughLogs')!;
