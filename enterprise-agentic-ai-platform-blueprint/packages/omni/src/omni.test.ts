@@ -311,13 +311,16 @@ describe('TransactionSearchConstruct', () => {
     t.resourceCountIs('AWS::XRay::TransactionSearchConfig', 1);
     const policy = Object.values(t.findResources('AWS::Logs::ResourcePolicy'))[0].Properties as any;
     expect(policy.PolicyName).toBe('AgenticAI-TransactionSearch-Ts');
-    // The partition is a deploy-time token, so the document renders as Fn::Join; assert on its text.
-    const doc = JSON.stringify(policy.PolicyDocument);
-    expect(doc).toContain('"Service":"xray.amazonaws.com"');
-    expect(doc).toContain('logs:PutLogEvents');
-    expect(doc).toContain(':logs:eu-west-1:222222222222:log-group:aws/spans:*');
-    expect(doc).toContain(':logs:eu-west-1:222222222222:log-group:/aws/application-signals/data:*');
-    expect(doc).toContain('"aws:SourceAccount":"222222222222"');
+    // The partition is a deploy-time token, so the document renders as Fn::Join; resolve it.
+    const parts = policy.PolicyDocument['Fn::Join'][1] as unknown[];
+    const doc = JSON.parse(parts.map((p) => (typeof p === 'string' ? p : 'aws')).join(''));
+    expect(doc.Statement[0].Principal).toEqual({ Service: 'xray.amazonaws.com' });
+    expect(doc.Statement[0].Action).toBe('logs:PutLogEvents');
+    expect(doc.Statement[0].Resource).toEqual([
+      'arn:aws:logs:eu-west-1:222222222222:log-group:aws/spans:*',
+      'arn:aws:logs:eu-west-1:222222222222:log-group:/aws/application-signals/data:*',
+    ]);
+    expect(doc.Statement[0].Condition.StringEquals['aws:SourceAccount']).toBe('222222222222');
     const config = Object.values(t.findResources('AWS::XRay::TransactionSearchConfig'))[0] as any;
     expect(config.Properties.IndexingPercentage).toBe(5);
     expect(config.DependsOn).toEqual(expect.arrayContaining([expect.stringMatching(/XRayLogsPolicy/)]));
