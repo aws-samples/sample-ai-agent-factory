@@ -43,6 +43,10 @@ export interface OrgStackProps extends StackProps {
    */
   readonly approvedAgentCoreVpceIds?: readonly string[];
   readonly approvedBedrockVpceIds?: readonly string[];
+  /** Emit SCP-13 (CloudWatch Omni telemetry lockdown, ADR-15). Default false. */
+  readonly enableOmniTelemetryLockdown?: boolean;
+  /** Exact break-glass role names exempted by SCP-13. */
+  readonly omniBreakGlassRoleNames?: readonly string[];
 }
 
 export class OrgStack extends Stack {
@@ -60,6 +64,8 @@ export class OrgStack extends Stack {
       approvedGuardrailIds: props.approvedGuardrailIds,
       approvedAgentCoreVpceIds: props.approvedAgentCoreVpceIds,
       approvedBedrockVpceIds: props.approvedBedrockVpceIds,
+      enableOmniTelemetryLockdown: props.enableOmniTelemetryLockdown,
+      omniBreakGlassRoleNames: props.omniBreakGlassRoleNames,
     });
   }
 }

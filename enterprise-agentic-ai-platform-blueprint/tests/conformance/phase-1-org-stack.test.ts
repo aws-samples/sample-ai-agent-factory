@@ -168,5 +168,49 @@ describe('Phase 1 — SCP-01 model allow-list comes from the SSOT', () => {
   });
 });
 
-// Silence Jest unused-import lint for Match; re-exported for future phases.
-void Match;
+describe('Phase 1 — SCP-13 CloudWatch Omni telemetry lockdown (ADR-15)', () => {
+  function synthWithOmni() {
+    const app = new App();
+    const stack = new OrgStack(app, 'TestOrgStackOmni', {
+      env: { account: '222222222222', region: 'us-west-2' },
+      platformGuardrailAdminRoleArn: ADMIN_ROLE,
+      approvedAgentCoreVpceIds: ['vpce-0a1b2c3d4e5f60001'],
+      approvedBedrockVpceIds: ['vpce-0a1b2c3d4e5f60002'],
+      enableOmniTelemetryLockdown: true,
+      omniBreakGlassRoleNames: ['AgenticAI-ObservabilityAdmin'],
+    });
+    return Template.fromStack(stack);
+  }
+
+  it('is absent by default and adds exactly one policy when enabled', () => {
+    const names = (t: Template) =>
+      Object.values(t.findResources('AWS::Organizations::Policy')).map(
+        (r: Record<string, unknown>) => (r.Properties as Record<string, unknown>).Name as string,
+      );
+    expect(names(synth())).not.toContain('AgenticAI-SCP-13-OmniTelemetryLockdown');
+    const t = synthWithOmni();
+    t.resourceCountIs('AWS::Organizations::Policy', 9);
+    expect(names(t)).toContain('AgenticAI-SCP-13-OmniTelemetryLockdown');
+  });
+
+  it('attaches SCP-13 to the same OU targets as the rest of the set and carries the break-glass exemption', () => {
+    const t = synthWithOmni();
+    t.hasResourceProperties('AWS::Organizations::Policy', {
+      Name: 'AgenticAI-SCP-13-OmniTelemetryLockdown',
+      Type: 'SERVICE_CONTROL_POLICY',
+      Content: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'DenyTransactionSearchTamperingExceptPipeline',
+            Action: Match.arrayWith(['xray:UpdateTraceSegmentDestination']),
+            Condition: Match.objectLike({
+              ArnNotLike: {
+                'aws:PrincipalArn': Match.arrayWith(['arn:aws:iam::*:role/AgenticAI-ObservabilityAdmin']),
+              },
+            }),
+          }),
+        ]),
+      }),
+    });
+  });
+});

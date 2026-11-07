@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/omni",
+  "version": "0.1.0",
+  "description": "Amazon CloudWatch Omni hub model: organization domain, organization centralization rule, fleet space (operator/dataset/evaluation roles, CMK, Transaction Search) and Omni dashboards. ADR-15..19.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

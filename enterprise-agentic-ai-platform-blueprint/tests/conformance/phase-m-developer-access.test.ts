@@ -37,6 +37,7 @@ interface SynthOpts {
   readonly groupAssignments?: Partial<Record<'Developer' | 'ReadOnly' | 'Approver', string>>;
   readonly approverPipelineNames?: readonly string[];
   readonly platformAccountId?: string;
+  readonly devTelemetryAccountIds?: readonly string[];
 }
 
 function synth(opts: SynthOpts = {}): { template: Template; stack: Stack } {
@@ -51,6 +52,7 @@ function synth(opts: SynthOpts = {}): { template: Template; stack: Stack } {
     groupAssignments: opts.groupAssignments,
     approverPipelineNames: opts.approverPipelineNames,
     platformAccountId: opts.platformAccountId ?? PLATFORM_ACCOUNT_ID,
+    devTelemetryAccountIds: opts.devTelemetryAccountIds,
   });
   return { template: Template.fromStack(stack), stack };
 }
@@ -150,6 +152,48 @@ describe('Phase M — WorkstreamPermissionSets synth-time validation', () => {
     expect(() =>
       synth({ groupAssignments: { Developer: 'not-a-guid' } }),
     ).toThrow(/group GUID/);
+  });
+
+  it('rejects a devTelemetryAccountIds entry that is not one of the workstream target accounts', () => {
+    expect(() => synth({ devTelemetryAccountIds: ['999999999999'] })).toThrow(/subset of targetAccountIds/);
+  });
+});
+
+describe('Phase M — CloudWatch Omni developer telemetry (GA developer loop)', () => {
+  function developerPolicy(opts: SynthOpts = {}): {
+    Statement: Array<{ Sid?: string; Action: string | string[]; Resource?: unknown; Condition?: unknown }>;
+  } {
+    const { template } = synth(opts);
+    const sets = template.findResources('AWS::SSO::PermissionSet');
+    const dev = Object.values(sets).find(
+      (r) => (r as { Properties: { Name: string } }).Properties.Name === 'AgenticAI-WS-Dev-acme',
+    ) as { Properties: { InlinePolicy: { Statement: never[] } } };
+    return dev.Properties.InlinePolicy as never;
+  }
+
+  it('the Developer permission set carries a dev-prefixed telemetry write pinned to the nonprod account', () => {
+    const policy = developerPolicy({ devTelemetryAccountIds: [WORKLOAD_NONPROD] });
+    const write = policy.Statement.find((s) => s.Sid === 'DeveloperTelemetryWrite');
+    const spans = policy.Statement.find((s) => s.Sid === 'DeveloperTelemetrySpans');
+    expect(write).toBeDefined();
+    expect(spans).toBeDefined();
+    expect(write!.Resource).toEqual(['arn:aws:logs:*:*:log-group:/agenticai/dev/acme/*']);
+    expect(write!.Condition).toEqual({ StringEquals: { 'aws:PrincipalAccount': [WORKLOAD_NONPROD] } });
+    expect(spans!.Condition).toEqual({ StringEquals: { 'aws:PrincipalAccount': [WORKLOAD_NONPROD] } });
+    // The prod account is a target of the same permission set and must not be in the condition.
+    expect(JSON.stringify(write!.Condition)).not.toContain(WORKLOAD_PROD);
+  });
+
+  it('ReadOnly and Approver permission sets never carry a telemetry write', () => {
+    const { template } = synth({ devTelemetryAccountIds: [WORKLOAD_NONPROD] });
+    const sets = template.findResources('AWS::SSO::PermissionSet');
+    for (const r of Object.values(sets)) {
+      const res = r as { Properties: { Name: string; InlinePolicy: { Statement: Array<{ Sid?: string }> } } };
+      if (res.Properties.Name === 'AgenticAI-WS-Dev-acme') continue;
+      const sids = res.Properties.InlinePolicy.Statement.map((s) => s.Sid);
+      expect(sids).not.toContain('DeveloperTelemetryWrite');
+      expect(sids).not.toContain('DeveloperTelemetrySpans');
+    }
   });
 });
 

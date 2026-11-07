@@ -8,7 +8,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { renderInlinePolicy } from './workstream-permission-sets';
+import { DEV_TELEMETRY_LOG_GROUP_PREFIX, renderInlinePolicy } from './workstream-permission-sets';
 
 interface PolicyDoc {
   readonly Version: string;
@@ -109,6 +109,117 @@ describe('renderInlinePolicy — Developer', () => {
     expect(actions).toContain('xray:Get*');
     expect(actions).toContain('cloudwatch:Get*');
     expect(actions).toContain('logs:FilterLogEvents');
+  });
+
+  // CloudWatch Omni GA developer loop: IDE / local-run telemetry into the
+  // nonprod cell, visible in the hub under the developer's account.
+  describe('DeveloperTelemetryWrite (CloudWatch Omni developer loop)', () => {
+    it('lets a developer write OTLP logs only under the workstream dev prefix, never a runtime group', () => {
+      const p = asPolicy(renderInlinePolicy('Developer', { workstreamId: 'acme' }));
+      const stmt = p.Statement.find((s) => s.Sid === 'DeveloperTelemetryWrite');
+      expect(stmt).toBeDefined();
+      expect(stmt!.Effect).toBe('Allow');
+      const actions = Array.isArray(stmt!.Action) ? stmt!.Action : [stmt!.Action];
+      expect(actions).toEqual(
+        expect.arrayContaining([
+          'logs:CreateLogGroup',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+          'logs:PutRetentionPolicy',
+        ]),
+      );
+      const resources = Array.isArray(stmt!.Resource) ? stmt!.Resource : [stmt!.Resource ?? ''];
+      expect(resources).toEqual([`arn:aws:logs:*:*:log-group:${DEV_TELEMETRY_LOG_GROUP_PREFIX}/acme/*`]);
+      // The runtime convention is /agenticai/<env>/<tenant>/<agent> with env in
+      // {nonprod, prod}; `dev` is a slot no deployed stack uses.
+      for (const r of resources) {
+        expect(r).not.toBe('*');
+        expect(r).not.toContain('/agenticai/nonprod');
+        expect(r).not.toContain('/agenticai/prod');
+        expect(r).toContain('/agenticai/dev/acme/');
+      }
+    });
+
+    it('never hands the developer a Logs delete, resource-policy or delivery verb', () => {
+      const p = asPolicy(renderInlinePolicy('Developer', { workstreamId: 'acme' }));
+      const allowActions = p.Statement.filter((s) => s.Effect === 'Allow').flatMap((s) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+      for (const forbidden of [
+        'logs:DeleteLogGroup',
+        'logs:DeleteLogStream',
+        'logs:Delete*',
+        'logs:PutResourcePolicy',
+        'logs:PutSubscriptionFilter',
+        'logs:CreateDelivery',
+        'logs:*',
+        'xray:UpdateTraceSegmentDestination',
+        'xray:UpdateIndexingRule',
+        'xray:*',
+      ]) {
+        expect(allowActions).not.toContain(forbidden);
+      }
+    });
+
+    it('grants span export (PutSpans / PutTraceSegments) in a separate statement because X-Ray has no resource scoping', () => {
+      const p = asPolicy(renderInlinePolicy('Developer', { workstreamId: 'acme' }));
+      const stmt = p.Statement.find((s) => s.Sid === 'DeveloperTelemetrySpans');
+      expect(stmt).toBeDefined();
+      const actions = Array.isArray(stmt!.Action) ? stmt!.Action : [stmt!.Action];
+      expect(actions).toEqual(
+        expect.arrayContaining(['xray:PutSpans', 'xray:PutTraceSegments', 'xray:PutTelemetryRecords']),
+      );
+      expect(actions).toHaveLength(3);
+      expect(stmt!.Resource).toBe('*');
+    });
+
+    it('pins both telemetry statements to the nonprod accounts with aws:PrincipalAccount when devTelemetryAccountIds is supplied', () => {
+      const p = asPolicy(
+        renderInlinePolicy('Developer', {
+          workstreamId: 'acme',
+          devTelemetryAccountIds: ['333333333333'],
+        }),
+      );
+      for (const sid of ['DeveloperTelemetryWrite', 'DeveloperTelemetrySpans']) {
+        const stmt = p.Statement.find((s) => s.Sid === sid);
+        expect(stmt!.Condition).toEqual({
+          StringEquals: { 'aws:PrincipalAccount': ['333333333333'] },
+        });
+      }
+    });
+
+    it('emits no account condition when devTelemetryAccountIds is omitted or empty', () => {
+      for (const opts of [{ workstreamId: 'acme' }, { workstreamId: 'acme', devTelemetryAccountIds: [] }]) {
+        const p = asPolicy(renderInlinePolicy('Developer', opts));
+        for (const sid of ['DeveloperTelemetryWrite', 'DeveloperTelemetrySpans']) {
+          const stmt = p.Statement.find((s) => s.Sid === sid);
+          expect(stmt).toBeDefined();
+          expect(stmt!.Condition).toBeUndefined();
+        }
+      }
+    });
+
+    it('falls back to a wildcard workstream slot (still under the dev prefix) when workstreamId is omitted', () => {
+      const p = asPolicy(renderInlinePolicy('Developer'));
+      const stmt = p.Statement.find((s) => s.Sid === 'DeveloperTelemetryWrite');
+      expect(stmt!.Resource).toEqual([`arn:aws:logs:*:*:log-group:${DEV_TELEMETRY_LOG_GROUP_PREFIX}/*/*`]);
+    });
+
+    it('is a Developer-only grant: ReadOnly and Approver personas get no telemetry write', () => {
+      for (const persona of ['ReadOnly', 'Approver'] as const) {
+        const p = asPolicy(
+          renderInlinePolicy(persona, { workstreamId: 'acme', approverPipelineNames: ['AgenticAI-acme-pipeline'] }),
+        );
+        expect(p.Statement.find((s) => s.Sid === 'DeveloperTelemetryWrite')).toBeUndefined();
+        expect(p.Statement.find((s) => s.Sid === 'DeveloperTelemetrySpans')).toBeUndefined();
+        const allowActions = p.Statement.filter((s) => s.Effect === 'Allow').flatMap((s) =>
+          Array.isArray(s.Action) ? s.Action : [s.Action],
+        );
+        expect(allowActions).not.toContain('logs:PutLogEvents');
+        expect(allowActions).not.toContain('xray:PutSpans');
+        expect(allowActions).not.toContain('xray:PutTraceSegments');
+      }
+    });
   });
 });
 

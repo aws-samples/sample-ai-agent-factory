@@ -62,7 +62,10 @@ import {
   type GatewayPolicyEngineMode,
 } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { D03WorkstreamRegistryRolesStack } from "../apps/workload-account/lib/d03-workstream-registry-roles-stack";
-import { D03WorkstreamRuntimeMemoryStack } from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
+import {
+  D03WorkstreamRuntimeMemoryStack,
+  type RuntimeTelemetryConfig,
+} from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { gatewayModelPrice } from "@agenticai/platform-baselines";
 import {
@@ -114,6 +117,8 @@ export interface WorkloadStageProps extends StageProps {
   readonly evaluationInvokerPrincipalArn?: string;
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
+  /** ADR-18 span content contract for the pipeline Runtime. */
+  readonly runtimeTelemetry?: RuntimeTelemetryConfig;
 }
 
 /** Platform inference inputs threaded into the generated-agent Runtime. */
@@ -182,6 +187,7 @@ export class WorkloadDeploymentStage extends Stage {
                 ? this.buildGeneratedAgentRuntimeConfig(props)
                 : undefined,
             evaluationInvokerPrincipalArn: props.evaluationInvokerPrincipalArn,
+            telemetry: props.runtimeTelemetry,
           },
         );
         this.runtimeMemoryStack.addDependency(this.gatewayStack);
@@ -264,6 +270,13 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
   readonly workloadProdAccountId: string;
   /** Regional Management/Governance OAM sink shared by distinct Workstream accounts. */
   readonly auditOamSinkArn?: string;
+  /**
+   * Enable X-Ray Transaction Search in every distinct Workstream account and
+   * Region (required for CloudWatch Omni traces and trace centralization).
+   * Opt-in, ADR-13/ADR-15. Default false.
+   */
+  readonly enableTransactionSearch?: boolean;
+  readonly transactionSearchIndexingPercentage?: number;
   readonly nonprodContext: GaRegistryConsumerContext;
   readonly prodContext: GaRegistryConsumerContext;
   readonly enablePipelineRuntimeMemory?: boolean;
@@ -323,6 +336,9 @@ export class WorkstreamRegistryRolesStage extends Stage {
               region: props.gatewayRegion,
             },
             sinkArn: auditOamSinkArn,
+            enableTransactionSearch: props.enableTransactionSearch,
+            transactionSearchIndexingPercentage:
+              props.transactionSearchIndexingPercentage,
             resourceTags: {
               applicationId: props.applicationId,
               agentId: props.agentId,
@@ -428,6 +444,11 @@ export interface WorkloadPipelineStackProps extends StackProps {
   /** Account-specific AZ names produced by read-only preflight. */
   readonly workloadProdAvailabilityZones: readonly string[];
   readonly auditOamSinkArn?: string;
+  /** Opt-in Transaction Search for every distinct Workstream account and Region (ADR-13/ADR-15). */
+  readonly enableTransactionSearch?: boolean;
+  readonly transactionSearchIndexingPercentage?: number;
+  /** ADR-18 span content contract for the pipeline Runtime (both environments). */
+  readonly runtimeTelemetry?: RuntimeTelemetryConfig;
   readonly notificationEmail?: string;
 
   /**
@@ -448,6 +469,41 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly canaryPercent?: number;
   /** Z7-B — canary soak duration (minutes); default 30. */
   readonly canarySoakMinutes?: number;
+
+  /**
+   * Golden-dataset promotion gate (docs/CLOUDWATCH_OMNI_INTEGRATION.md
+   * section 3.1). When set, a second mandatory gate runs after
+   * `EvaluationGate`: the candidate nonproduction Runtime is replayed against
+   * the named immutable dataset version (one fresh session per scenario) and
+   * batch-evaluated in the hub, over the centralized copies, with the version
+   * as ground truth; the same `EVAL_*` thresholds decide. Requires the
+   * generated-agent evaluation preconditions and a hub stack deployed with
+   * `agenticai/omniGoldenGateRunnerPrincipalArns` naming this pipeline's
+   * evaluation role.
+   */
+  readonly goldenDataset?: {
+    /** Dataset id in the hub account (`<name>-<10 chars>`). */
+    readonly datasetId: string;
+    /** Published, immutable version number. DRAFT is refused: a gate must name what it judged against. */
+    readonly datasetVersion: string;
+    /** Hub (Audit/Observability) account that hosts the dataset and the centralized copies. */
+    readonly hubAccountId: string;
+    /** Region of the hub stack. Default: the nonproduction Region. */
+    readonly hubRegion?: string;
+    /** Runner role name in the hub. Default `AgenticAIGoldenGateRunner-<hubRegion>`. */
+    readonly runnerRoleName?: string;
+    /** Trajectory matcher strictness. Default `Builtin.TrajectoryAnyOrderMatch`. */
+    readonly trajectoryEvaluator?:
+      | "Builtin.TrajectoryExactOrderMatch"
+      | "Builtin.TrajectoryInOrderMatch"
+      | "Builtin.TrajectoryAnyOrderMatch";
+    /**
+     * The hub centralized-logs CMK (`OmniCentralizedLogsKeyArn` output of the hub
+     * stack). When set, the gate creates its result group under this key before
+     * the service would create it unencrypted (observed live).
+     */
+    readonly resultsKmsKeyArn?: string;
+  };
 
   /**
    * `stage` context value the pipeline's own synth step passes to
@@ -701,11 +757,36 @@ export class WorkloadPipelineStack extends Stack {
             "Platform pipeline role that assumes only the nonproduction Workstream evaluation invoker.",
         })
       : undefined;
+    // Golden-dataset gate: validated here so a misconfigured pipeline fails at
+    // synth, not at the first promotion.
+    const golden = props.goldenDataset;
+    if (golden && !evaluationEnabled) {
+      throw new Error(
+        "WorkloadPipelineStack: goldenDataset requires the generated-agent evaluation (enablePipelineRuntimeMemory=true and agentImageVariant=generated-agent).",
+      );
+    }
+    if (golden) {
+      if (!/^[a-zA-Z0-9_-]{1,110}$/.test(golden.datasetId)) {
+        throw new Error(`WorkloadPipelineStack: goldenDataset.datasetId '${golden.datasetId}' is not a dataset id.`);
+      }
+      if (!/^\d+$/.test(golden.datasetVersion)) {
+        throw new Error(
+          `WorkloadPipelineStack: goldenDataset.datasetVersion must be a published version number, got '${golden.datasetVersion}' (DRAFT is mutable and cannot be a gate).`,
+        );
+      }
+      if (!/^\d{12}$/.test(golden.hubAccountId)) {
+        throw new Error("WorkloadPipelineStack: goldenDataset.hubAccountId must be a 12-digit account id.");
+      }
+    }
+    const goldenHubRegion = golden?.hubRegion ?? props.workloadNonprodEnv.region;
+    const goldenRunnerRoleArn = golden
+      ? `arn:aws:iam::${golden.hubAccountId}:role/${golden.runnerRoleName ?? `AgenticAIGoldenGateRunner-${goldenHubRegion}`}`
+      : "";
     if (evaluationRole) {
       evaluationRole.addToPolicy(
         new PolicyStatement({
           actions: ["sts:AssumeRole"],
-          resources: [evaluationInvokerArn],
+          resources: golden ? [evaluationInvokerArn, goldenRunnerRoleArn] : [evaluationInvokerArn],
         }),
       );
       NagSuppressions.addResourceSuppressions(evaluationRole, [
@@ -820,6 +901,9 @@ export class WorkloadPipelineStack extends Stack {
           workloadNonprodAccountId: props.workloadNonprodEnv.account,
           workloadProdAccountId: props.workloadProdEnv.account,
           auditOamSinkArn: props.auditOamSinkArn,
+          enableTransactionSearch: props.enableTransactionSearch,
+          transactionSearchIndexingPercentage:
+            props.transactionSearchIndexingPercentage,
           nonprodContext: props.gaRegistry.nonprod,
           prodContext: props.gaRegistry.prod,
           enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
@@ -878,6 +962,7 @@ export class WorkloadPipelineStack extends Stack {
         ? evaluationRoleArn
         : undefined,
       auditOamSinkArn: props.auditOamSinkArn,
+      runtimeTelemetry: props.runtimeTelemetry,
       notificationEmail: props.notificationEmail,
     });
     this.pipeline.addStage(nonprodStage);
@@ -898,6 +983,22 @@ export class WorkloadPipelineStack extends Stack {
           props.generatedAgentInference?.nonprod.modelId ?? "",
         )
       : undefined;
+
+    // One threshold contract for both promotion gates (scripts/evaluation_gate.py
+    // and scripts/golden_dataset_gate.py read the same EVAL_* variables).
+    const evalThresholdEnv: Record<string, string> = {
+      EVAL_REGRESSION_PASS_MIN_PCT: String(props.evalRegressionPassRate ?? 95),
+      EVAL_GUARDRAIL_VIOLATION_MAX_PCT: String(
+        props.evalGuardrailViolationRate ?? 1,
+      ),
+      EVAL_QUALITY_MIN_PCT: String(props.evalQualityScoreMin ?? 85),
+      EVAL_TOOL_SUCCESS_MIN_PCT: String(props.evalToolSuccessRate ?? 98),
+      EVAL_FIRST_TOKEN_P99_MAX_MS: String(props.evalFirstTokenP99Ms ?? 1500),
+      EVAL_REFUSAL_RATE_MIN_PCT: String(props.evalRefusalRateMin ?? 99),
+      EVAL_COST_PER_PROMPT_MAX_USD: String(
+        props.evalCostPerPromptMaxUsd ?? 0.05,
+      ),
+    };
 
     // Evaluation gate — CodeBuild step running the regression suite against
     // the just-deployed non-prod agent Runtime. Fails if any threshold is breached.
@@ -939,21 +1040,7 @@ export class WorkloadPipelineStack extends Stack {
         version: "0.2",
         env: {
           variables: {
-            EVAL_REGRESSION_PASS_MIN_PCT: String(
-              props.evalRegressionPassRate ?? 95,
-            ),
-            EVAL_GUARDRAIL_VIOLATION_MAX_PCT: String(
-              props.evalGuardrailViolationRate ?? 1,
-            ),
-            EVAL_QUALITY_MIN_PCT: String(props.evalQualityScoreMin ?? 85),
-            EVAL_TOOL_SUCCESS_MIN_PCT: String(props.evalToolSuccessRate ?? 98),
-            EVAL_FIRST_TOKEN_P99_MAX_MS: String(
-              props.evalFirstTokenP99Ms ?? 1500,
-            ),
-            EVAL_REFUSAL_RATE_MIN_PCT: String(props.evalRefusalRateMin ?? 99),
-            EVAL_COST_PER_PROMPT_MAX_USD: String(
-              props.evalCostPerPromptMaxUsd ?? 0.05,
-            ),
+            ...evalThresholdEnv,
             EVAL_TENANT: props.tenantId,
             EVAL_AGENT: props.agentId,
             EVAL_ENV: "nonprod",
@@ -973,6 +1060,77 @@ export class WorkloadPipelineStack extends Stack {
       },
       timeout: Duration.minutes(30),
     });
+
+    // Golden-dataset gate (docs section 3.1). Three invocations of one script,
+    // each under the role that owns its side: export the dataset version and
+    // run the batch evaluation under the hub runner role, replay the candidate
+    // under the cell's evaluation invoker role. The candidate's telemetry is
+    // read from the HUB's centralized copies (never from the cell directly),
+    // so the gate judges exactly what the fleet view shows.
+    const goldenStep =
+      golden && evaluationRuntimeStack
+        ? new CodeBuildStep("GoldenDatasetGate", {
+            commands: [
+              "set -eu",
+              enterBlueprintSourceDirectory(),
+              `echo "Golden-dataset gate: dataset ${golden.datasetId} version ${golden.datasetVersion} (${golden.trajectoryEvaluator ?? "Builtin.TrajectoryAnyOrderMatch"})"`,
+              'if [ ! -f scripts/golden_dataset_gate.py ]; then echo "ERROR: scripts/golden_dataset_gate.py is missing; golden-dataset gate cannot pass"; exit 1; fi',
+              'python3 -m pip install --disable-pip-version-check "boto3==1.43.98"',
+              // Runtime id from the ARN; the Runtime's service.name is <id>.DEFAULT and its
+              // log group /aws/bedrock-agentcore/runtimes/<id>-DEFAULT; the hub copies follow
+              // DEFAULT_DESTINATION_LOG_GROUP_PATTERN (aws/spans has no leading slash).
+              'RUNTIME_ID="${EVAL_RUNTIME_ARN##*/}"',
+              'HUB_SPANS="/centralized/${EVAL_NONPROD_ACCOUNT}/${EVAL_REGION}aws/spans"',
+              'HUB_RUNTIME_LOGS="/centralized/${EVAL_NONPROD_ACCOUNT}/${EVAL_REGION}/aws/bedrock-agentcore/runtimes/${RUNTIME_ID}-DEFAULT"',
+              'GATE_NAME="$(printf "golden_%s_%s" "$EVAL_TENANT" "$EVAL_AGENT" | tr -c "a-zA-Z0-9_" "_" | cut -c1-48)"',
+              'python3 scripts/golden_dataset_gate.py --region "$GOLDEN_HUB_REGION" --assume-role-arn "$GOLDEN_RUNNER_ROLE_ARN" export --dataset-id "$GOLDEN_DATASET_ID" --dataset-version "$GOLDEN_DATASET_VERSION" --out golden-scenarios.json',
+              'python3 scripts/golden_dataset_gate.py --region "$EVAL_REGION" --assume-role-arn "$EVAL_INVOKER_ROLE_ARN" replay --scenarios golden-scenarios.json --runtime-arn "$EVAL_RUNTIME_ARN" --out golden-sessions.json',
+              'python3 scripts/golden_dataset_gate.py --region "$GOLDEN_HUB_REGION" --assume-role-arn "$GOLDEN_RUNNER_ROLE_ARN" gate' +
+                ' --dataset-id "$GOLDEN_DATASET_ID" --dataset-version "$GOLDEN_DATASET_VERSION" --sessions golden-sessions.json' +
+                ' --log-group "$HUB_SPANS" --log-group "$HUB_RUNTIME_LOGS" --service-name "${RUNTIME_ID}.DEFAULT"' +
+                ' --name "$GATE_NAME" --trajectory-evaluator "$GOLDEN_TRAJECTORY_EVALUATOR"' +
+                ' --results-log-group "/agenticai/golden-gate/${EVAL_TENANT}-${EVAL_AGENT}" --metrics-namespace agenticai/golden-gate' +
+                // The hub CMK (OmniCentralizedLogsKeyArn output) when the operator supplied it: the
+                // result group is then created under the key before the service creates it unencrypted.
+                ' ${GOLDEN_RESULTS_KMS_KEY_ARN:+--results-kms-key-arn "$GOLDEN_RESULTS_KMS_KEY_ARN"}' +
+                " --evidence golden-gate-evidence.json",
+            ],
+            ...(evaluationRole ? { role: evaluationRole } : {}),
+            envFromCfnOutputs: {
+              EVAL_RUNTIME_ARN: evaluationRuntimeStack.runtimeArnOutput,
+            },
+            partialBuildSpec: BuildSpec.fromObject({
+              version: "0.2",
+              env: {
+                variables: {
+                  ...evalThresholdEnv,
+                  EVAL_TENANT: props.tenantId,
+                  EVAL_AGENT: props.agentId,
+                  EVAL_REGION: evaluationRegion,
+                  EVAL_NONPROD_ACCOUNT: props.workloadNonprodEnv.account,
+                  EVAL_INVOKER_ROLE_ARN: evaluationInvokerArn,
+                  GOLDEN_DATASET_ID: golden.datasetId,
+                  GOLDEN_DATASET_VERSION: golden.datasetVersion,
+                  GOLDEN_HUB_REGION: goldenHubRegion,
+                  GOLDEN_RUNNER_ROLE_ARN: goldenRunnerRoleArn,
+                  GOLDEN_TRAJECTORY_EVALUATOR:
+                    golden.trajectoryEvaluator ?? "Builtin.TrajectoryAnyOrderMatch",
+                  GOLDEN_RESULTS_KMS_KEY_ARN: golden.resultsKmsKeyArn ?? "",
+                },
+              },
+            }),
+            buildEnvironment: {
+              buildImage: LinuxBuildImage.STANDARD_7_0,
+            },
+            // replay + ingestion/centralization wait (<= 10 min) + batch evaluation.
+            timeout: Duration.minutes(45),
+          })
+        : undefined;
+    if (goldenStep) {
+      goldenStep.addStepDependency(evalStep);
+    }
+    const promotionGates: Step[] = goldenStep ? [evalStep, goldenStep] : [evalStep];
+    const lastPromotionGate: Step = goldenStep ?? evalStep;
 
     // Z7-B: Canary stage. Shifts a small traffic slice to the new agent
     // version, then soaks while watching the OnlineEval Regressed composite
@@ -1045,6 +1203,7 @@ export class WorkloadPipelineStack extends Stack {
       agentImageVariant: props.agentImageVariant,
       generatedAgentInference: props.generatedAgentInference?.prod,
       auditOamSinkArn: props.auditOamSinkArn,
+      runtimeTelemetry: props.runtimeTelemetry,
       notificationEmail: props.notificationEmail,
     });
 
@@ -1059,27 +1218,28 @@ export class WorkloadPipelineStack extends Stack {
               : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
       });
       if (evaluationEnabled) {
-        gaApproval.addStepDependency(evalStep);
+        gaApproval.addStepDependency(lastPromotionGate);
       }
       this.pipeline.addStage(prodStage, {
-        pre: evaluationEnabled ? [evalStep, gaApproval] : [gaApproval],
+        pre: evaluationEnabled ? [...promotionGates, gaApproval] : [gaApproval],
       });
     } else {
       const approvalStep = new ManualApprovalStep("ProdApproval", {
-        comment:
-          "Evaluation gate passed. Approving starts the canary deploy and soak; Prod deploys only if the soak passes.",
+        comment: goldenStep
+          ? "Evaluation gate and golden-dataset gate passed. Approving starts the canary deploy and soak; Prod deploys only if the soak passes."
+          : "Evaluation gate passed. Approving starts the canary deploy and soak; Prod deploys only if the soak passes.",
       });
 
       // Ordering is declared, not implied. CDK Pipelines runs steps with no
       // declared dependency concurrently, so without these edges the evaluation
       // gate, approval and canary would share a RunOrder and Prod could be
       // reached without any of them having produced a verdict.
-      approvalStep.addStepDependency(evalStep);
+      approvalStep.addStepDependency(lastPromotionGate);
       canaryDeployStep.addStepDependency(approvalStep);
       canarySoakStep.addStepDependency(canaryDeployStep);
 
       this.pipeline.addStage(prodStage, {
-        pre: [evalStep, approvalStep, canaryDeployStep, canarySoakStep],
+        pre: [...promotionGates, approvalStep, canaryDeployStep, canarySoakStep],
       });
     }
 
@@ -1196,6 +1356,22 @@ export class WorkloadPipelineStack extends Stack {
     }
     if (props.auditOamSinkArn) {
       derived["agenticai/auditOamSinkArn"] = props.auditOamSinkArn;
+    }
+    if (props.enableTransactionSearch) {
+      derived["agenticai/enableTransactionSearch"] = "true";
+      if (props.transactionSearchIndexingPercentage !== undefined) {
+        derived["agenticai/transactionSearchIndexingPercentage"] = String(
+          props.transactionSearchIndexingPercentage,
+        );
+      }
+    }
+    if (props.runtimeTelemetry?.keepPromptContentInSpans) {
+      derived["agenticai/runtimeKeepPromptContentInSpans"] = "true";
+    }
+    if (props.runtimeTelemetry?.redactSpanAttributes?.length) {
+      derived["agenticai/runtimeRedactSpanAttributes"] = JSON.stringify(
+        props.runtimeTelemetry.redactSpanAttributes,
+      );
     }
     if (props.notificationEmail) {
       derived["agenticai/notificationEmail"] = props.notificationEmail;

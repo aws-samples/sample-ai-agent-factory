@@ -1,0 +1,45 @@
+{
+  "$comment": "CloudWatch Omni access grants for the fleet space (ADR-15). Grants only add; put a data scope on EVERY grant a scoped member receives, including group grants. Apply with scripts/omni/omni_space_bootstrap.py access-grants apply.",
+  "grants": [
+    {
+      "name": "platform-sre-editor",
+      "permission": "READ_WRITE_DELETE",
+      "principal": { "principalType": "IDC_GROUP", "displayName": "agenticai-platform-sre" }
+    },
+    {
+      "name": "security-viewer",
+      "permission": "READ",
+      "principal": { "principalType": "IDC_GROUP", "displayName": "agenticai-security" }
+    },
+    {
+      "name": "finops-viewer",
+      "permission": "READ",
+      "principal": { "principalType": "IDC_GROUP", "displayName": "agenticai-finops" }
+    },
+    {
+      "name": "team-demo-viewer",
+      "permission": "READ",
+      "principal": { "principalType": "IDC_GROUP", "displayName": "agenticai-team-demo" },
+      "scopedActions": [
+        {
+          "actions": ["cloudwatch:GetRecords", "cloudwatch:ListMetrics", "cloudwatch:GetMetricData"],
+          "resources": [
+            {
+              "resourceType": "DataSet",
+              "signalTypes": ["LOGS", "TRACES"],
+              "rowScopeGroups": [
+                [
+                  {
+                    "operator": "IN",
+                    "field": "resource['attributes']['cloud.account.id']",
+                    "values": ["444444444444", "555555555555"]
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

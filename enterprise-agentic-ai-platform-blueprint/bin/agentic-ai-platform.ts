@@ -26,11 +26,23 @@
  */
 import { readFileSync } from "node:fs";
 
-import { App, Aspects } from "aws-cdk-lib";
+import {
+  App,
+  Aspects,
+  CliCredentialsStackSynthesizer,
+  DefaultStackSynthesizer,
+  RemovalPolicy,
+  type IStackSynthesizer,
+} from "aws-cdk-lib";
 import { AwsSolutionsChecks, NIST80053R5Checks } from "cdk-nag";
 import "source-map-support/register";
 
 import { OrgStack } from "../apps/management-account/lib/org-stack";
+import { OmniDomainStack } from "../apps/management-account/lib/omni-domain-stack";
+import {
+  OmniHubStack,
+  type OmniHubStackProps,
+} from "../apps/platform-account/lib/omni-hub-stack";
 import { LogArchiveStack } from "../apps/platform-account/lib/log-archive-stack";
 import { AuditStack } from "../apps/platform-account/lib/audit-stack";
 import { GuardrailStack } from "../apps/platform-account/lib/guardrail-stack";
@@ -341,10 +353,88 @@ function seedAvailabilityZoneContext(
   }
 }
 
+/**
+ * Synthesizer for the one-time organization-level Omni stages. The default is
+ * the bootstrap path (scoped CloudFormation execution role) used by every
+ * pipeline. Context `agenticai/omniSynthesizer=cli-credentials` deploys with
+ * the operator's own credentials instead: a documented break-glass for the
+ * management-account setup while the scoped bootstrap policy has not yet been
+ * re-rendered with the Omni role families
+ * (pipelines/bootstrap/render-cfn-execution-policy.py).
+ */
+function omniSynthesizer(): IStackSynthesizer {
+  const mode = app.node.tryGetContext("agenticai/omniSynthesizer");
+  if (mode === "cli-credentials") {
+    return new CliCredentialsStackSynthesizer();
+  }
+  if (mode !== undefined && mode !== "bootstrap") {
+    throw new Error(
+      "Context agenticai/omniSynthesizer must be 'bootstrap' (default) or 'cli-credentials'.",
+    );
+  }
+  return new DefaultStackSynthesizer();
+}
+
+/** The five mandatory allocation tags for shared Omni resources. */
+function omniAllocationTags(): Record<string, string> {
+  return {
+    "application-id": String(
+      app.node.tryGetContext("agenticai/applicationId") ?? "platform-observability",
+    ),
+    "agent-id": String(app.node.tryGetContext("agenticai/agentId") ?? "shared"),
+    "tenant-id": String(app.node.tryGetContext("agenticai/tenantId") ?? "shared"),
+    "cost-centre": String(app.node.tryGetContext("agenticai/costCentre") ?? "platform"),
+    environment: String(app.node.tryGetContext("agenticai/envName") ?? "shared"),
+  };
+}
+
+/** Optional 0-100 percentage context value; undefined when absent. */
+function readOptionalPercentage(key: string): number | undefined {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined || raw === null || raw === "") {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 100) {
+    throw new Error(`Context ${key} must be a number between 0 and 100.`);
+  }
+  return value;
+}
+
+/**
+ * ADR-18 Runtime span content contract from context:
+ *   agenticai/runtimeKeepPromptContentInSpans  "true" to keep prompts/responses in spans
+ *   agenticai/runtimeRedactSpanAttributes      JSON list of span attribute patterns to redact
+ */
+function readRuntimeTelemetryContext():
+  | { keepPromptContentInSpans?: boolean; redactSpanAttributes?: readonly string[] }
+  | undefined {
+  const keepRaw = app.node.tryGetContext("agenticai/runtimeKeepPromptContentInSpans");
+  const redactRaw = app.node.tryGetContext("agenticai/runtimeRedactSpanAttributes");
+  const keepPromptContentInSpans = keepRaw === true || keepRaw === "true";
+  let redactSpanAttributes: readonly string[] | undefined;
+  if (typeof redactRaw === "string" && redactRaw.trim().length > 0) {
+    const parsed: unknown = JSON.parse(redactRaw);
+    if (!Array.isArray(parsed) || !parsed.every((v) => typeof v === "string")) {
+      throw new Error(
+        "Context agenticai/runtimeRedactSpanAttributes must be a JSON array of strings.",
+      );
+    }
+    redactSpanAttributes = parsed;
+  } else if (Array.isArray(redactRaw)) {
+    redactSpanAttributes = redactRaw.map(String);
+  }
+  if (!keepPromptContentInSpans && !redactSpanAttributes) {
+    return undefined;
+  }
+  return { keepPromptContentInSpans, redactSpanAttributes };
+}
+
 switch (stage) {
   case "management": {
     const attachToWorkloadsOu: boolean =
       app.node.tryGetContext("agenticai/attachScpsToWorkloadsOu") === true;
+    const breakGlassRaw = app.node.tryGetContext("agenticai/omniBreakGlassRoleNames");
     new OrgStack(app, "AgenticAI-Management-OrgStack", {
       env: {
         account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -352,6 +442,145 @@ switch (stage) {
       },
       platformGuardrailAdminRoleArn: guardrailAdminRoleArn(),
       attachToWorkloadsOu,
+      // ADR-15: SCP-13 keeps cells from switching off the telemetry the Omni hub depends on.
+      enableOmniTelemetryLockdown:
+        app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === true ||
+        app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === "true",
+      omniBreakGlassRoleNames: Array.isArray(breakGlassRaw)
+        ? breakGlassRaw.map(String)
+        : typeof breakGlassRaw === "string" && breakGlassRaw.trim().length > 0
+          ? breakGlassRaw.split(",").map((r) => r.trim()).filter(Boolean)
+          : undefined,
+    });
+    break;
+  }
+  case "omni-domain": {
+    // ADR-15 — CloudWatch Omni organization domain. Management account only, and
+    // in the Identity Center instance's PRIMARY Region (the service refuses any
+    // other Region); set CDK_DEFAULT_REGION / agenticai/defaultRegion accordingly.
+    const domainName = app.node.tryGetContext("agenticai/omniDomainName");
+    const identityCenterInstanceArn = app.node.tryGetContext(
+      "agenticai/identityCenterInstanceArn",
+    );
+    if (typeof domainName !== "string" || typeof identityCenterInstanceArn !== "string") {
+      throw new Error(
+        "omni-domain stage requires context 'agenticai/omniDomainName' and 'agenticai/identityCenterInstanceArn'.",
+      );
+    }
+    new OmniDomainStack(app, "AgenticAI-Management-OmniDomainStack", {
+      env: {
+        account: process.env.CDK_DEFAULT_ACCOUNT,
+        region: deploymentRegion(),
+      },
+      synthesizer: omniSynthesizer(),
+      domainName,
+      identityCenterInstanceArn,
+      allowIamSignIn: app.node.tryGetContext("agenticai/omniAllowIamSignIn") === true,
+      tags: omniAllocationTags(),
+    });
+    break;
+  }
+  case "omni-hub": {
+    // ADR-15 — CloudWatch Omni fleet space in the Audit/Observability account,
+    // plus the organization centralization rule when this account is the
+    // CloudWatch delegated administrator and a source scope is supplied.
+    const hubAccount = app.node.tryGetContext("agenticai/omniHubAccountId");
+    const domainId = app.node.tryGetContext("agenticai/omniDomainId");
+    if (typeof hubAccount !== "string" || !/^\d{12}$/.test(hubAccount)) {
+      throw new Error("omni-hub stage requires context 'agenticai/omniHubAccountId' (12 digits).");
+    }
+    if (typeof domainId !== "string" || !/^d-[0-9a-z]{1,25}$/.test(domainId)) {
+      throw new Error("omni-hub stage requires context 'agenticai/omniDomainId' (d-...).");
+    }
+    const sourceScope = app.node.tryGetContext("agenticai/omniSourceScope");
+    const orgId = app.node.tryGetContext("agenticai/organizationId");
+    const sourceRegionsRaw = app.node.tryGetContext("agenticai/omniSourceRegions");
+    let centralization: OmniHubStackProps["centralization"];
+    if (typeof sourceScope === "string") {
+      if (typeof orgId !== "string" || !orgId.startsWith("o-")) {
+        throw new Error(
+          "omni-hub centralization requires context 'agenticai/organizationId' (o-...).",
+        );
+      }
+      const sourceRegions: string[] = Array.isArray(sourceRegionsRaw)
+        ? sourceRegionsRaw.map(String)
+        : typeof sourceRegionsRaw === "string" && sourceRegionsRaw.trim().startsWith("[")
+          ? (JSON.parse(sourceRegionsRaw) as string[])
+          : typeof sourceRegionsRaw === "string"
+            ? sourceRegionsRaw.split(",").map((r) => r.trim()).filter(Boolean)
+            : [deploymentRegion()];
+      const backupRegion = app.node.tryGetContext("agenticai/omniBackupRegion");
+      centralization = {
+        organizationId: orgId,
+        sourceScope,
+        sourceRegions,
+        backupRegion: typeof backupRegion === "string" ? backupRegion : undefined,
+      };
+    }
+    const judgeRaw = app.node.tryGetContext("agenticai/omniJudgeModelArns");
+    const judgeModelArns: string[] | undefined = Array.isArray(judgeRaw)
+      ? judgeRaw.map(String)
+      : typeof judgeRaw === "string" && judgeRaw.trim().length > 0
+        ? (JSON.parse(judgeRaw) as string[])
+        : undefined;
+    const retainKeys = app.node.tryGetContext("agenticai/omniRetainKeys");
+    // Adopt mode: the hub account already hosts a space created outside the
+    // blueprint; deploy only the centralized-logs key and the rule around it.
+    const existingSpaceId = app.node.tryGetContext("agenticai/omniExistingSpaceId");
+    if (existingSpaceId !== undefined && typeof existingSpaceId !== "string") {
+      throw new Error("Context agenticai/omniExistingSpaceId must be the space id (UUID) as a string.");
+    }
+    // Golden-dataset gate (docs section 3.1): the workload pipeline evaluation
+    // role ARN(s) allowed to assume the hub runner role, and the cell accounts
+    // whose centralized copies it may read. Comma-separated strings.
+    const readList = (key: string): string[] | undefined => {
+      const raw = app.node.tryGetContext(key);
+      if (raw === undefined) return undefined;
+      const values = Array.isArray(raw)
+        ? raw.map(String)
+        : String(raw).split(",").map((v) => v.trim()).filter(Boolean);
+      if (values.length === 0) {
+        throw new Error(`Context ${key} must be a non-empty comma-separated list.`);
+      }
+      return values;
+    };
+    const goldenGateRunnerPrincipalArns = readList("agenticai/omniGoldenGateRunnerPrincipalArns");
+    const goldenGateSourceAccountIds = readList("agenticai/omniGoldenGateSourceAccountIds");
+    if (goldenGateSourceAccountIds && !goldenGateRunnerPrincipalArns) {
+      throw new Error(
+        "Context agenticai/omniGoldenGateSourceAccountIds needs agenticai/omniGoldenGateRunnerPrincipalArns (the pipeline roles allowed to assume the runner).",
+      );
+    }
+    new OmniHubStack(app, `AgenticAI-Omni-HubStack-${deploymentRegion()}`, {
+      env: { account: hubAccount, region: deploymentRegion() },
+      synthesizer: omniSynthesizer(),
+      domainId,
+      existingSpaceId,
+      spaceName: app.node.tryGetContext("agenticai/omniSpaceName"),
+      allowModelInference:
+        app.node.tryGetContext("agenticai/omniAllowModelInference") === true ||
+        app.node.tryGetContext("agenticai/omniAllowModelInference") === "true",
+      judgeModelArns,
+      enableAwsIntegrationDiscovery:
+        app.node.tryGetContext("agenticai/omniEnableAwsIntegrationDiscovery") === true,
+      centralization,
+      transactionSearchIndexingPercentage: readOptionalPercentage(
+        "agenticai/transactionSearchIndexingPercentage",
+      ),
+      enableTransactionSearch:
+        app.node.tryGetContext("agenticai/omniEnableTransactionSearch") !== false &&
+        app.node.tryGetContext("agenticai/omniEnableTransactionSearch") !== "false",
+      keyRemovalPolicy:
+        retainKeys === false || retainKeys === "false"
+          ? RemovalPolicy.DESTROY
+          : RemovalPolicy.RETAIN,
+      goldenGate: goldenGateRunnerPrincipalArns
+        ? {
+            runnerPrincipalArns: goldenGateRunnerPrincipalArns,
+            sourceAccountIds: goldenGateSourceAccountIds,
+          }
+        : undefined,
+      tags: omniAllocationTags(),
     });
     break;
   }
@@ -858,6 +1087,15 @@ switch (stage) {
     const notificationEmail = app.node.tryGetContext(
       "agenticai/notificationEmail",
     );
+    // ADR-13/ADR-15/ADR-18: Transaction Search and the Runtime span content
+    // contract are explicit opt-ins carried as pipeline context.
+    const enableTransactionSearch =
+      app.node.tryGetContext("agenticai/enableTransactionSearch") === true ||
+      app.node.tryGetContext("agenticai/enableTransactionSearch") === "true";
+    const transactionSearchIndexingPercentage = readOptionalPercentage(
+      "agenticai/transactionSearchIndexingPercentage",
+    );
+    const runtimeTelemetry = readRuntimeTelemetryContext();
     const enableGaRegistryConsumer =
       app.node.tryGetContext("agenticai/enableGaRegistryConsumer") === true ||
       app.node.tryGetContext("agenticai/enableGaRegistryConsumer") === "true";
@@ -1130,6 +1368,20 @@ switch (stage) {
     if (typeof notificationEmail === "string") {
       sharedSynthContext["agenticai/notificationEmail"] = notificationEmail;
     }
+    if (enableTransactionSearch) {
+      sharedSynthContext["agenticai/enableTransactionSearch"] = "true";
+      if (transactionSearchIndexingPercentage !== undefined) {
+        sharedSynthContext["agenticai/transactionSearchIndexingPercentage"] =
+          String(transactionSearchIndexingPercentage);
+      }
+    }
+    if (runtimeTelemetry?.keepPromptContentInSpans) {
+      sharedSynthContext["agenticai/runtimeKeepPromptContentInSpans"] = "true";
+    }
+    if (runtimeTelemetry?.redactSpanAttributes?.length) {
+      sharedSynthContext["agenticai/runtimeRedactSpanAttributes"] =
+        JSON.stringify(runtimeTelemetry.redactSpanAttributes);
+    }
 
     if (includePlatform) {
       new PlatformPipelineStack(app, "AgenticAI-PlatformPipelineStack", {
@@ -1175,7 +1427,44 @@ switch (stage) {
     }
 
     if (includeWorkload) {
+      // Golden-dataset promotion gate (docs/CLOUDWATCH_OMNI_INTEGRATION.md 3.1):
+      // naming a dataset version makes GoldenDatasetGate a mandatory Prod gate.
+      // The hub defaults to the Audit account in the deploy Region, where the
+      // omni-hub stage deployed the runner role for this pipeline's evaluation role.
+      const goldenDatasetId = app.node.tryGetContext("agenticai/goldenDatasetId");
+      const goldenDatasetVersion = app.node.tryGetContext("agenticai/goldenDatasetVersion");
+      if ((goldenDatasetId === undefined) !== (goldenDatasetVersion === undefined)) {
+        throw new Error(
+          "Context agenticai/goldenDatasetId and agenticai/goldenDatasetVersion must be set together.",
+        );
+      }
+      const goldenTrajectory = app.node.tryGetContext("agenticai/goldenTrajectoryEvaluator");
+      if (
+        goldenTrajectory !== undefined &&
+        !["Builtin.TrajectoryExactOrderMatch", "Builtin.TrajectoryInOrderMatch", "Builtin.TrajectoryAnyOrderMatch"].includes(String(goldenTrajectory))
+      ) {
+        throw new Error(
+          "Context agenticai/goldenTrajectoryEvaluator must be Builtin.TrajectoryExactOrderMatch, Builtin.TrajectoryInOrderMatch or Builtin.TrajectoryAnyOrderMatch.",
+        );
+      }
+      const goldenDataset =
+        goldenDatasetId !== undefined
+          ? {
+              datasetId: String(goldenDatasetId),
+              datasetVersion: String(goldenDatasetVersion),
+              hubAccountId: String(app.node.tryGetContext("agenticai/goldenHubAccountId") ?? auditAccount),
+              hubRegion: app.node.tryGetContext("agenticai/goldenHubRegion") as string | undefined,
+              runnerRoleName: app.node.tryGetContext("agenticai/goldenRunnerRoleName") as string | undefined,
+              resultsKmsKeyArn: app.node.tryGetContext("agenticai/goldenResultsKmsKeyArn") as string | undefined,
+              trajectoryEvaluator: goldenTrajectory as
+                | "Builtin.TrajectoryExactOrderMatch"
+                | "Builtin.TrajectoryInOrderMatch"
+                | "Builtin.TrajectoryAnyOrderMatch"
+                | undefined,
+            }
+          : undefined;
       new WorkloadPipelineStack(app, "AgenticAI-WorkloadPipelineStack", {
+        goldenDataset,
         env: { account: platformNonprodAccount, region },
         githubRepo: githubRepo as string,
         githubBranch:
@@ -1197,6 +1486,9 @@ switch (stage) {
         workloadProdAvailabilityZones,
         auditOamSinkArn:
           typeof auditOamSinkArn === "string" ? auditOamSinkArn : undefined,
+        enableTransactionSearch,
+        transactionSearchIndexingPercentage,
+        runtimeTelemetry,
         notificationEmail:
           typeof notificationEmail === "string" ? notificationEmail : undefined,
         gaRegistry,
@@ -1276,11 +1568,11 @@ switch (stage) {
   }
   case undefined:
     throw new Error(
-      "Missing required CDK context 'stage'. Pass --context stage=<management|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
+      "Missing required CDK context 'stage'. Pass --context stage=<management|omni-domain|omni-hub|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
     );
   default:
     throw new Error(
-      `Unknown stage '${stage}'. Valid stages: management | platform | workload | sandbox | d03-platform | d03-workload | d03-workstream-gateway | pipeline | gap-closure.`,
+      `Unknown stage '${stage}'. Valid stages: management | omni-domain | omni-hub | platform | workload | sandbox | d03-platform | d03-workload | d03-workstream-gateway | pipeline | gap-closure.`,
     );
 }
 

@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentcore-evaluations",
+  "version": "0.1.0",
+  "description": "Amazon Bedrock AgentCore Evaluations: execution role, evaluator catalog, code-based evaluators, and online evaluation configurations. Shared by the CloudWatch Omni and AgentCore-native evaluation options.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

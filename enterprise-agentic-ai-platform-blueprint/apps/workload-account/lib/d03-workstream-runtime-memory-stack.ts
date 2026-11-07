@@ -117,6 +117,36 @@ export interface D03WorkstreamRuntimeMemoryStackProps
    * to invoke only this Runtime.
    */
   readonly evaluationInvokerPrincipalArn?: string;
+  /**
+   * Agent telemetry content and redaction contract for CloudWatch Omni and
+   * AgentCore Evaluations (ADR-18). Applies to every image variant because the
+   * AgentCore Runtime exports spans regardless of the container's code.
+   */
+  readonly telemetry?: RuntimeTelemetryConfig;
+}
+
+/**
+ * Span content contract for a Runtime (ADR-18).
+ *
+ * AgentCore injects `AGENT_OBSERVABILITY_ENABLED` and the OTLP exporter
+ * defaults itself; this blueprint never duplicates them. The only variables a
+ * cell sets are the two below.
+ */
+export interface RuntimeTelemetryConfig {
+  /**
+   * Keep prompt and response content in spans (`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true`).
+   * Required for Agent traces and for every evaluator to score anything.
+   * Default false: content stays out of telemetry unless the cell's data
+   * classification allows it for this version.
+   */
+  readonly keepPromptContentInSpans?: boolean;
+  /**
+   * Span attributes to replace with `REDACTED` in-process before export
+   * (`AWS_REDACT_SPAN_ATTRIBUTES`). Wildcards are accepted, for example
+   * `llm.input_messages.*`. Redaction is irreversible and redacted traces
+   * score blank.
+   */
+  readonly redactSpanAttributes?: readonly string[];
 }
 
 /** Runtime container environment for the generated-agent image variant. */
@@ -838,6 +868,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
   ): Record<string, string> {
     const env: Record<string, string> = {
       AGENTCORE_MEMORY_ID: this.memory.attrMemoryId,
+      ...this.telemetryEnvironment(props.telemetry),
     };
     if (props.agentImageVariant !== "generated-agent") {
       return env;
@@ -896,6 +927,34 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_WORKLOAD_IDENTITY_NAME:
         identityProvider.getAttString("WorkloadName"),
     };
+  }
+
+  /**
+   * ADR-18 span content contract. Only the two documented variables are set;
+   * the managed OTLP defaults (`OTEL_TRACES_EXPORTER`, protocol, endpoint,
+   * `AGENT_OBSERVABILITY_ENABLED`) belong to the AgentCore Runtime.
+   */
+  private telemetryEnvironment(
+    telemetry: RuntimeTelemetryConfig | undefined,
+  ): Record<string, string> {
+    const env: Record<string, string> = {};
+    if (!telemetry) {
+      return env;
+    }
+    if (telemetry.keepPromptContentInSpans) {
+      env.AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT = "true";
+    }
+    if (telemetry.redactSpanAttributes && telemetry.redactSpanAttributes.length > 0) {
+      for (const attribute of telemetry.redactSpanAttributes) {
+        if (!/^[A-Za-z0-9_.*-]+$/.test(attribute)) {
+          throw new Error(
+            `D03WorkstreamRuntimeMemoryStack: telemetry.redactSpanAttributes entry '${attribute}' is not a valid span attribute pattern.`,
+          );
+        }
+      }
+      env.AWS_REDACT_SPAN_ATTRIBUTES = telemetry.redactSpanAttributes.join(",");
+    }
+    return env;
   }
 
   /**

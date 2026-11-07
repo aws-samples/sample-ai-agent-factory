@@ -722,3 +722,81 @@ describe("SCP-12 developer permission-set platform-tag deny", () => {
     expect(getScp12().bodyJson.length).toBeLessThan(SCP_BODY_HARD_LIMIT);
   });
 });
+
+
+describe("SCP-13 CloudWatch Omni telemetry lockdown (ADR-15)", () => {
+  function renderWithOmni(extra: Partial<Parameters<typeof buildScpSet>[0]> = {}) {
+    return buildScpSet({
+      allowedModelArns: allowedModelArns("us-west-2"),
+      approvedRegions: PLATFORM_APPROVED_REGIONS,
+      platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+      approvedAgentCoreVpceIds: AGENTCORE_VPCE_IDS,
+      approvedBedrockVpceIds: BEDROCK_VPCE_IDS,
+      enableOmniTelemetryLockdown: true,
+      ...extra,
+    });
+  }
+  const statementsOf = (set: ReturnType<typeof buildScpSet>) =>
+    (set.find((s) => s.id === "scp-13")!.body as any).Statement as any[];
+
+  it("is opt-in and absent by default", () => {
+    expect(renderSet().find((s) => s.id === "scp-13")).toBeUndefined();
+    const scp13 = renderWithOmni().find((s) => s.id === "scp-13");
+    expect(scp13?.name).toBe("AgenticAI-SCP-13-OmniTelemetryLockdown");
+    expect(scp13!.bodyJson.length).toBeLessThan(SCP_BODY_SOFT_LIMIT);
+  });
+
+  it("denies account-level Omni domains to every cell principal, with no pipeline exemption", () => {
+    const domain = statementsOf(renderWithOmni()).find((s) => s.Sid === "DenyAccountLevelOmniDomainInCells");
+    expect(domain.Effect).toBe("Deny");
+    expect(domain.Action).toEqual(expect.arrayContaining(["cloudwatch:CreateDomain", "cloudwatch:CreateDomainForOrganization"]));
+    expect(domain.Condition.ArnNotLike).toBeUndefined();
+    expect(domain.Condition.BoolIfExists["aws:PrincipalIsAWSService"]).toBe("false");
+  });
+
+  it("exempts the pipeline role in both the role and assumed-role forms across accounts, plus named break-glass roles", () => {
+    const set = renderWithOmni({ omniBreakGlassRoleNames: ["AgenticAI-ObservabilityAdmin"] });
+    for (const sid of [
+      "DenyOmniSpaceLifecycleExceptPipeline",
+      "DenyTransactionSearchTamperingExceptPipeline",
+      "DenyRuntimeDeliveryTamperingExceptPipeline",
+    ]) {
+      const st = statementsOf(set).find((s) => s.Sid === sid);
+      expect(st.Effect).toBe("Deny");
+      expect(st.Condition.ArnNotLike["aws:PrincipalArn"]).toEqual(
+        expect.arrayContaining([
+          "arn:aws:iam::*:role/cdk-*-cfn-exec-role-*",
+          "arn:aws:sts::*:assumed-role/cdk-*-cfn-exec-role-*/*",
+          "arn:aws:iam::*:role/AgenticAI-ObservabilityAdmin",
+          "arn:aws:sts::*:assumed-role/AgenticAI-ObservabilityAdmin/*",
+        ]),
+      );
+      expect(st.Condition.BoolIfExists["aws:PrincipalIsAWSService"]).toBe("false");
+    }
+  });
+
+  it("closes every switch that starves the hub: space lifecycle, Transaction Search, Runtime deliveries", () => {
+    const st = statementsOf(renderWithOmni());
+    const actions = (sid: string) => st.find((s) => s.Sid === sid).Action as string[];
+    expect(actions("DenyOmniSpaceLifecycleExceptPipeline")).toEqual(
+      expect.arrayContaining(["cloudwatch:CreateSpace", "cloudwatch:DeleteSpace", "cloudwatch:CreateAccessGrant", "cloudwatch:DeleteAccessGrant"]),
+    );
+    expect(actions("DenyTransactionSearchTamperingExceptPipeline")).toEqual(
+      expect.arrayContaining(["xray:UpdateTraceSegmentDestination", "xray:UpdateIndexingRule", "logs:DeleteResourcePolicy", "logs:PutResourcePolicy"]),
+    );
+    expect(actions("DenyRuntimeDeliveryTamperingExceptPipeline")).toEqual(
+      expect.arrayContaining(["logs:DeleteDelivery", "logs:DeleteDeliverySource", "logs:DeleteDeliveryDestination", "logs:UpdateDeliveryConfiguration"]),
+    );
+    // Read paths stay open: a cell can still see its own telemetry and spaces.
+    const all = st.flatMap((s) => s.Action as string[]);
+    expect(all).not.toContain("cloudwatch:GetSpace");
+    expect(all).not.toContain("cloudwatch:ListSpaces");
+    expect(all).not.toContain("xray:GetTraceSegmentDestination");
+    expect(all).not.toContain("logs:PutLogEvents");
+  });
+
+  it("rejects a malformed role pattern and an empty pipeline list", () => {
+    expect(() => renderWithOmni({ omniPipelineRoleNamePatterns: ["bad name/with slash"] })).toThrow(/not a valid IAM role name pattern/);
+    expect(() => renderWithOmni({ omniPipelineRoleNamePatterns: [] })).toThrow(/at least one pipeline role-name pattern/);
+  });
+});

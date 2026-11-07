@@ -76,6 +76,8 @@ PROJECT_KEY_DESCRIPTION = re.compile(
     r"|CMK for catalogue-drift logs \(.+\)\."
     r"|CMK for online-evaluation samples \(.+\)\."
     r"|CMK for the cross-account inference M2M secret \(.+\)\."
+    r"|CloudWatch Omni space and Dataset encryption \(documented Omni key policy\)\."
+    r"|Encrypts every destination log group created by the organization centralization rule in this hub\."
     r"|Chargeback CSV CMK \(.+\)\."
     r"|EU AI Act record-keeping CMK \(.+\)\."
     r"|HITL CMK \(.+\)\."
