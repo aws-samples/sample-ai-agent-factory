@@ -122,12 +122,20 @@ export const packageGroups: PackageGroup[] = [
   {
     id: 'lifecycle',
     name: 'Delivery, evaluation and lifecycle',
-    packages: ['agent-lifecycle', 'agent-resilience', 'evaluation-gates', 'online-evaluation', 'hitl', 'developer-cli'],
+    packages: [
+      'agent-lifecycle',
+      'agent-resilience',
+      'evaluation-gates',
+      'agentcore-evaluations',
+      'online-evaluation',
+      'hitl',
+      'developer-cli',
+    ],
   },
   {
     id: 'observability',
     name: 'Observability and compliance',
-    packages: ['observability', 'otel-genai-semconv', 'eu-ai-act-compliance'],
+    packages: ['observability', 'omni', 'otel-genai-semconv', 'eu-ai-act-compliance'],
   },
 ];
 
