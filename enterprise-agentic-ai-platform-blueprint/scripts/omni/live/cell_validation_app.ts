@@ -20,7 +20,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { App, CfnOutput, CliCredentialsStackSynthesizer, RemovalPolicy, Stack, Tags } from "aws-cdk-lib";
+import { App, CfnOutput, CliCredentialsStackSynthesizer, DefaultStackSynthesizer, RemovalPolicy, Stack, Tags } from "aws-cdk-lib";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 
 import {
@@ -41,7 +41,13 @@ if (!/^\d{12}$/.test(account)) {
 
 const stack = new Stack(app, "AgenticAI-OmniValidation-Cell", {
   env: { account, region },
-  synthesizer: new CliCredentialsStackSynthesizer(),
+  // `-c synthesizer=bootstrap` deploys through the CDK bootstrap roles, so CloudFormation runs the
+  // resource handlers as cdk-*-cfn-exec-role-* (the principal SCP-13 exempts); the default keeps the
+  // operator's own credentials, which is what SCP-13 must deny for Transaction Search changes.
+  synthesizer:
+    app.node.tryGetContext("synthesizer") === "bootstrap"
+      ? new DefaultStackSynthesizer()
+      : new CliCredentialsStackSynthesizer(),
   description: "Throwaway CloudWatch Omni live-validation resources in a Workstream cell (delete after the gates).",
 });
 
