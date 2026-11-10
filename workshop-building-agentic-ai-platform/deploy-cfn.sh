@@ -72,33 +72,51 @@ export AWS_REGION="$REGION"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 # The identity that will open CloudWatch Omni from the AWS console (Module 5).
-# Workshop Studio resolves {{.ParticipantRoleArn}} to WSParticipantRole; on the
-# self-paced path there is no such role, and Omni rejects a grant for a principal
-# that does not exist, so the grant goes to the identity running this deploy:
-# an IAM user as itself, an assumed role as its role ARN (read back through
-# iam get-role so a path such as aws-reserved/sso.amazonaws.com/ is kept).
-# Anything else (root, or a role this identity may not read) creates no console
-# grant; Module 5 step 1 then adds one by hand. Override with
-# OMNI_CONSOLE_PRINCIPAL_ARN (and OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE|IAM_USER).
+# Workshop Studio resolves {{.ParticipantRoleArn}} to WSParticipantRole, a
+# different principal from WSSystemRole, the role that runs CloudFormation there
+# and so creates the space. On the self-paced path the identity running this
+# script is both: CloudFormation runs as it (no service role), Omni's CreateSpace
+# gives the creator a system-managed Space Admin grant (OmniDefaults-Space-Admin),
+# and a second SPACE_ADMIN grant for the same principal is rejected -- probed live
+# 2026-11-10: CreateAccessGrant 409 ConflictException "An active SPACE_ADMIN grant
+# already exists for principal", which failed workshop-agentcore-stack. So no
+# console grant is created by default; the deployer is already Space Admin. Set
+# OMNI_CONSOLE_PRINCIPAL_ARN (and OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE|IAM_USER)
+# to admit a DIFFERENT identity, the one your browser signs in to the console as
+# (Omni rejects a grant for a principal that does not exist). Module 5 step 1
+# shows how to add one later from the IDE.
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
 OMNI_CONSOLE_PRINCIPAL_ARN="${OMNI_CONSOLE_PRINCIPAL_ARN:-}"
 OMNI_CONSOLE_PRINCIPAL_TYPE="${OMNI_CONSOLE_PRINCIPAL_TYPE:-IAM_ROLE}"
-if [[ -z "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
-  case "$CALLER_ARN" in
-    arn:*:iam::*:user/*)
-      OMNI_CONSOLE_PRINCIPAL_ARN="$CALLER_ARN"; OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_USER ;;
-    arn:*:sts::*:assumed-role/*/*)
-      CALLER_ROLE_NAME="${CALLER_ARN#*:assumed-role/}"; CALLER_ROLE_NAME="${CALLER_ROLE_NAME%%/*}"
-      OMNI_CONSOLE_PRINCIPAL_ARN=$(aws iam get-role --role-name "$CALLER_ROLE_NAME" \
-        --query Role.Arn --output text 2>/dev/null || true)
-      OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE ;;
-  esac
+# The deployer's own principal (a user as itself, an assumed role as its role ARN,
+# read back through iam get-role so a path such as aws-reserved/sso.amazonaws.com/
+# is kept), only to refuse an override that names it and would fail the stack.
+DEPLOYER_PRINCIPAL_ARN=""
+case "$CALLER_ARN" in
+  arn:*:iam::*:user/*)
+    DEPLOYER_PRINCIPAL_ARN="$CALLER_ARN" ;;
+  arn:*:sts::*:assumed-role/*/*)
+    CALLER_ROLE_NAME="${CALLER_ARN#*:assumed-role/}"; CALLER_ROLE_NAME="${CALLER_ROLE_NAME%%/*}"
+    DEPLOYER_PRINCIPAL_ARN=$(aws iam get-role --role-name "$CALLER_ROLE_NAME" \
+      --query Role.Arn --output text 2>/dev/null || true)
+    # A role this identity may not read: assume the path-less ARN.
+    if [[ -z "$DEPLOYER_PRINCIPAL_ARN" ]]; then
+      CALLER_PARTITION="${CALLER_ARN#arn:}"; CALLER_PARTITION="${CALLER_PARTITION%%:*}"
+      DEPLOYER_PRINCIPAL_ARN="arn:${CALLER_PARTITION}:iam::${ACCOUNT_ID}:role/${CALLER_ROLE_NAME}"
+    fi ;;
+esac
+if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" && "$OMNI_CONSOLE_PRINCIPAL_ARN" == "$DEPLOYER_PRINCIPAL_ARN" ]]; then
+  echo "CloudWatch Omni: OMNI_CONSOLE_PRINCIPAL_ARN names the identity running this deploy. It"
+  echo "                 becomes Space Admin when CloudFormation creates the space, and Omni"
+  echo "                 rejects a second grant for it, so no console grant is created."
+  OMNI_CONSOLE_PRINCIPAL_ARN=""
 fi
 if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
   echo "CloudWatch Omni console grant will go to: $OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_TYPE)"
 else
-  echo "CloudWatch Omni: could not resolve a console identity from $CALLER_ARN - no console"
-  echo "                 grant will be created (Module 5 step 1 shows how to add one by hand)."
+  echo "CloudWatch Omni: $CALLER_ARN creates the space and becomes its Space Admin"
+  echo "                 (Omni's own grant). To admit a different console identity, set"
+  echo "                 OMNI_CONSOLE_PRINCIPAL_ARN, or add a grant later (Module 5 step 1)."
 fi
 DIR_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
 # S3 caps a bucket name at 63 characters, and the directory name is the one part
@@ -377,6 +395,28 @@ if [[ "$OPERATION" == "deploy" ]]; then
     fi
 
     echo "[$((i + 1))/$TEMPLATES] Deploying stack '$STACK_NAME' from $TEMPLATE_LOCATION ..."
+
+    # A stack left in a failed state by an earlier run is not repaired by running
+    # deploy again: ROLLBACK_COMPLETE rejects every update, and a CREATE_FAILED
+    # stack (rollback is disabled below) only moves when the update changes
+    # something. When the fix removes the failed resource instead, the change set
+    # is empty, `--no-fail-on-empty-changeset` reports success, the stack stays
+    # CREATE_FAILED with no outputs, and the next stack dies on a missing export.
+    # Observed 2026-11-10 on the first self-paced deploy: workshop-agentcore-stack
+    # "deployed successfully", then code-editor "No export named ac-OmniSpaceId
+    # found". The failure message already asks for `cleanup`; enforce it.
+    PRIOR_STATUS=$(aws cloudformation describe-stacks \
+      --stack-name "$STACK_NAME" \
+      --query "Stacks[0].StackStatus" \
+      --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+    case "$PRIOR_STATUS" in
+      *FAILED|ROLLBACK_COMPLETE)
+        echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. Updating it"
+        echo "cannot make it healthy; remove it first, then run deploy again:"
+        echo "  ./deploy-cfn.sh cleanup"
+        record_stack_failure "$STACK_NAME" "$PRIOR_STATUS from an earlier run"
+        continue ;;
+    esac
 
     # Templates with nested stacks (TemplateURL) must use create/update-stack with
     # --template-url pointing to S3, because `aws cloudformation deploy --s3-bucket`

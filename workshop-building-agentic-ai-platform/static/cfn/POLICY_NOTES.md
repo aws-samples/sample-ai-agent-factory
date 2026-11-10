@@ -900,10 +900,19 @@ step 7 and notebook 08 no longer delete the resources — the stacks do. Core-4 
 `WSParticipantRole` would fail `workshop-agentcore-stack` in any account without that role, i.e. the whole
 self-paced path. `OmniParticipantSpaceAdminGrant` is therefore conditional on the `OmniConsolePrincipalArn`
 parameter: `contentspec.yaml` passes `{{.ParticipantRoleArn}}` (a Workshop Studio magic variable), and
-`deploy-cfn.sh` passes the deploying identity (an IAM user as itself; an assumed role read back with
-`iam get-role` so an SSO role keeps its path), or nothing when it cannot resolve one — then no console grant
-is created and Module 5 step 1's grant block covers it. The instance-role grant in `code-editor.yaml` is
-unconditional because the role is created in the same template.
+`deploy-cfn.sh` passes nothing unless `OMNI_CONSOLE_PRINCIPAL_ARN` names an identity other than the one
+running the deploy — then no console grant is created and Module 5 step 1's grant block covers it. The
+instance-role grant in `code-editor.yaml` is unconditional because the role is created in the same template.
+
+The first version of `deploy-cfn.sh` passed the deploying identity itself, and the first self-paced deploy
+(a fresh account, as an IAM user, 2026-11-10) failed `workshop-agentcore-stack` on exactly that grant:
+`CreateAccessGrant` 409 `ConflictException: An active SPACE_ADMIN grant already exists for principal
+arn:aws:iam::<account>:user/<name> in space <space-id>`. Omni gives the identity that creates a space a system-managed Space
+Admin grant (`OmniDefaults-Space-Admin`), and on the self-paced path the deployer *is* the creator —
+CloudFormation runs as it, there is no `WSSystemRole` in between — so the stack's grant duplicated Omni's
+own. In an event the two identities differ (`WSSystemRole` creates, `WSParticipantRole` is granted), which
+is why events 16 and 17 never hit it. The script now resolves the deployer's principal only to refuse an
+override that names it.
 
 ## `s3:PutObjectAcl` on `fast-*/*`: own account only, never a public canned ACL (2026-11)
 

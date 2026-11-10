@@ -23,8 +23,10 @@ Parameters:
     Description: >-
       ARN of the IAM role or user that opens CloudWatch Omni from the AWS console (Module 5).
       Workshop Studio passes the participant role ({{.ParticipantRoleArn}}); deploy-cfn.sh passes
-      the identity running the self-paced deploy. Omni rejects a grant for a principal that does
-      not exist, so leave this empty to create no console grant.
+      OMNI_CONSOLE_PRINCIPAL_ARN only when it names an identity other than the one running the
+      deploy, which already becomes Space Admin as the space's creator. Omni rejects a grant for a
+      principal that does not exist, and a second SPACE_ADMIN grant for a principal that already
+      holds one, so leave this empty to create no console grant.
   OmniConsolePrincipalType:
     Type: String
     Default: IAM_ROLE
@@ -2435,11 +2437,14 @@ Resources:
   # The console identity: participants reach Omni through the CloudWatch console's
   # "Launch Omni -> Sign in", which signs them in as the role the console session
   # holds - WSParticipantRole in a Workshop Studio event (contentspec passes
-  # {{.ParticipantRoleArn}}), the deployer's own role or user on the self-paced
-  # path (deploy-cfn.sh resolves it). CreateAccessGrant validates that the
-  # principal exists ("Principal does not exist for the supplied ARN", probed
-  # live 2026-11-09), so the grant is conditional: an account without that
-  # identity gets no console grant instead of a failed stack.
+  # {{.ParticipantRoleArn}}). Omni gives the identity that creates the space a
+  # system-managed Space Admin grant of its own (WSSystemRole in an event, the
+  # deployer on the self-paced path), and CreateAccessGrant rejects both a
+  # principal that does not exist ("Principal does not exist for the supplied
+  # ARN", probed live 2026-11-09) and a second SPACE_ADMIN grant for one that
+  # already holds it (409 ConflictException, probed live 2026-11-10). So the grant
+  # is conditional: deploy-cfn.sh leaves the parameter empty unless
+  # OMNI_CONSOLE_PRINCIPAL_ARN names a different console identity.
   OmniParticipantSpaceAdminGrant:
     Type: AWS::CloudWatch::AccessGrant
     Condition: HasOmniConsolePrincipal
