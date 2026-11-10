@@ -1,17 +1,17 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
-"""CDK Stack for Module 4: AgentCore Gateway integration layer.
+"""CDK Stack for Module 3a (Tools Gateway): AgentCore Gateway integration layer.
 
-Provisions the governed Path B alongside Module 3's NGINX-based Path A:
+Provisions the governed Path B alongside the Registry's NGINX-based Path A (Module 3a):
 
 - AgentCore Gateway IAM Role (assumed by bedrock-agentcore service)
 - Sync Lambda (Registry API → Gateway target sync, EventBridge scheduled)
 - Request Interceptor Lambda (CloudWatch audit logging)
 - Response Interceptor Lambda (Bedrock Guardrails on tool outputs)
-- Cognito groups (admins, developers) added to Module 3's User Pool
+- Cognito groups (admins, developers) added to the Registry's User Pool
 
-All identity imports come from Module 3's CFN exports (EnvironmentName=workshop).
-No DynamoDB tables, no FastAPI API, no Streamlit UI — those are Module 3's domain.
+All identity imports come from the Registry stacks' CFN exports (EnvironmentName=workshop).
+No DynamoDB tables, no FastAPI API, no Streamlit UI — those are the Registry's domain.
 """
 
 import os
@@ -38,14 +38,14 @@ MODULE_ROOT = Path(__file__).resolve().parent.parent
 
 
 class AgentCoreGatewayStack(Stack):
-    """Module 4: AgentCore Gateway — governed Path B for tool access."""
+    """Module 3a Tools Gateway: AgentCore Gateway — governed Path B for tool access."""
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        env_name = "workshop"  # Must match Module 3's EnvironmentName parameter
+        env_name = "workshop"  # Must match the Registry stacks' EnvironmentName parameter
 
-        # ─── Import Module 3 CFN Exports ───
+        # ─── Import the Registry stacks' CFN Exports ───
         cognito_pool_id = Fn.import_value(f"{env_name}-CognitoUserPoolId")
         cognito_domain = Fn.import_value(f"{env_name}-CognitoDomain")
         registry_url = Fn.import_value(f"{env_name}-RegistryUrl")

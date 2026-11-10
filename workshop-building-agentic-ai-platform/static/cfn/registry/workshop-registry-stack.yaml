@@ -265,7 +265,8 @@ Parameters:
     Description: >
       Enable the observability features of services-stack: the metrics-service task
       with its ADOT collector sidecar (which remote-writes metrics to the Amazon Managed
-      Service for Prometheus workspace that observability-stack creates) and Grafana OSS
+      Service for Prometheus workspace: compute-stack's by default, or observability-stack's
+      when AMPRemoteWriteEndpoint names it) and Grafana OSS
       dashboards for MCP Analytics and AWS infrastructure monitoring.
 
   AMPRemoteWriteEndpoint:

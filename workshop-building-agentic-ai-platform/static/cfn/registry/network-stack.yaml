@@ -3,7 +3,7 @@ Description: >
   MCP Gateway Registry - Network Stack (Consolidated)
   Creates VPC, subnets, Regional NAT Gateway, security groups, and VPC endpoints.
   Uses AWS Regional NAT Gateway for simplified HA and cost savings.
-  Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+  Deploys to the region specified by AWS::Region; the regions a Workshop Studio event may use come from contentspec.yaml regionConfiguration.deployableRegions, and the self-paced deployer accepts any supported region (us-west-2 is the default).
 
 Parameters:
   EnvironmentName:

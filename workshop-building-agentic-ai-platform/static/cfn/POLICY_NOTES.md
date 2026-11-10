@@ -682,7 +682,7 @@ boundary-carrying, non-admin one from `source/module-4b-fast/cdk-bootstrap-templ
 (see "IAM escalation — closed with a permissions boundary (2026-11)" below).
 permissions boundary (2026-11)" below).
 
-## `lambda:AddPermission` is not needed by the participant; `RemovePermission` is
+## Neither `lambda:AddPermission` nor `lambda:RemovePermission` is granted to the participant any more
 
 Only two templates contain `AWS::Lambda::Permission` —
 `agentcore/workshop-agentcore-stack.yaml` and
@@ -750,7 +750,7 @@ never passes `--role-arn`), so a stack update that changes `InstanceType`, `User
 instance profile in place keeps working, while the same calls from the CLI are denied. Nothing
 in `deploy-cfn.sh` or the content issues those six calls directly. `AttachVolume`/`DetachVolume`
 and `TerminateInstances` stay in `-policy-1.json`: they cannot run code under the instance role.
-`-policy-1.json` dropped to 5,702 characters, `-policy-8.json` is at 2,753.
+`-policy-1.json` dropped to 5,702 characters; `-policy-8.json` is at 3,057 after the 2026-11-10 CloudFormation-only fences (see below).
 
 ## `self-service-deploy-policy-8.json`: the account-level statements are CloudFormation-only (2026-11-10)
 
@@ -764,7 +764,7 @@ put-resource-policy` or `xray update-*` call; the only callers are the CloudForm
 LLM Gateway and AgentCore stacks, which run under the deployer's credentials (no service role). So the four
 statements now carry `ForAnyValue:StringEquals aws:CalledVia = cloudformation.amazonaws.com`, the same fence
 `Ec2IdeInstanceMutationOnlyThroughCloudFormation` uses: stack create/update/delete keeps working, the same
-calls from a terminal are denied. `-policy-8.json` is at 3,009 characters.
+calls from a terminal are denied. `-policy-8.json` is at 3,057 characters (minified JSON).
 
 ## `aps:DeleteRuleGroupsNamespace`: name-scoped, deliberately not tag-scoped
 
@@ -1227,8 +1227,8 @@ effectively full after the 2026-11 pass (`-4` took the boundary-conditioned role
 statement and the CloudFront tag split, `-3` the Cognito/Cloud Map fences plus the
 Route 53 statement, which has since moved on to `-5` with its record-name fence; `-7` the guardrail fence and
 `workshop_policy_engine-*` scoping). `-8` was created in 2026-11 for the API Gateway v2 split
-and the Transaction Search statements; at 2,753 characters after the six EC2 instance-mutation
-actions moved in, it has about 3,390 free, so it takes the next grants; a `-9` would be the step after that.
+and the Transaction Search statements; at 3,057 characters after the six EC2 instance-mutation
+actions and the CloudFormation-only fences moved in, it has about 3,090 free, so it takes the next grants; a `-9` would be the step after that.
 `-7` had sat at 6,327 after the Module 5 narrowing until its Transaction Search
 statements moved to `-6`, and in 2026-11 on to `-8` (see above). Keep one statement
 per service so a reviewer can find a service's grants in one place; when a file

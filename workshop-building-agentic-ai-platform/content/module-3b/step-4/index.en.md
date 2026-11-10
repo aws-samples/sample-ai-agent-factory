@@ -42,7 +42,7 @@ done
 if [ -n "$MISSING" ]; then
   echo "ERROR: empty or missing value(s):$MISSING" >&2
   echo "  PUBLISHER_ROLE_ARN - needs workshop-agentcore-stack CREATE_COMPLETE" >&2
-  echo "  REGISTRY_ID        - needs Step 3 (Create the Registry) completed first" >&2
+  echo "  REGISTRY_ID        - needs Step 3 (Create the registry) completed first" >&2
   echo "  ACCOUNT_ID         - AWS credentials not configured" >&2
 else
   export PUBLISHER_ROLE_ARN REGISTRY_ID ACCOUNT_ID REGION

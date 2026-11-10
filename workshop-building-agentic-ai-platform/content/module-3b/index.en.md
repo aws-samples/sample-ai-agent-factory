@@ -53,7 +53,7 @@ The full tables — which service backs each pillar, which IAM role backs each p
 
 1. [Architecture Overview](step-1/) — Understand the three pillars, personas, and tool lifecycle
 2. [Verify infrastructure](step-2/) — Verify the pre-deployed CloudFormation stack and capture outputs
-3. [Create the Registry](step-3/) — Create an AWS Agent Registry with Cognito JWT auth
+3. [Create the registry](step-3/) — Create an AWS Agent Registry with Cognito JWT auth
 4. [Register Tools](step-4/) — Register 3 MCP tools, exercise Publisher/Admin approval workflow, EventBridge automation, Registry→Gateway sync
 5. [Discover & Search](step-5/) — Search the catalog as Consumer, test authorization boundaries
 6. [Test the Gateway](step-6/) — Invoke tools through the Gateway with governed access

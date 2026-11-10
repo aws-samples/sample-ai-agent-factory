@@ -33,7 +33,7 @@ top of it (Module 4):
   access to Amazon Bedrock models.
 - **Module 3a — MCP Registry + Tools Gateway:** register tools in the MCP Gateway & Registry, then
   layer an AgentCore Tools Gateway on top for JWT auth, audit, and guardrails.
-- **Module 3b — AgentCore Registry & Gateway:** AWS-native tool governance with Amazon Bedrock
+- **Module 3b — AWS Agent Registry & AgentCore Gateway:** AWS-native tool governance with Amazon Bedrock
   AgentCore, Cedar-based authorization, and EventBridge-driven approval workflows.
 - **Module 4 — Build Your Agent:** deploy a full-stack travel agent using FAST (Fullstack
   AgentCore Solution Template) on Amazon Bedrock AgentCore, wired to the platform via either the
@@ -83,7 +83,7 @@ works identically.
   automatically and a preflight check confirms the required capabilities before any stack is
   created. Serverless Amazon Bedrock models are enabled on first invocation; Anthropic models need a
   one-time use case submission per account (Module 2 step 2 walks through it). (Other regions are not supported — the
-  Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere,
+  AWS Agent Registry control plane is not yet generally available everywhere,
   which breaks Modules 3b and 4.)
 - **Permissions** — attach the scoped deploy policies (explicit actions only, each regional
   statement restricted to the validated regions) in
@@ -166,7 +166,7 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 │   ├── module-1/                 # The vision (all tracks)
 │   ├── module-2/                 # LLM Gateway (tracks 2, 3)
 │   ├── module-3a/                # MCP Registry + Tools Gateway (tracks 2, 3)
-│   ├── module-3b/                # AgentCore Registry & Gateway (tracks 2, 3)
+│   ├── module-3b/                # AWS Agent Registry & AgentCore Gateway (tracks 2, 3)
 │   ├── module-4/                 # FAST agent — dual-path (MCP or AgentCore) (tracks 1, 3)
 │   ├── module-5/                 # CloudWatch Omni observability + AgentCore Evaluations (all tracks)
 │   ├── summary/
@@ -174,7 +174,7 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 ├── source/                       # Module source code (pre-staged into /workshop in the IDE)
 │   ├── module-2-llm-gateway/     # LLM Gateway scripts + notebooks
 │   ├── module-3a-mcp-registry/   # MCP Registry scripts + notebooks
-│   ├── module-3b-agentcore/      # AgentCore Registry + Gateway + Cedar notebooks
+│   ├── module-3b-agentcore/      # AWS Agent Registry + AgentCore Gateway + Cedar notebooks
 │   ├── module-4a-tools-gateway/  # Tools Gateway Lambdas + CDK
 │   ├── module-4b-fast/           # FAST agent notebooks (connects to the gateways)
 │   └── module-5-omni/            # CloudWatch Omni + Evaluations notebooks
@@ -183,7 +183,7 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 │   │   ├── llm-gateway/           # Stack 1 — LiteLLM Proxy on ECS (Module 2)
 │   │   ├── registry/              # Stack 2 — MCP Gateway & Registry nested stacks (Module 3a)
 │   │   ├── tools-gateway/         # Stack 3 — AgentCore Tools Gateway (Module 3a upper layer)
-│   │   ├── agentcore/             # Stack 4 — AgentCore Registry & Gateway (Module 3b) + Transaction Search and Omni/Evaluations roles (Module 5)
+│   │   ├── agentcore/             # Stack 4 — AWS Agent Registry & AgentCore Gateway (Module 3b) + Transaction Search and Omni/Evaluations roles (Module 5)
 │   │   ├── code-editor.yaml       # Stack 5 — browser VS Code IDE on EC2 (all tracks)
 │   │   ├── workshop-iam-policy-core.json     # ParticipantRole policy (bedrock, agentcore, secrets)
 │   │   ├── workshop-iam-policy-infra.json    # ParticipantRole policy (ECS, EFS, ELB, etc.)

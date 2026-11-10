@@ -19,7 +19,7 @@ Add a governed tool access layer on top of the MCP Registry using Amazon Bedrock
 | **Path A (Direct)** | CloudFront/NGINX | Session cookie or static token | NGINX access logs only | None | Docker MCP servers |
 | **Path B (Governed)** | AgentCore Gateway | Cognito JWT (CUSTOM\_JWT) | CloudWatch structured audit log | Bedrock Guardrails | Lambda-backed tools registered with a `lambda://` URL (the Sync Lambda skips HTTP MCP servers: they stay on Path A) |
 
-The Tools Gateway adds **Path B** -- the AgentCore Gateway -- as a thin integration layer. The Sync Lambda reads the Registry's servers and creates one gateway target per Lambda-backed server (`proxy_pass_url` starting with `lambda://`); the Docker MCP servers keep being served through Path A only. Path B adds:
+The Tools Gateway adds **Path B** -- the AgentCore Gateway -- as a thin integration layer. The Sync Lambda reads the Registry's servers and creates one gateway target per Lambda-backed server (`proxy_pass_url` starting with `lambda://`); the Docker MCP servers keep being served through Path A only. The flights and hotels Lambdas end up on both paths — their Function URLs through Path A, their Lambda targets through Path B — while `search-knowledge-base`, which has no HTTP front door, is Path B only. Path B adds:
 
 - **Group-based access control** -- Cognito groups determine which tools each team can see and call
 - **Audit logging** -- Every `tools/call` and `tools/list` request logged to CloudWatch (with optional DynamoDB)

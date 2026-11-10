@@ -1,5 +1,5 @@
 ---
-title: "Create the Registry"
+title: "Create the registry"
 weight: 63
 ---
 
@@ -135,7 +135,7 @@ The registry takes a few seconds to provision. Poll until the status is `READY`:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
-  echo "ERROR: REGISTRY_ID is empty - re-run the Create the Registry block first" >&2
+  echo "ERROR: REGISTRY_ID is empty - re-run the Create the registry block first" >&2
 else
   echo "Waiting for registry to become READY..."
   for i in $(seq 1 30); do

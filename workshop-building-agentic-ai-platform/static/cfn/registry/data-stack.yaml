@@ -3,7 +3,7 @@ Description: >
   MCP Gateway Registry - Data Stack (Consolidated)
   Creates DocumentDB, Cognito User Pool, Secrets Manager, SSM Parameters, and KMS.
   Matches terraform/aws-ecs/documentdb.tf and secrets.tf.
-  Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+  Deploys to the region specified by AWS::Region; the regions a Workshop Studio event may use come from contentspec.yaml regionConfiguration.deployableRegions, and the self-paced deployer accepts any supported region (us-west-2 is the default).
 
 Parameters:
   EnvironmentName:
