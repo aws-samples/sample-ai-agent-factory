@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Curate Tools"
+title: "Tools Gateway: curate tools"
 weight: 50
 ---
 
@@ -26,8 +26,9 @@ GATEWAY_ID=$(aws bedrock-agentcore-control list-gateways \
   --output text --region $REGION)
 
 # Verify the gateway was resolved - missing means the Tools Gateway stack
-# did not deploy or its name changed. Stop now rather than fail deeper in
-# the target-creation step with a less obvious error.
+# did not deploy or its name changed. This check only prints a warning (an
+# exit would close your terminal): if you see it, do NOT continue to the
+# target-creation step; fix the stack first.
 test -n "$GATEWAY_ID" && test "$GATEWAY_ID" != "None" || { echo "GATEWAY_ID empty - confirm workshop-tools-gateway-stack shows CREATE_COMPLETE" >&2; }
 echo "Gateway ID: $GATEWAY_ID"
 echo "Account:    $ACCOUNT_ID"

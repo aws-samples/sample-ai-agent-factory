@@ -9,11 +9,11 @@ The workshop supports multiple tracks so you can choose based on your role and a
 
 | Track | Best For | Path | Time |
 |-------|----------|------|------|
-| **Track 1: Build an Agent** | AI/ML Engineers, Developers | Module 1 → Module 4 | ~1.5–2 hours |
-| **Track 2: Build the Platform** | Platform Engineers, Infra Teams | Module 1 → Module 2 → Module 3 | ~2–3 hours |
-| **Track 3: Full Journey** | Solutions Architects, Tech Leads | Module 1 → Module 2 → Module 3 → Module 4 | ~3–4 hours |
+| **Track 1: Build an Agent** | AI/ML Engineers, Developers | Module 1 → Module 4 → Module 5 (Part B) | ~2–2.5 hours |
+| **Track 2: Build the Platform** | Platform Engineers, Infra Teams | Module 1 → Module 2 → Module 3 → Module 5 (Part A) | ~2.5–3.5 hours |
+| **Track 3: Full Journey** | Solutions Architects, Tech Leads | Module 1 → Module 2 → Module 3 → Module 4 → Module 5 | ~3.5–4.5 hours |
 
-Within Modules 3 and 4, you choose between the **OSS path** (MCP Gateway & Registry) or the **AWS-native path** (AgentCore Registry & Gateway) — same tools, different infrastructure.
+Within Modules 3 and 4, you choose between the **OSS path** (MCP Gateway & Registry) or the **AWS-native path** (AWS Agent Registry & AgentCore Gateway) — same tools, different infrastructure.
 
 You will choose your track at the end of Module 1 after understanding the platform vision.
 
@@ -24,7 +24,7 @@ You will choose your track at the end of Module 1 after understanding the platfo
 By the end of this workshop you will be able to:
 
 - **Deploy a governed LLM gateway** that fronts Amazon Bedrock with virtual API keys, per-team model allow-lists, budgets, and spend tracking — so application teams consume models through one audited entry point instead of calling Bedrock directly.
-- **Stand up a tool registry and gateway** and register MCP servers and agents in it, using either the open-source MCP Gateway & Registry or the AWS-native AgentCore Registry & Gateway, and explain the trade-off between the two.
+- **Stand up a tool registry and gateway** and register MCP servers and agents in it, using either the open-source MCP Gateway & Registry or the AWS-native AWS Agent Registry & AgentCore Gateway, and explain the trade-off between the two.
 - **Apply guardrails and tool-level access policies** at the gateway, so a request for a tool an agent is not entitled to is blocked before it reaches the tool, and sensitive tool output is filtered on the way back.
 - **Wire an agent to the platform end to end** — a Strands agent that resolves its tools through the gateway and its model through the LLM gateway, with no endpoint or credential hardcoded in the agent.
 - **Observe and troubleshoot agent behaviour** across both gateways using CloudWatch logs, metrics, and the platform dashboard, and trace a single agent invocation through every hop it makes.
@@ -49,7 +49,7 @@ You do **not** need prior experience with AI agents, MCP, or Amazon Bedrock Agen
 
 **At an AWS-run event, use `us-west-2` (Oregon).** `contentspec.yaml` lists `us-west-2` as the workshop's only deployable region, so the Workshop Studio guardrail blocks API calls to anywhere else — switching regions mid-workshop will fail rather than fall back.
 
-**Deploying into your own account?** `us-west-2` is the primary validated region and the one every command assumes. `us-east-1` (N. Virginia) also works, including the optional Cedar Policy Engine section in Module 3b — the AgentCore Policy Engine API is available in both regions. Amazon Bedrock AgentCore is not available in every region, so if you pick a third region, check the [AgentCore endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock-agentcore.html) first — sections that depend on a capability your region lacks are marked Optional.
+**Deploying into your own account?** The self-service path is validated in three regions — `us-west-2` (the primary region, and the one every command assumes), `us-east-1` (N. Virginia) and `eu-west-1` (Ireland). `us-east-1` also covers the optional Cedar Policy Engine section in Module 3b — the AgentCore Policy Engine API is available in both US regions. Amazon Bedrock AgentCore is not available in every region, so do not pick a fourth region without checking the [AgentCore endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock_agentcore.html) first — sections that depend on a capability your region lacks are marked Optional.
 
 ## Cost
 

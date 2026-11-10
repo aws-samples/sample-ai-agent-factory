@@ -115,24 +115,6 @@
       }
     },
     {
-      "Sid": "AasScalableTargetTagging",
-      "Effect": "Allow",
-      "Action": [
-        "application-autoscaling:TagResource",
-        "application-autoscaling:UntagResource"
-      ],
-      "Resource": "arn:aws:application-autoscaling:*:*:scalable-target/*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
       "Sid": "AasReadNoResourceLevel",
       "Effect": "Allow",
       "Action": [
@@ -248,8 +230,7 @@
         "arn:aws:logs:*:*:log-group:/aws/lambda/agentcore-*:*",
         "arn:aws:logs:*:*:log-group:/ecs/workshop*:*",
         "arn:aws:logs:*:*:log-group:/aws/ecs/workshop*:*",
-        "arn:aws:logs:*:*:log-group:/aws/ssm/*:*",
-        "arn:aws:logs:*:*:log-group:/aws/vendedlogs/*:*"
+        "arn:aws:logs:*:*:log-group:/aws/ssm/code-editor-*:*"
       ],
       "Condition": {
         "StringEquals": {
@@ -300,6 +281,25 @@
         "arn:aws:cloudwatch:*:*:alarm:workshop-*",
         "arn:aws:cloudwatch::*:dashboard/workshop-*"
       ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TransactionSearchReadNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "xray:GetTraceSegmentDestination",
+        "xray:GetIndexingRules",
+        "logs:DescribeResourcePolicies"
+      ],
+      "Resource": "*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [

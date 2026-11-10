@@ -230,7 +230,7 @@ After the deployment completes, open the Amplify URL and ask:
 
 > Plan a trip from SFO to Tokyo for 2026-09-15 to 2026-09-18, 2 guests
 
-The agent should call `search_flights` and `search_hotels` through the Module 3a gateway and return **real flight and hotel results** — not a generic response. You should see tool invocations like `tg-workshop-flights-mcp___search_flights` in the chat.
+The agent should call `search_flights` and `search_hotels` through the Module 3a gateway and return **real flight and hotel results** — not a generic response. You should see tool invocations like `gw_tg-workshop-flights-mcp___search_flights` in the chat — the `gw_` prefix comes from `prefix="gw"` in the `gateway.py` you wrote above.
 
 ::alert[If the agent still falls back to Code Interpreter or says it can't access tools, check the runtime logs for authentication errors. The most common issue is the IAM permission for the new OAuth2 secret.]{type="warning"}
 
@@ -240,7 +240,7 @@ The agent should call `search_flights` and `search_hotels` through the Module 3a
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`04a-connect-gateway-mcp.ipynb`**.
 

@@ -1,0 +1,200 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ACIdentityScoped",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateWorkloadIdentity",
+        "bedrock-agentcore:CreateOauth2CredentialProvider",
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetResourceOauth2Token"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*",
+        "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACIdentityRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetWorkloadIdentity",
+        "bedrock-agentcore:ListWorkloadIdentities",
+        "bedrock-agentcore:GetOauth2CredentialProvider",
+        "bedrock-agentcore:ListOauth2CredentialProviders",
+        "bedrock-agentcore:GetTokenVault"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SSMRead",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParametersByPath"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/workshop/*",
+        "arn:aws:ssm:*:*:parameter/FAST-stack/*",
+        "arn:aws:ssm:*:*:parameter/agentcore-gateway/*",
+        "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SSMWriteWorkshopPathsAndBootstrapVersionOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/workshop/*",
+        "arn:aws:ssm:*:*:parameter/FAST-stack/*",
+        "arn:aws:ssm:*:*:parameter/agentcore-gateway/*",
+        "arn:aws:ssm:*:*:parameter/cdk-bootstrap/hnb659fds/version"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EB",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:EnableRule",
+        "events:DisableRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:ListTagsForResource",
+        "events:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:events:*:*:rule/workshop-*",
+        "arn:aws:events:*:*:rule/ac-*",
+        "arn:aws:events:*:*:rule/agentcore-*"
+      ]
+    },
+    {
+      "Sid": "EBList",
+      "Effect": "Allow",
+      "Action": [
+        "events:ListRules"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SM",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:workshop*",
+        "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+      ]
+    },
+    {
+      "Sid": "SMIdentityWrite",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+      ]
+    },
+    {
+      "Sid": "ACPolicyManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:DeletePolicyEngine",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:AuthorizeAction"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*"
+      ]
+    },
+    {
+      "Sid": "IAMCdkRoleTagsBootstrapKeysOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-*",
+      "Condition": {
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Workshop",
+            "aws-cdk:bootstrap-role",
+            "aws:cloudformation:*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EFSDescribeNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:DescribeFileSystems",
+        "elasticfilesystem:DescribeMountTargets",
+        "elasticfilesystem:DescribeAccessPoints"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    }
+  ]
+}

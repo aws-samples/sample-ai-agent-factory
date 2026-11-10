@@ -206,10 +206,16 @@ def request_interceptor_handler(event: dict, context) -> dict:
             logger.warning(
                 "Access denied: groups=%s tool=%s", caller_groups, tool_name
             )
+            # A request interceptor answers the caller directly only through
+            # transformedGatewayResponse; a transformedGatewayRequest would be
+            # forwarded to the target as the request body. The JSON-RPC error
+            # rides in a 200 so MCP clients surface it as a tool error rather
+            # than a transport failure.
             return {
                 "interceptorOutputVersion": "1.0",
                 "mcp": {
-                    "transformedGatewayRequest": {
+                    "transformedGatewayResponse": {
+                        "statusCode": 200,
                         "headers": headers,
                         "body": {
                             "jsonrpc": "2.0",

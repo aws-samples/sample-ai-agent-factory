@@ -21,11 +21,11 @@ one yields a ``ValidationException`` at invoke time:
 2. ``us.`` / ``eu.`` / ``apac.`` geo-scoped inference profiles
    -----------------------------------------------------------
    Models that need a cross-region inference profile but do NOT have a
-   ``global.`` profile (older Nova v1, Llama, Mistral, etc.) must use the geo
+   ``global.`` profile (older Nova v1, Mistral, etc.) must use the geo
    prefix derived from the deploy region. The geo prefix is geo-bounded:
    us-*/ca-*/sa- -> "us.", eu-* -> "eu.", ap-*/me-*/af-* -> "apac.".
    NOTE: the Asia-Pacific prefix is "apac." NOT "ap." despite the ``ap-*``
-   region codes. Example: ``bedrock/eu.meta.llama3-3-70b-instruct-v1:0``.
+   region codes. Example: ``bedrock/eu.amazon.nova-pro-v1:0``.
 
 3. bare (non-profile) foundation models
    -------------------------------------
@@ -142,18 +142,41 @@ def model_id(suffix, region, needs_profile=True, prefer_global=False):
     return "bedrock/" + suffix
 
 
-# Cache of region -> frozenset of invocable ids, so a caller resolving 17 models
-# makes two Bedrock calls total rather than 34.
+# Cache of region -> frozenset of invocable ids, so a caller resolving the whole
+# catalog makes two Bedrock calls total rather than two per model.
 _AVAILABLE_CACHE = {}
+
+
+def _is_active(summary):
+    """True unless Bedrock reports the model as LEGACY or EOL in this region.
+
+    ``modelLifecycle.status`` is the per-region source of truth the Model
+    lifecycle page points at. New accounts cannot adopt a LEGACY model and EOL
+    models fail at invoke time, so neither may be handed to a participant as a
+    gateway alias. A summary without the field is treated as ACTIVE.
+    """
+    return (summary.get("modelLifecycle") or {}).get("status", "ACTIVE") == "ACTIVE"
+
+
+def _profile_model_ids(profile):
+    """Bare foundation-model ids behind an inference profile summary."""
+    return {
+        m["modelArn"].rsplit("/", 1)[-1]
+        for m in profile.get("models", [])
+        if isinstance(m, dict) and "modelArn" in m
+    }
 
 
 def available_ids(region, client=None):
     """Return the set of Bedrock ids invocable on demand in ``region``.
 
     The set is the union of every cross-region inference profile id and every
-    foundation model that advertises ``ON_DEMAND``. PROVISIONED-only and
-    INFERENCE_PROFILE-only foundation models are deliberately excluded: their
-    bare id cannot be invoked, only the matching profile id can.
+    foundation model that advertises ``ON_DEMAND``, minus anything whose
+    lifecycle status is not ACTIVE (LEGACY models cannot be adopted by new
+    accounts; EOL models fail). PROVISIONED-only and INFERENCE_PROFILE-only
+    foundation models are deliberately excluded: their bare id cannot be
+    invoked, only the matching profile id can. A profile is dropped when every
+    model behind it is retired.
 
     Returns ``None`` (meaning "unknown, do not filter") if boto3 is missing or
     Bedrock cannot be queried — callers must treat that as "skip validation"
@@ -165,22 +188,29 @@ def available_ids(region, client=None):
         return None
     try:
         bedrock = client or boto3.client("bedrock", region_name=region)
-        ids = set()
+        profiles = {}
         paginator_kwargs = {"maxResults": 100}
         token = None
         while True:
             if token:
                 paginator_kwargs["nextToken"] = token
             resp = bedrock.list_inference_profiles(**paginator_kwargs)
-            ids.update(
-                p["inferenceProfileId"] for p in resp.get("inferenceProfileSummaries", [])
-            )
+            for p in resp.get("inferenceProfileSummaries", []):
+                profiles[p["inferenceProfileId"]] = _profile_model_ids(p)
             token = resp.get("nextToken")
             if not token:
                 break
+        ids = set()
+        retired = set()
         for summary in bedrock.list_foundation_models().get("modelSummaries", []):
-            if "ON_DEMAND" in (summary.get("inferenceTypesSupported") or []):
+            if not _is_active(summary):
+                retired.add(summary["modelId"])
+            elif "ON_DEMAND" in (summary.get("inferenceTypesSupported") or []):
                 ids.add(summary["modelId"])
+        for profile_id, model_ids in profiles.items():
+            if model_ids and model_ids <= retired:
+                continue
+            ids.add(profile_id)
     except Exception:
         return None
     available = frozenset(ids)
@@ -250,8 +280,8 @@ if __name__ == "__main__":
          {"prefer_global": True}, "bedrock/global.anthropic.claude-sonnet-4-6"),
         ("deepseek.v3.2", "us-east-1",
          {"needs_profile": False}, "bedrock/deepseek.v3.2"),
-        ("meta.llama3-3-70b-instruct-v1:0", "eu-west-1",
-         {}, "bedrock/eu.meta.llama3-3-70b-instruct-v1:0"),
+        ("amazon.nova-pro-v1:0", "eu-west-1",
+         {}, "bedrock/eu.amazon.nova-pro-v1:0"),
         ("anthropic.claude-sonnet-4-6", "us-west-2",
          {}, "bedrock/us.anthropic.claude-sonnet-4-6"),
     ]

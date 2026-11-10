@@ -53,6 +53,7 @@ Resources:
   AgentCoreGatewayRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-agentcore-gateway-role-${AWS::Region}'
       Description: Role assumed by AgentCore Gateway for tool dispatch
       AssumeRolePolicyDocument:
@@ -88,6 +89,7 @@ Resources:
   SyncLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-agentcore-sync-role-${AWS::Region}
       Description: Execution role for the Registry-to-Gateway sync Lambda - reads Registry API secrets, creates AgentCore Gateway targets, writes CloudWatch logs.
       AssumeRolePolicyDocument:
@@ -462,6 +464,7 @@ Resources:
   DemoToolLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-demo-tool-role-${AWS::Region}
       Description: Execution role for the demo search-knowledge-base Lambda tool invoked by AgentCore Gateway.
       AssumeRolePolicyDocument:
@@ -698,6 +701,7 @@ Resources:
   ProductInfoToolLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-product-info-tool-role-${AWS::Region}
       Description: Execution role for the product-info Lambda tool invoked by AgentCore Gateway.
       AssumeRolePolicyDocument:
@@ -952,6 +956,7 @@ Resources:
   FlightsMcpLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-flights-mcp-role-${AWS::Region}
       Description: Execution role for the workshop-flights-mcp Lambda, a demo MCP server invoked by AgentCore Gateway.
       AssumeRolePolicyDocument:
@@ -1095,6 +1100,7 @@ Resources:
   HotelsMcpLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-hotels-mcp-role-${AWS::Region}
       Description: Execution role for the workshop-hotels-mcp Lambda, a demo MCP server invoked by AgentCore Gateway.
       AssumeRolePolicyDocument:
@@ -1241,8 +1247,9 @@ Resources:
   RequestInterceptorRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-request-interceptor-role-${AWS::Region}
-      Description: Execution role for the AgentCore Gateway request interceptor Lambda - enforces Cedar policies on incoming tool calls.
+      Description: Execution role for the AgentCore Gateway request interceptor Lambda - writes the tool-call audit log and enforces group-based tool access from the TOOL_ACCESS_POLICY setting.
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -1426,7 +1433,7 @@ Resources:
                       logger.warning("Access denied: groups=%s tool=%s", caller_groups, tool_name)
                       return {
                           "interceptorOutputVersion": "1.0",
-                          "mcp": {"transformedGatewayRequest": {"headers": headers, "body": {
+                          "mcp": {"transformedGatewayResponse": {"statusCode": 200, "headers": headers, "body": {
                               "jsonrpc": "2.0", "id": body.get("id", ""),
                               "error": {"code": -32600, "message": f"Access denied: your team does not have permission to call '{tool_name}'"},
                           }}},
@@ -1453,6 +1460,7 @@ Resources:
   ResponseInterceptorRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-response-interceptor-role-${AWS::Region}
       Description: Execution role for the AgentCore Gateway response interceptor Lambda - applies Bedrock Guardrails to outbound tool results.
       AssumeRolePolicyDocument:

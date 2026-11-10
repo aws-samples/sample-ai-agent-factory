@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Two Paths to Tools"
+title: "Tools Gateway: two paths to tools"
 weight: 48
 ---
 
@@ -14,7 +14,7 @@ The MCP Registry provides direct access to Docker-based MCP servers via NGINX/Cl
 | **Audit** | NGINX access logs | CloudWatch structured logs |
 | **Guardrails** | None | Bedrock Guardrails on output |
 | **Access control** | None | Group-based (Cognito groups) |
-| **Tool types** | Docker MCP servers only | Lambda, HTTP APIs, and Docker servers |
+| **Tool types** | Every HTTP server in the Registry (Docker demo servers, Lambda Function URLs) | Lambda functions as native gateway targets (the Sync Lambda materializes `lambda://` entries; HTTP servers are skipped) |
 | **Use case** | Dev/test | Production |
 
 ## Test Path A

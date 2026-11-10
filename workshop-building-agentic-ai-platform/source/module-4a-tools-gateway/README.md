@@ -1,12 +1,12 @@
-# Module 4: AgentCore Gateway integration layer
+# Module 3a (Tools Gateway): AgentCore Gateway integration layer
 
 ## Overview
 
-Module 4 adds a **governed tool access layer** (Path B) on top of Module 3's MCP Registry. It uses Amazon Bedrock AgentCore Gateway to provide JWT authentication, group-based access control, audit logging, and Bedrock Guardrails -- capabilities that the NGINX reverse proxy (Path A) cannot offer.
+The Tools Gateway adds a **governed tool access layer** (Path B of Module 3a) on top of the same module's MCP Registry. It uses Amazon Bedrock AgentCore Gateway to provide JWT authentication, group-based access control, audit logging, and Bedrock Guardrails -- capabilities that the NGINX reverse proxy (Path A) cannot offer.
 
 ### The problem
 
-- Module 3's NGINX proxy (Path A) is fast but has no governance: no audit trail, no content screening, no per-team access control
+- the MCP Registry's NGINX proxy (Path A) is fast but has no governance: no audit trail, no content screening, no per-team access control
 - Lambda-backed tools can't be served through NGINX
 - Platform teams need to control which workstream teams can access which tools
 - Tool output may contain PII or harmful content that should be screened before reaching agents
@@ -36,15 +36,15 @@ Agent ──┤                   │   Fast, no governance, Docker servers only
 | **Bedrock Guardrails** | Tool output screened for PII, harmful content before reaching agents |
 | **Lambda-Native Targets** | Lambda functions invoked directly by the gateway (no HTTP proxy needed) |
 | **Tag-Based Sync** | Only Registry tools tagged for the gateway are synced (platform controls selection) |
-| **Registry Bridge** | Sync Lambda reads Module 3's Registry API and creates/removes gateway targets |
+| **Registry Bridge** | Sync Lambda reads the MCP Registry's Registry API and creates/removes gateway targets |
 
-### What Module 4 does NOT have
+### What the Tools Gateway does NOT have
 
 This is intentionally a **thin integration layer**:
 
-- No DynamoDB tables for tool storage (tools live in Module 3's Registry)
-- No FastAPI API (Module 3's Registry API is the control plane)
-- No Streamlit UI (Module 3's UI handles registration and browsing)
+- No DynamoDB tables for tool storage (tools live in the MCP Registry's Registry)
+- No FastAPI API (the MCP Registry's Registry API is the control plane)
+- No Streamlit UI (the MCP Registry's UI handles registration and browsing)
 - No approval workflows (tools are available once registered in the Registry)
 
 ---
@@ -68,7 +68,7 @@ This is intentionally a **thin integration layer**:
 ### Data flow
 
 ```
-Module 3 Registry API
+MCP Registry API
     │
     │ GET /api/servers (M2M auth)
     ▼
@@ -119,14 +119,14 @@ The `TOOL_ACCESS_POLICY` environment variable (JSON) maps Cognito groups to tool
 
 ### Cross-account pattern (platform vs workstream)
 
-In production, Module 4 sits in the **platform account** alongside Modules 2 and 3. Workstream accounts access tools via HTTPS + JWT:
+In production, the Tools Gateway sits in the **platform account** alongside the LLM Gateway (Module 2) and the MCP Registry (Module 3a). Workstream accounts access tools via HTTPS + JWT:
 
 ```
 PLATFORM ACCOUNT                    WORKSTREAM ACCOUNT
 ┌────────────────────┐              ┌────────────────────┐
-│ Module 3: Registry │              │ Module 5: Agent    │
-│ Module 4: Gateway  │◄──HTTPS+JWT──│ (Strands/AgentCore)│
-│ Module 2: LLM GW  │              │                    │
+│ MCP Registry (3a)  │              │ Module 4: Agent    │
+│ Tools Gateway (3a) │◄──HTTPS+JWT──│ (Strands/AgentCore)│
+│ LLM Gateway (2)   │              │                    │
 │ Cognito (identity) │              │                    │
 └────────────────────┘              └────────────────────┘
 ```
@@ -153,7 +153,7 @@ Workshop reality: single AWS account, but architecture STRUCTURED as if multi-ac
 
 ## Prerequisites
 
-- **Module 3 deployed** -- CDK imports 5 CloudFormation exports from Module 3
+- **MCP Registry deployed** (Module 3a) -- CDK imports 5 CloudFormation exports from the registry stacks
 - **AWS CLI** configured with credentials
 - **Python 3.12+**
 - **Node.js 22** and **AWS CDK CLI** (`npm install -g aws-cdk@2.147.0` — version matched to the workshop IDE bootstrap). Node.js 22 specifically, not "18 or newer": Node 18 and 20 are both end-of-life, and the CDK CLI prints a ten-line unsupported-version banner on every command in response, which reads like a crash.
@@ -242,9 +242,9 @@ Open `notebooks/01-two-paths.ipynb` and work through all 6 notebooks in order.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GATEWAY_ID` | _(empty)_ | AgentCore Gateway ID (set after create_gateway.py) |
-| `REGISTRY_URL` | _(empty)_ | Module 3 Registry API URL |
+| `REGISTRY_URL` | _(empty)_ | MCP Registry API URL |
 | `M2M_SECRET_NAME` | _(empty)_ | Secrets Manager secret with M2M credentials |
-| `CLOUDFRONT_URL` | _(empty)_ | Module 3 CloudFront URL |
+| `CLOUDFRONT_URL` | _(empty)_ | MCP Registry CloudFront URL |
 | `SYNC_FILTER_TAGS` | _(empty)_ | Comma-separated tags to filter; empty = sync all |
 
 ### Request interceptor
@@ -268,7 +268,7 @@ Open `notebooks/01-two-paths.ipynb` and work through all 6 notebooks in order.
 
 ### Authentication
 
-- AgentCore Gateway uses CUSTOM_JWT authorizer with Module 3's Cognito OIDC discovery URL
+- AgentCore Gateway uses CUSTOM_JWT authorizer with the MCP Registry's Cognito OIDC discovery URL
 - M2M auth to Registry API via static token or Cognito `client_credentials` grant
 
 ### Authorization

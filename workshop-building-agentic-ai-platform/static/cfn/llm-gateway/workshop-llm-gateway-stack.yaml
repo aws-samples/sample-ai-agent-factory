@@ -44,9 +44,10 @@ Parameters:
 
   PostgresImageTag:
     Type: String
-    # 16.7 patches CVE-2026-2003 / CVE-2026-2006 (info disclosure + arbitrary
-    # code execution from missing multibyte-length validation) present in 16.6.
-    Default: '16.7'
+    # 16.12 (February 2026 security release) is the first 16.x release that fixes
+    # CVE-2026-2003 / CVE-2026-2006 (info disclosure + arbitrary code execution
+    # from missing multibyte-length validation); 16.7 and older do not carry the fix.
+    Default: '16.12'
     Description: >
       PostgreSQL Docker image tag (use Debian-based, not Alpine, for EFS uid
       compatibility). Pinned to a specific minor version for supply-chain
@@ -65,11 +66,153 @@ Parameters:
 # ---------------------------------------------------------------------------
 Conditions:
   GenerateAdminKey: !Equals [!Ref AdminKey, '']
+  # The permissions boundary fences bounded roles to the deployment region plus
+  # us-east-1 (global services: IAM, STS, CloudFront, Route 53, Marketplace).
+  # When the stack itself is in us-east-1 the list collapses to one value.
+  DeployedInUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
 
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
 Resources:
+  #============================================================================
+  # Workshop permissions boundary -- the ceiling every IAM role the workshop
+  # creates runs under. Created in this stack because it is the first one both
+  # contentspec.yaml and ./deploy-cfn.sh deploy; every other template references
+  # it by its fixed name. It allows everything except unbounded IAM/Organizations
+  # writes: a role may be created or modified only when it carries this same
+  # boundary, nobody can remove or edit the boundary, and PassRole/reads stay
+  # open. The ParticipantRole's CDK bootstrap (cdk bootstrap
+  # --custom-permissions-boundary workshop-permissions-boundary) and FAST's CDK
+  # app (@aws-cdk/core:permissionsBoundary context) attach it to every role they
+  # create, which is what closes the create-role / attach-admin escalation path
+  # that the scoped participant policies alone could not. See POLICY_NOTES.md.
+  #============================================================================
+  WorkshopPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: workshop-permissions-boundary
+      Description: Permissions boundary for every IAM role the Agentic AI Platform workshop creates (CloudFormation templates, CDK bootstrap roles, FAST CDK roles).
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Ceiling for everything that is not identity/org/billing management,
+          # fenced to the workshop regions exactly like the participant policies
+          # (aws:RequestedRegion; global services report us-east-1). Workloads
+          # keep everything they do today: all ten templates deploy into
+          # ${AWS::Region}, and the only out-of-region calls are to global
+          # services and to the Workshop Studio assets bucket in us-east-1.
+          - Sid: AllowWorkshopRegionsExceptIdentityAndOrgManagement
+            Effect: Allow
+            NotAction:
+              - iam:*
+              - organizations:*
+              - account:*
+              - billing:*
+              - sso:*
+              - sso-directory:*
+              # Model inference is granted by the next statement without the
+              # Region fence: cross-Region inference profiles (global.*, us.*)
+              # authorize the foundation model in the destination Region, and
+              # a fenced boundary denied `bedrock:InvokeModel on
+              # arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6`
+              # for the LLM Gateway task role (observed live, 2026-11-08).
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !If
+                  - DeployedInUsEast1
+                  - [us-east-1]
+                  - [!Ref 'AWS::Region', us-east-1]
+          # Same typed ARNs as the participant policies' BedrockInvokeModelsScoped;
+          # the Region-less foundation-model form is what global.* profiles use.
+          - Sid: BedrockInferenceFollowsCrossRegionProfiles
+            Effect: Allow
+            Action:
+              # The Converse API is authorized through these two actions; there is
+              # no bedrock:Converse IAM action (Access Analyzer: INVALID_ACTION).
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*'
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
+          # IAM reads: ListRoles/ListPolicies/GetAccountSummary take no ARN, so
+          # this is the one IAM statement that keeps Resource "*". Read-only.
+          - Sid: IamReadOnly
+            Effect: Allow
+            Action:
+              - iam:Get*
+              - iam:List*
+            Resource: '*'
+          # PassRole, service-linked roles and role tags: roles in this account
+          # only (service-linked roles live under role/aws-service-role/*).
+          - Sid: IamPassRoleAndServiceLinkedRolesInThisAccount
+            Effect: Allow
+            Action:
+              - iam:PassRole
+              - iam:CreateServiceLinkedRole
+              - iam:TagRole
+              - iam:UntagRole
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+          # Customer-managed policy and instance-profile lifecycle, this account
+          # only. The boundary's own ARN is carved out again by the Deny below.
+          - Sid: IamPolicyAndInstanceProfileLifecycleInThisAccount
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:TagPolicy
+              - iam:UntagPolicy
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - iam:TagInstanceProfile
+              - iam:UntagInstanceProfile
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/*'
+              - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/*'
+          # Role writes: only when the role being written carries this boundary
+          # (self-propagation: a bounded principal can only make more bounded
+          # principals). Every action here supports iam:PermissionsBoundary.
+          - Sid: RoleWritesOnlyWhenTheRoleCarriesThisBoundary
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+            Condition:
+              StringEquals:
+                iam:PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
+          - Sid: DenyRemovingTheBoundary
+            Effect: Deny
+            Action:
+              - iam:DeleteRolePermissionsBoundary
+              - iam:DeleteUserPermissionsBoundary
+            Resource: '*'
+          - Sid: DenyChangingTheBoundaryPolicyItself
+            Effect: Deny
+            Action:
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+            Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
+
 
   # =========================================================================
   # Networking
@@ -299,9 +442,13 @@ Resources:
       Encrypted: true
       PerformanceMode: generalPurpose
       ThroughputMode: bursting
+      # Workshop tag set explicitly: the ParticipantRole's EFS delete statement is
+      # conditioned on aws:ResourceTag/Workshop (see POLICY_NOTES.md).
       FileSystemTags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-efs'
+        - Key: Workshop
+          Value: AgentCore-Platform
 
   EFSMountTarget1:
     Type: AWS::EFS::MountTarget
@@ -323,6 +470,11 @@ Resources:
     Type: AWS::EFS::AccessPoint
     Properties:
       FileSystemId: !Ref FileSystem
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-postgres-ap'
+        - Key: Workshop
+          Value: AgentCore-Platform
       PosixUser:
         Uid: '999'
         Gid: '999'
@@ -339,6 +491,7 @@ Resources:
   ECSExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Ref WorkshopPermissionsBoundary
       RoleName: !Sub '${AWS::StackName}-ecs-exec-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -376,14 +529,17 @@ Resources:
               AWS Marketplace API does not support resource-level ARNs — there
               is no way to narrow the resource. The action is required on a
               fresh account for LiteLLM to complete the one-time subscription
-              handshake for Marketplace-served Bedrock models (e.g. Claude 4.x
-              Sonnet). A Condition like aws:CalledVia: bedrock.amazonaws.com
-              would not apply here because LiteLLM calls Marketplace directly
-              from the ECS task, not via Bedrock. The real permission boundary
-              is the Workshop Studio SCP on the sandbox account (self-hosted:
-              dedicated disposable account + optional
-              static/cfn/self-service-scp.json).
+              handshake for Marketplace-served Bedrock models. `Subscribe` is
+              instead narrowed with the `aws-marketplace:ProductId` condition
+              to the four Anthropic product IDs LiteLLM serves (Bedrock model
+              cards); `ViewSubscriptions` has no condition key. A Condition
+              like aws:CalledVia: bedrock.amazonaws.com would not apply because
+              LiteLLM calls Marketplace directly from the ECS task, not via
+              Bedrock. The Workshop Studio SCP on the sandbox account
+              (self-hosted: dedicated disposable account + optional
+              static/cfn/self-service-scp.json) remains the outer boundary.
     Properties:
+      PermissionsBoundary: !Ref WorkshopPermissionsBoundary
       RoleName: !Sub '${AWS::StackName}-ecs-task-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -419,9 +575,23 @@ Resources:
               # AWS Marketplace does not support resource-level ARNs.
               - Effect: Allow
                 Action:
-                  - aws-marketplace:Subscribe
                   - aws-marketplace:ViewSubscriptions
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - aws-marketplace:Subscribe
+                Resource: '*'
+                Condition:
+                  ForAnyValue:StringEquals:
+                    # Marketplace product IDs from the Bedrock model cards: Claude
+                    # Sonnet 4.6, Haiku 4.5, Opus 4.5, Opus 4.6 — the only Marketplace-
+                    # served models LiteLLM is configured with. Amazon Nova, DeepSeek
+                    # and Mistral have no Marketplace product and need no subscription.
+                    aws-marketplace:ProductId:
+                      - prod-ffvjxvh4ltq64
+                      - prod-xdkflymybwmvi
+                      - prod-jhuafngbly644
+                      - prod-5ukwuglpt66kg
         - PolicyName: BedrockGuardrails
           PolicyDocument:
             Version: '2012-10-17'
@@ -709,6 +879,10 @@ Resources:
     Properties:
       Name: !Sub '${AWS::StackName}-api'
       ProtocolType: HTTP
+      # Workshop tag set explicitly: the ParticipantRole's API Gateway write
+      # statement is conditioned on aws:ResourceTag/Workshop.
+      Tags:
+        Workshop: AgentCore-Platform
 
   HttpApiIntegration:
     Type: AWS::ApiGatewayV2::Integration

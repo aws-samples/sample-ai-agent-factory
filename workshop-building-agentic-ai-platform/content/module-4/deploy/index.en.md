@@ -5,7 +5,7 @@ weight: 72
 
 In this step you will clone the FAST repository, create a travel agent pattern, and deploy the full stack with CDK.
 
-::alert[**About stack naming.** The platform foundations in Modules 2 and 3 use `Workshop-*-Stack` names because Workshop Studio provisions them for you from `contentspec.yaml`. Module 4 is different — you deploy FAST yourself from the IDE using CDK, which creates a stack called `FAST-stack` by convention from the FAST repository. Both naming schemes are intentional.]{type="info"}
+::alert[**About stack naming.** The platform foundations in Modules 2 and 3 use lowercase `workshop-*-stack` names (`workshop-llm-gateway-stack`, `workshop-registry-stack`, `workshop-tools-gateway-stack`, `workshop-agentcore-stack`) because Workshop Studio provisions them for you from the `label` fields in `contentspec.yaml`. Module 4 is different — you deploy FAST yourself from the IDE using CDK, which creates a stack called `FAST-stack` by convention from the FAST repository. Both naming schemes are intentional.]{type="info"}
 
 ## Clone the repository
 
@@ -103,12 +103,12 @@ tools through an AgentCore Gateway:
 Flight tools:
 - search_flights(origin, destination, date, max_results?) – search flights by route and date
 - get_flight_details(flight_id) – get full details for a specific flight
-- search_flights_by_budget(origin, destination, date, max_price) – search within a budget
+- search_flights_by_budget(origin, destination, max_price, date?) – search within a budget
 
 Hotel tools:
-- search_hotels(city, checkin_date?, checkout_date?, guests?, max_results?) – search hotels by city
+- search_hotels(city, check_in, check_out, max_results?) – search hotels by city and stay dates
 - get_hotel_details(hotel_id) – get full details for a specific hotel
-- search_hotels_by_budget(city, checkin_date, checkout_date, max_price_per_night) – search within a budget
+- search_hotels_by_budget(city, max_price_per_night, check_in?, check_out?) – search within a budget
 
 You also have access to a Code Interpreter for calculations and data analysis.
 
@@ -303,6 +303,54 @@ grep -nE 'travel_agent|chmod -R a\+rX' patterns/strands-travel-agent/Dockerfile
 
 The `grep` output should show the `RUN chmod -R a+rX /app` line sitting immediately above `USER bedrock_agentcore`, and every `COPY`/`CMD` referring to `strands-travel-agent`/`travel_agent`.
 
+## Keep prompts and responses on the spans
+
+AgentCore Runtime exports every agent run as OpenTelemetry spans, but by default the AWS Distro for OpenTelemetry (ADOT) strips the prompt and response text out of them. Module 5 reads that text in CloudWatch Omni's agent traces, and its evaluators score it. Two settings put it back, and a third pins where spans land.
+
+The pinned FAST release ships ADOT 0.16.0; content extraction needs 0.18.0 or later. The patch below bumps the distro in the Dockerfile and adds two environment variables to the runtime in `infra-cdk/lib/backend-stack.ts`, three settings in total:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+cd /workshop/fast-agent
+python3 - << 'PYEOF'
+from pathlib import Path
+
+dockerfile = Path("patterns/strands-travel-agent/Dockerfile")
+text = dockerfile.read_text()
+# AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT requires ADOT >= 0.18.0.
+text = text.replace("aws-opentelemetry-distro==0.16.0", "aws-opentelemetry-distro==0.22.0")
+dockerfile.write_text(text)
+
+stack = Path("infra-cdk/lib/backend-stack.ts")
+text = stack.read_text()
+marker = "GATEWAY_CREDENTIAL_PROVIDER_NAME:"
+extra = (
+    "      // Module 5: keep prompt/response text on spans (Omni traces and evaluators read it),\n"
+    "      // and send spans to the shared aws/spans log group that Transaction Search,\n"
+    "      // the GenAI Observability dashboard and the evaluation role all read.\n"
+    '      AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT: "true",\n'
+    '      UNIFIED_TRACES_DESTINATION_ENABLED: "false",\n'
+)
+if "AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT" not in text:
+    lines = text.splitlines(keepends=True)
+    idx = next(i for i, line in enumerate(lines) if marker in line)
+    lines.insert(idx + 1, extra)
+    stack.write_text("".join(lines))
+print("Dockerfile ADOT pin:", [l.strip() for l in dockerfile.read_text().splitlines() if "opentelemetry-distro" in l])
+print("Runtime env additions present:", "UNIFIED_TRACES_DESTINATION_ENABLED" in stack.read_text())
+PYEOF
+:::
+
+You can expect the following output:
+
+:::code{showCopyAction=false showLineNumbers=false language=text}
+Dockerfile ADOT pin: ['uv pip install --no-cache aws-opentelemetry-distro==0.22.0']
+Runtime env additions present: True
+:::
+
+`AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT=true` keeps the model payloads and tool request and response data on the spans. `UNIFIED_TRACES_DESTINATION_ENABLED=false` sends spans to the account's shared `aws/spans` log group instead of the agent's own log group (the default for agents created after July 2026), so the trace destination, the evaluation role's index permissions and Module 5's queries all point at the same place.
+
+::alert[In production, decide deliberately whether prompt and response text may be stored in CloudWatch. The workshop's travel chat is synthetic; a real agent handling personal data needs redaction or the default stripped spans. See [Protect sensitive data](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/omni-data-protection.html) in the CloudWatch Omni guide.]{type="warning"}
+
 ## Add LiteLLM dependency
 
 Add the `litellm` package to the travel agent's requirements:
@@ -342,6 +390,32 @@ EOF
 
 ::alert[This workshop uses `PUBLIC` network mode for simplicity. In production, set `network_mode: VPC` and deploy the AgentCore Runtime into private subnets with VPC endpoints. See the [FAST Deployment Guide](https://github.com/awslabs/fullstack-solution-template-for-agentcore/blob/main/docs/DEPLOYMENT.md) for VPC configuration details.]{type="warning"}
 
+## Tag the FAST stacks and set the permissions boundary
+
+Record two things in `infra-cdk/cdk.json` so that **every** `cdk deploy` (this one and the redeploys later in the module) carries them. First, the workshop tag: FAST's stacks are stamped with `Workshop=AgentCore-Platform`. CloudFormation propagates stack tags to the resources FAST creates, including its Cognito user pool — and the Workshop IDE's participant policy only allows the Cognito admin calls you run in *Run the agent* and Module 5 (`admin-create-user`, `admin-set-user-password`, …) on pools that carry this tag:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+cd /workshop/fast-agent
+python3 - <<'PYEOF'
+import json
+from pathlib import Path
+
+cdk_json = Path("infra-cdk/cdk.json")
+cfg = json.loads(cdk_json.read_text())
+tags = [t for t in cfg.get("tags", []) if t.get("Key") != "Workshop"]
+tags.append({"Key": "Workshop", "Value": "AgentCore-Platform"})
+cfg["tags"] = tags
+cfg.setdefault("context", {})["@aws-cdk/core:permissionsBoundary"] = {"name": "workshop-permissions-boundary"}
+cdk_json.write_text(json.dumps(cfg, indent=2) + "\n")
+print("cdk.json tags:", cfg["tags"])
+print("cdk.json permissions boundary:", cfg["context"]["@aws-cdk/core:permissionsBoundary"])
+PYEOF
+:::
+
+Expected output: `cdk.json tags: [{'Key': 'Workshop', 'Value': 'AgentCore-Platform'}]` and `cdk.json permissions boundary: {'name': 'workshop-permissions-boundary'}`.
+
+Second, the permissions boundary. `workshop-permissions-boundary` is an IAM managed policy the workshop stacks created in this account; every IAM role the workshop creates runs under it, and it caps those roles to the workshop's Regions (model inference excepted, because cross-Region inference profiles route to other Regions) and to everything *except* identity, organization and billing management — in particular, creating or changing a role that does not carry the same boundary. The `@aws-cdk/core:permissionsBoundary` context makes the FAST CDK app attach it to every role FAST creates (agent runtime role, Lambda roles, …), and the bootstrap command below attaches it to the five CDK roles — including the CloudFormation execution role, which CDK would otherwise create with `AdministratorAccess`. Your Workshop IDE role is only allowed to create CDK roles that carry this boundary, so the two settings are not optional.
+
 ## Bootstrap and deploy
 
 Install CDK dependencies:
@@ -362,10 +436,12 @@ test -d node_modules && npx cdk --version
 
 Expected: a single line like `2.x.y (build ...)`. If `node_modules/` is missing or `npx cdk --version` errors out, re-run `npm ci`.
 
-Bootstrap CDK in your account (only needed once per account/region). Use `npx cdk` so the deploy uses the project-local CDK CLI (matching `aws-cdk-lib` in `node_modules/`) rather than any older globally-installed `cdk`:
+Bootstrap CDK in your account (only needed once per account/region). Use `npx cdk` so the deploy uses the project-local CDK CLI (matching `aws-cdk-lib` in `node_modules/`) rather than any older globally-installed `cdk`, pass the workshop permissions boundary, and point `--template` at the bootstrap template the workshop ships. That file is the CDK CLI's own template with one change: every one of the five bootstrap roles carries the boundary, not only the CloudFormation execution role. The stock template leaves the file-publishing, image-publishing, lookup and deployment roles unbounded, and your IDE role is only allowed to create CDK roles that carry the boundary, so the stock bootstrap fails on `FilePublishingRole` with `AccessDenied`.
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-npx cdk bootstrap
+npx cdk bootstrap \
+  --template /workshop/source/module-4b-fast/cdk-bootstrap-template.yaml \
+  --custom-permissions-boundary workshop-permissions-boundary
 :::
 
 Verify the bootstrap stack reached `CREATE_COMPLETE` (or already existed):
@@ -375,7 +451,16 @@ aws cloudformation describe-stacks --stack-name CDKToolkit \
   --query "Stacks[0].StackStatus" --output text --region $(aws configure get region)
 :::
 
-Expected output: `CREATE_COMPLETE` or `UPDATE_COMPLETE`. If the command errors with `Stack with id CDKToolkit does not exist`, the bootstrap did not complete — re-run `npx cdk bootstrap`.
+Expected output: `CREATE_COMPLETE` or `UPDATE_COMPLETE`. If the command errors with `Stack with id CDKToolkit does not exist`, the bootstrap did not complete — re-run the `npx cdk bootstrap` command above. If it fails with `AccessDenied` on `iam:CreateRole`, either the `--custom-permissions-boundary` flag or the `--template` flag was left off: the IDE role may only create CDK roles that carry the boundary, and only the shipped template puts it on all five.
+
+Confirm the CloudFormation execution role CDK will deploy with is bounded (the policy name should end the ARN):
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+aws iam get-role --role-name "cdk-hnb659fds-cfn-exec-role-$(aws sts get-caller-identity --query Account --output text)-$(aws configure get region)" \
+  --query Role.PermissionsBoundary.PermissionsBoundaryArn --output text
+:::
+
+Expected output: `arn:aws:iam::<account>:policy/workshop-permissions-boundary`.
 
 Authenticate Docker with ECR (required to push the agent container):
 
@@ -409,6 +494,15 @@ Deploy the stack:
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 npx cdk deploy --require-approval never
 :::
+
+Confirm the stack carries the workshop tag (the Cognito steps later depend on it):
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+aws cloudformation describe-stacks --stack-name FAST-stack \
+  --query "Stacks[0].Tags[?Key=='Workshop'].Value" --output text --region $(aws configure get region)
+:::
+
+Expected output: `AgentCore-Platform`. If it is empty, re-run the **Tag the FAST stacks** step and deploy again.
 
 ::alert[The deployment takes approximately 5–10 minutes. CDK builds the agent container, pushes it to ECR, creates the Cognito User Pool, provisions AgentCore Runtime, Memory, and Gateway.]{type="info"}
 
@@ -535,6 +629,6 @@ You will wire them in the **Connect to Tools Gateway** step.
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`02-deploy-fast.ipynb`**.

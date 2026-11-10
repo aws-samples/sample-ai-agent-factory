@@ -1,5 +1,5 @@
 ---
-title: "Architecture and Prerequisites"
+title: "Architecture and prerequisites"
 weight: 71
 ---
 
@@ -33,7 +33,7 @@ FAST ships with multiple agent patterns (Strands, LangGraph, Claude Agent SDK). 
 
 ::alert[**Track 1 participants — this step is required.** If you skipped Modules 2 and 3, the Anthropic Marketplace subscription has not been activated yet. The FAST agent uses Claude Sonnet and will fail with `AccessDeniedException` until you complete this one-time step. If you completed Module 2, you have already done this and can skip ahead.]{type="warning"}
 
-Before the agent can invoke any Claude model, Anthropic requires a one-time use case submission for this AWS account. Open the Bedrock console and prime **both** Claude Sonnet 4.5 and 4.6 — the baseline agent uses 4.5, and the workshop-modified agent uses 4.6 via the LLM Gateway.
+Before the agent can invoke any Claude model, Anthropic requires a one-time use case submission for this AWS account. Open the Bedrock console and prime **Claude Sonnet 4.6** — the model the FAST agent uses, both directly (`global.anthropic.claude-sonnet-4-6`) and through the LLM Gateway's `claude-sonnet` alias. Do not prime Claude Sonnet 4.5: it is in Bedrock's Legacy stage (end of life April 8, 2027) and new accounts cannot adopt it.
 
 ::alert[Confirm the Bedrock console **region selector** (top-right) matches the region you deployed into — model access is granted per region.]{type="info"}
 
@@ -41,13 +41,12 @@ Before the agent can invoke any Claude model, Anthropic requires a one-time use 
 
 ::::expand{header="First-time setup — step by step"}
 1. In the Bedrock console left navigation, open **Model catalog**.
-2. Find **Claude Sonnet 4.5** (use the search/filter if needed) and click the model card.
+2. Find **Claude Sonnet 4.6** (use the search/filter if needed) and click the model card.
 3. Click **Open in playground** in the top-right of the model page.
 4. Type `hi` in the prompt box and click **Run**.
 5. If the **Submit use case details for Anthropic** dialog appears, fill the form (use `Workshop testing` for the use case) and click **Submit**.
 6. Wait for the model to return a response.
-7. Go back to **Model catalog** and repeat steps 2–6 for **Claude Sonnet 4.6**.
-8. You can now close the playground — the account is primed for both models.
+7. You can now close the playground — the account is primed for Anthropic models.
 ::::
 
 ## Verify prerequisites
@@ -59,7 +58,7 @@ aws configure get region   # should print your deploy region
 node --version && cdk --version && python3 --version && docker --version
 :::
 
-::alert[If deploying from your local machine instead of the Workshop IDE, verify you have Node.js 22, Python 3.12+, CDK v2, and Docker (or Finch with `export CDK_DOCKER=finch`). Node.js 22 is what the Workshop IDE installs and what we recommend, but the hard floor is lower: FAST's frontend pins Vite 7.3.1, whose declared engines range is `^20.19.0 || >=22.12.0`, so Node 20.19+ does build successfully. What you get on Node 18/20 is noise, not failure — both are end-of-life, so the CDK CLI prints a ten-line `!!!!!!` unsupported-version banner on every command, which reads like a crash but is harmless. Below 20.19, the frontend build genuinely fails.]{type="info"}
+::alert[If deploying from your local machine instead of the Workshop IDE, verify you have Node.js 22, Python 3.12+, CDK v2, and Docker (or Finch with `export CDK_DOCKER=finch`). Node.js 22 is what the Workshop IDE installs and what we recommend. The hard floor is Node 20.19: FAST's frontend pins Vite 7.3.1, whose declared engines range is `^20.19.0 || >=22.12.0`, so Node 20.19+ builds successfully, while Node 18 and any 20.x release before 20.19 fail the frontend build. On Node 20.19+ the only side effect is noise: Node 20 is end-of-life, so the CDK CLI prints a ten-line `!!!!!!` unsupported-version banner on every command, which reads like a crash but is harmless.]{type="info"}
 
 ## Verify platform foundations
 
@@ -68,7 +67,7 @@ node --version && cdk --version && python3 --version && docker --version
 Your platform team deployed the tool registry and gateway in Module 3a (MCP path) or Module 3b (AgentCore path). There are two paths — choose the tab that matches your track:
 
 - **MCP Path (3a):** Uses the open-source MCP Gateway & Registry — tools are registered in a self-managed catalog
-- **AgentCore Path (3b):** Uses the AWS-native AgentCore Registry & Gateway — fully managed, no infrastructure to maintain
+- **AgentCore Path (3b):** Uses the AWS-native AWS Agent Registry & AgentCore Gateway — fully managed, no infrastructure to maintain
 
 Both paths provide the same travel tools (flights, hotels, knowledge base) through an AgentCore Gateway. Your agent code is identical regardless of which path was used.
 
@@ -136,6 +135,6 @@ You should see targets including flights, hotels, and knowledge base tools.
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`01-architecture-prereqs.ipynb`**.

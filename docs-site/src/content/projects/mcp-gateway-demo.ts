@@ -508,10 +508,10 @@ const WORKSHOP_MODULE_3B_STEP_7 = 'workshop-building-agentic-ai-platform/content
  */
 export const module3bComparison = {
   title: "How this differs from the workshop's Module 3b",
-  text: 'Both place an Amazon Bedrock AgentCore Gateway with Cedar policies and interceptors in front of tools. The workshop module is a teaching build: it creates an AgentCore Registry, registers three MCP tools, walks through the Publisher and Admin approval workflow, and attaches its Cedar policy in LOG_ONLY mode because ENFORCE would empty tools/list there. This project is a deployable governance layer: the policy engine runs in ENFORCE mode with one single-action statement per tool, and five integration tests run against the live gateway.',
+  text: 'Both place an Amazon Bedrock AgentCore Gateway with Cedar policies and interceptors in front of tools. The workshop module is a teaching build: it creates an AWS Agent Registry, registers three MCP tools, walks through the Publisher and Admin approval workflow, and attaches its Cedar policy in LOG_ONLY mode because ENFORCE would empty tools/list there. This project is a deployable governance layer: the policy engine runs in ENFORCE mode with one single-action statement per tool, and five integration tests run against the live gateway.',
   sources: [
     { file: WORKSHOP_README_FOR_COMPARISON, heading: "What you'll build", quote: 'AWS-native tool governance with Amazon Bedrock' },
-    { file: WORKSHOP_MODULE_3B_INDEX, quote: 'Created an AgentCore Registry and registered 3 MCP tools with metadata' },
+    { file: WORKSHOP_MODULE_3B_INDEX, quote: 'Created an AWS Agent Registry and registered 3 MCP tools with metadata' },
     { file: WORKSHOP_MODULE_3B_STEP_7, quote: 'Attach with `"mode": "LOG_ONLY"`, not `"ENFORCE"`.' },
     { file: GATEWAY_README, heading: 'Verified architecture', quote: '3. Cedar policy engine (ENFORCE)' },
     { file: FORBID_DESTRUCTIVE_DB, quote: 'One single-action forbid per tool' },

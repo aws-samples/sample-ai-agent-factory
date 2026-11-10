@@ -67,12 +67,12 @@ export const faq: FaqEntry[] = [
     id: 'workshop-other-regions',
     question: 'Can I run the workshop in eu-central-1 or ap-southeast-1?',
     answer:
-      'No. The validated regions are us-west-2 (default), us-east-1 and eu-west-1. Elsewhere the Amazon Bedrock AgentCore Registry control plane returns an internal error, which breaks Modules 3b and 4. Model access must also be granted in the region you pick.',
+      'No. The validated regions are us-west-2 (default), us-east-1 and eu-west-1. Elsewhere the AWS Agent Registry control plane is not yet generally available, which breaks Modules 3b and 4. Model access (the Anthropic use-case form) is per account and must cover the region you pick.',
     sources: [
       {
         file: WORKSHOP_SELF_PACED_PAGE,
         heading: 'Region',
-        quote: 'it returns an internal error in regions such as `eu-central-1` and `ap-southeast-1`',
+        quote: 'one of: us-west-2, us-east-1, eu-west-1',
       },
     ],
     projectIds: ['workshop'],

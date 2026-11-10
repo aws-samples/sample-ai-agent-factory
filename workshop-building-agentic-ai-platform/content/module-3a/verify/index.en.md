@@ -1,5 +1,5 @@
 ---
-title: "Verify and Hand Off"
+title: "Verify and hand off"
 weight: 46
 ---
 
@@ -130,4 +130,4 @@ echo "========================="
 
 ## What's next
 
-The Tools Gateway section adds runtime governance on top of the Registry — Bedrock Guardrails, request interceptors, and audit logging for every tool call. Proceed to **Tools Gateway: Introduction**.
+The Tools Gateway section adds runtime governance on top of the Registry — Bedrock Guardrails, request interceptors, and audit logging for every tool call. Proceed to **Tools Gateway: introduction**.

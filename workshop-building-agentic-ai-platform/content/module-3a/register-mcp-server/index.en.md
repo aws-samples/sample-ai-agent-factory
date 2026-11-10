@@ -1,5 +1,5 @@
 ---
-title: "Register MCP Servers"
+title: "Register MCP servers"
 weight: 43
 ---
 
@@ -98,7 +98,7 @@ If you click into the scan details in the Registry UI you will see a JSON payloa
 | `critical_issues / high / medium / low = 0` | **Zero actual findings.** This is the line that matters for functionality. |
 | `error_message: "... Access denied ..."` | The verbose form of the same thing — an `AWS_IAM`-protected endpoint rejecting an unsigned probe. |
 
-Once you toggle the server to **enabled**, tool calls flow through the AgentCore Gateway's Lambda target (Module 3a's Tools Gateway section), which signs requests with IAM credentials and invokes the Lambda URL correctly. Nothing about this scan state blocks normal tool invocation.
+Once you toggle the server to **enabled**, tool calls flow through the AgentCore Gateway's Lambda target (Module 3a's Tools Gateway section), which invokes the function by its Lambda ARN under the gateway's IAM service role — it never calls the Function URL. The URL is only the metadata the Registry stores (and probes unsigned, hence the failed scan). Nothing about this scan state blocks normal tool invocation.
 ::::
 
 Verify the registration via the API — confirm the server is registered and enabled:
@@ -157,6 +157,6 @@ else:
 
 You should see `Enabled: True`.
 
-::alert[The Registry stores the server metadata and makes it discoverable. The actual tool calls (e.g. `search_flights`) will go through the AgentCore Gateway in the Tools Gateway section later in this module, which has IAM credentials to invoke the Lambda function URLs.]{type="info"}
+::alert[The Registry stores the server metadata and makes it discoverable. The actual tool calls (e.g. `search_flights`) will go through the AgentCore Gateway in the Tools Gateway section later in this module, whose Lambda targets invoke the functions by ARN under the gateway's IAM service role (the Function URL stays Registry metadata, used by Path A).]{type="info"}
 
 Both MCP servers are registered and enabled. Next, register the Travel Agent card.

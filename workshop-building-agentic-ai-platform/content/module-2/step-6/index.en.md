@@ -1,5 +1,5 @@
 ---
-title: "Spend Tracking & Admin"
+title: "Spend tracking & admin"
 weight: 36
 ---
 
@@ -69,8 +69,7 @@ The response wraps everything in an `info` object; look at `info.spend` against
 
 LiteLLM exposes the deep `/health` endpoint which probes every registered backend — but that endpoint routinely takes 30-90 seconds and returns `503 Service Unavailable` through API Gateway's 30-second integration timeout. For the workshop we use two lightweight endpoints instead: `/health/readiness` (checks the proxy process + database) and `/v1/models` (lists every configured model). Together they answer the same question in under a second.
 
-`/health/readiness` is deliberately minimal — it returns `status` and `db` and nothing
-else, so do not expect a version string from it:
+`/health/readiness` is lightweight — it reports the proxy status and the database connection state (plus a few more fields such as the LiteLLM version, cache status and success callbacks); this step prints only `status` and `db`:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 echo "=== Proxy readiness ==="

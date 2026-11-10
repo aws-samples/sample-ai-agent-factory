@@ -210,7 +210,9 @@ class TestRequestInterceptorAccessControl:
         )
 
         result = request_interceptor_handler(event, None)
-        body = result["mcp"]["transformedGatewayRequest"]["body"]
+        assert "transformedGatewayRequest" not in result["mcp"]  # denied: answered, not forwarded
+        assert result["mcp"]["transformedGatewayResponse"]["statusCode"] == 200
+        body = result["mcp"]["transformedGatewayResponse"]["body"]
         assert body["error"]["code"] == -32600
         assert "Access denied" in body["error"]["message"]
 
@@ -228,7 +230,9 @@ class TestRequestInterceptorAccessControl:
         )
 
         result = request_interceptor_handler(event, None)
-        body = result["mcp"]["transformedGatewayRequest"]["body"]
+        assert "transformedGatewayRequest" not in result["mcp"]  # denied: answered, not forwarded
+        assert result["mcp"]["transformedGatewayResponse"]["statusCode"] == 200
+        body = result["mcp"]["transformedGatewayResponse"]["body"]
         assert body["error"]["code"] == -32600
 
     @patch("handlers.interceptors.TOOL_ACCESS_POLICY", "")

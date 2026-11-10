@@ -1,5 +1,5 @@
 ---
-title: "Registry Overview"
+title: "Registry overview"
 weight: 42
 ---
 
@@ -66,7 +66,7 @@ Open the registry UI in your browser:
 echo "Registry UI: $REGISTRY_URL"
 :::
 
-You will see the sign-in page. Select **Continue with AWS Cognito**:
+You will see the sign-in page. Select **Continue with AWS Cognito** — the `admin` user you sign in as lives in the workshop's Cognito user pool, so the Cognito hosted sign-in form is the one that accepts the password below (the *Admin Login* checkbox is the registry's local-account fallback and is not used in this workshop):
 
 ![Registry sign-in page showing Continue with AWS Cognito and Admin Login options](/static/img/module-3/registry-login-options.png)
 

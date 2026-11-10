@@ -33,7 +33,7 @@ top of it (Module 4):
   access to Amazon Bedrock models.
 - **Module 3a — MCP Registry + Tools Gateway:** register tools in the MCP Gateway & Registry, then
   layer an AgentCore Tools Gateway on top for JWT auth, audit, and guardrails.
-- **Module 3b — AgentCore Registry & Gateway:** AWS-native tool governance with Amazon Bedrock
+- **Module 3b — AWS Agent Registry & AgentCore Gateway:** AWS-native tool governance with Amazon Bedrock
   AgentCore, Cedar-based authorization, and EventBridge-driven approval workflows.
 - **Module 4 — Build Your Agent:** deploy a full-stack travel agent using FAST (Fullstack
   AgentCore Solution Template) on Amazon Bedrock AgentCore, wired to the platform via either the
@@ -81,14 +81,15 @@ works identically.
   `eu-west-1`. The workshop has been built and tested against the Bedrock model and AgentCore
   availability in these regions; the deploy adapts model IDs and resources to your region
   automatically and a preflight check confirms the required capabilities before any stack is
-  created. Model access must be granted per region. (Other regions are not supported — the
-  Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere,
+  created. Serverless Amazon Bedrock models are enabled on first invocation; Anthropic models need a
+  one-time use case submission per account (Module 2 step 2 walks through it). (Other regions are not supported — the
+  AWS Agent Registry control plane is not yet generally available everywhere,
   which breaks Modules 3b and 4.)
 - **Permissions** — attach the scoped deploy policies (explicit actions only, each regional
   statement restricted to the validated regions) in
-  [`static/cfn/self-service-deploy-policy-{1..4}.json`](static/cfn/) — split across four files to
+  [`static/cfn/self-service-deploy-policy-{1..8}.json`](static/cfn/) — split across eight files to
   stay under IAM's per-policy size limit. (`AdministratorAccess` also works if you'd rather not
-  manage four policies.) We recommend a **dedicated account** you can tear down when finished.
+  manage eight policies.) We recommend a **dedicated account** you can tear down when finished.
 
 > ⚠️ **Cost notice.** Provisioning creates real, billable AWS resources (Amazon DocumentDB,
 > Aurora PostgreSQL, ECS Fargate, NAT Gateways, Application Load Balancers, CloudFront, Lambda,
@@ -148,7 +149,7 @@ The five stacks deploy in `contentspec.yaml` order — **LLM Gateway → MCP Reg
 → AgentCore → Code Editor** — and tear down in reverse (with a GuardDuty VPC-endpoint pre-cleanup
 that otherwise blocks VPC deletion).
 
-### Delete Everything
+### Delete everything
 
 ```bash
 # When finished, tear everything down to stop charges
@@ -162,30 +163,32 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 ├── content/                      # Workshop markdown (Workshop Studio builds from here)
 │   ├── index.en.md               # Landing page
 │   ├── introduction/             # Intro + getting-started (aws-event + self-service paths)
-│   ├── module-1/                 # The Vision (all tracks)
+│   ├── module-1/                 # The vision (all tracks)
 │   ├── module-2/                 # LLM Gateway (tracks 2, 3)
 │   ├── module-3a/                # MCP Registry + Tools Gateway (tracks 2, 3)
-│   ├── module-3b/                # AgentCore Registry & Gateway (tracks 2, 3)
+│   ├── module-3b/                # AWS Agent Registry & AgentCore Gateway (tracks 2, 3)
 │   ├── module-4/                 # FAST agent — dual-path (MCP or AgentCore) (tracks 1, 3)
+│   ├── module-5/                 # CloudWatch Omni observability + AgentCore Evaluations (all tracks)
 │   ├── summary/
 │   └── cleanup/
 ├── source/                       # Module source code (pre-staged into /workshop in the IDE)
 │   ├── module-2-llm-gateway/     # LLM Gateway scripts + notebooks
 │   ├── module-3a-mcp-registry/   # MCP Registry scripts + notebooks
-│   ├── module-3b-agentcore/      # AgentCore Registry + Gateway + Cedar notebooks
+│   ├── module-3b-agentcore/      # AWS Agent Registry + AgentCore Gateway + Cedar notebooks
 │   ├── module-4a-tools-gateway/  # Tools Gateway Lambdas + CDK
-│   └── module-4b-fast/           # FAST agent notebooks (connects to the gateways)
+│   ├── module-4b-fast/           # FAST agent notebooks (connects to the gateways)
+│   └── module-5-omni/            # CloudWatch Omni + Evaluations notebooks
 ├── static/
 │   ├── cfn/
 │   │   ├── llm-gateway/           # Stack 1 — LiteLLM Proxy on ECS (Module 2)
 │   │   ├── registry/              # Stack 2 — MCP Gateway & Registry nested stacks (Module 3a)
 │   │   ├── tools-gateway/         # Stack 3 — AgentCore Tools Gateway (Module 3a upper layer)
-│   │   ├── agentcore/             # Stack 4 — AgentCore Registry & Gateway (Module 3b)
+│   │   ├── agentcore/             # Stack 4 — AWS Agent Registry & AgentCore Gateway (Module 3b) + Transaction Search and Omni/Evaluations roles (Module 5)
 │   │   ├── code-editor.yaml       # Stack 5 — browser VS Code IDE on EC2 (all tracks)
 │   │   ├── workshop-iam-policy-core.json     # ParticipantRole policy (bedrock, agentcore, secrets)
 │   │   ├── workshop-iam-policy-infra.json    # ParticipantRole policy (ECS, EFS, ELB, etc.)
 │   │   ├── workshop-iam-policy-network.json  # ParticipantRole policy (VPC/EC2 networking)
-│   │   ├── self-service-deploy-policy-{1..4}.json  # Scoped deploy policies, restricted to validated regions (self-hosted)
+│   │   ├── self-service-deploy-policy-{1..8}.json  # Scoped deploy policies, restricted to validated regions (self-hosted)
 │   │   └── self-service-scp.json  # Optional OU-level region-fence SCP (self-hosted hardening)
 │   └── img/                       # Workshop images
 ├── scripts/

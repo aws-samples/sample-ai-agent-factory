@@ -1,5 +1,5 @@
 ---
-title: "Module 3b: AgentCore Registry & Gateway"
+title: "Module 3b: AWS Agent Registry & Gateway"
 weight: 60
 ---
 
@@ -9,7 +9,7 @@ weight: 60
 
 By the end of this module you will have:
 
-- Created an AgentCore Registry and registered 3 MCP tools with metadata
+- Created an AWS Agent Registry and registered 3 MCP tools with metadata
 - Exercised the Publisher/Admin approval workflow — separation of duties in action
 - Searched the catalog as a Consumer persona and discovered tools by capability
 - Invoked tools through the AgentCore Gateway with governed access
@@ -37,7 +37,7 @@ The full tables — which service backs each pillar, which IAM role backs each p
 
 ## What you will learn
 
-- How the AgentCore Registry provides a searchable, governed tool catalog
+- How the AWS Agent Registry provides a searchable, governed tool catalog
 - How the AgentCore Gateway routes and governs tool invocations via Lambda targets
 - How Cognito and WorkloadIdentity provide human and machine identity
 - How request and response interceptors enforce audit trails and content safety
@@ -45,15 +45,15 @@ The full tables — which service backs each pillar, which IAM role backs each p
 
 ## Prerequisites
 
-- Completed Module 1 (The Vision)
+- Completed Module 1 (The vision)
 - Completed Module 2 (LLM Gateway) — or have the LLM Gateway endpoint available
 - Access to the workshop AWS account
 
 ## Steps
 
 1. [Architecture Overview](step-1/) — Understand the three pillars, personas, and tool lifecycle
-2. [Verify Infrastructure](step-2/) — Verify the pre-deployed CloudFormation stack and capture outputs
-3. [Create the Registry](step-3/) — Create an AgentCore Registry with Cognito JWT auth
+2. [Verify infrastructure](step-2/) — Verify the pre-deployed CloudFormation stack and capture outputs
+3. [Create the registry](step-3/) — Create an AWS Agent Registry with Cognito JWT auth
 4. [Register Tools](step-4/) — Register 3 MCP tools, exercise Publisher/Admin approval workflow, EventBridge automation, Registry→Gateway sync
 5. [Discover & Search](step-5/) — Search the catalog as Consumer, test authorization boundaries
 6. [Test the Gateway](step-6/) — Invoke tools through the Gateway with governed access
@@ -69,7 +69,7 @@ source/module-3b-agentcore/
 └── notebooks/
     ├── 01-architecture.ipynb       # Architecture overview
     ├── 02-deploy.ipynb             # Verify the pre-deployed stack
-    ├── 03-create-registry.ipynb    # Create the AgentCore Registry
+    ├── 03-create-registry.ipynb    # Create the AWS Agent Registry
     ├── 04-register-tools.ipynb     # Register tools, Publisher/Admin approval, auto-sync
     ├── 05-discover-search.ipynb    # Search catalog as Consumer, authz boundaries
     ├── 06-test-gateway.ipynb       # Invoke tools through the Gateway

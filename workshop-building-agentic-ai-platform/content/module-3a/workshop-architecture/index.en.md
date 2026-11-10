@@ -1,5 +1,5 @@
 ---
-title: "Registry Architecture"
+title: "Registry architecture"
 weight: 41
 ---
 

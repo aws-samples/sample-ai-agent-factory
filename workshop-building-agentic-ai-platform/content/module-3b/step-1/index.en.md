@@ -1,5 +1,5 @@
 ---
-title: "Architecture Overview"
+title: "Architecture overview"
 weight: 61
 ---
 
@@ -9,7 +9,7 @@ Understand the three pillars and three personas before starting the hands-on ste
 
 | Pillar | Service | Role |
 |--------|---------|------|
-| **Discovery** | [AgentCore Registry](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry.html) | Searchable metadata catalog — tools publish descriptions, schemas, and tags. API-only (no CloudFormation resource). |
+| **Discovery** | [AWS Agent Registry](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry.html) | Searchable metadata catalog — tools publish descriptions, schemas, and tags. Creatable through the API, the CLI or the `AWS::AgentRegistry::Registry` CloudFormation resource; this workshop creates it interactively so you see each call. |
 | **Governance** | [AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html) | Governed invocation endpoint — routes to Lambda targets, applies request interceptors (audit, ACL) and response interceptors (guardrails). |
 | **Identity** | Cognito + WorkloadIdentity | Human users authenticate via Cognito. Agents authenticate via WorkloadIdentity + OAuth2CredentialProvider for M2M access. |
 

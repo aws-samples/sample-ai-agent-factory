@@ -67,6 +67,24 @@ class TestBuildTargetConfig:
         config = sync_service.build_target_config(sample_http_server)
         assert config["name"] == "weather-api"
         assert config["targetConfiguration"]["mcp"]["mcpServer"]["endpoint"] == "https://api.weather.example.com/v1/current"
+        # MCP server targets under GATEWAY_IAM_ROLE must carry the SigV4 service name.
+        provider = config["credentialProviderConfigurations"][0]
+        assert provider["credentialProviderType"] == "GATEWAY_IAM_ROLE"
+        assert provider["credentialProvider"]["iamCredentialProvider"] == {"service": "execute-api"}
+
+    def test_http_target_sigv4_service_follows_host(self, sync_service):
+        from services.gateway_sync import sigv4_service_for
+
+        assert sigv4_service_for("https://abc.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp") == "bedrock-agentcore"
+        assert sigv4_service_for("https://x1y2.execute-api.us-west-2.amazonaws.com/prod/mcp") == "execute-api"
+        assert sigv4_service_for("https://abc123.lambda-url.us-west-2.on.aws/") == "lambda"
+        assert sigv4_service_for("https://d123.cloudfront.net/mcp/currenttime") == "execute-api"
+        assert sigv4_service_for("https://d123.cloudfront.net/mcp/x", override="bedrock-agentcore") == "bedrock-agentcore"
+        config = sync_service.build_target_config({
+            "name": "runtime-mcp",
+            "proxy_pass_url": "https://abc.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp",
+        })
+        assert config["credentialProviderConfigurations"][0]["credentialProvider"]["iamCredentialProvider"]["service"] == "bedrock-agentcore"
 
     def test_invalid_lambda_arn_rejected(self, sync_service):
         server = {"name": "bad", "proxy_pass_url": "lambda://not-an-arn"}
@@ -96,6 +114,7 @@ class TestBuildTargetConfigNginx:
         )
         assert config["name"] == "currenttime"
         assert config["targetConfiguration"]["mcp"]["mcpServer"]["endpoint"] == "https://d123.cloudfront.net/mcp/currenttime"
+        assert config["credentialProviderConfigurations"][0]["credentialProvider"]["iamCredentialProvider"] == {"service": "execute-api"}
 
 
 class TestCreateTarget:

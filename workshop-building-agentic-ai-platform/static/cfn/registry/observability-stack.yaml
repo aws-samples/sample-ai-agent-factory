@@ -1,10 +1,23 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  MCP Gateway Registry - Observability Stack
-  Deploys Amazon Managed Prometheus (AMP) and Amazon Managed Grafana (AMG)
-  for metrics collection and visualization. Includes ADOT configuration for ECS.
+  MCP Gateway Registry - Observability Stack. Creates an Amazon Managed Service
+  for Prometheus workspace with an alerting rule group, the remote-write IAM role
+  and policy, an SNS alert topic, a CloudWatch dashboard and, when enabled, an
+  Amazon Managed Grafana workspace and the ECS task definitions, services,
+  roles, log groups, security groups and ALB routing for the metrics service
+  and Grafana OSS. No ADOT collector is deployed by this template; metric
+  retention is the AMP service default.
 
 Parameters:
+  AlbFullName:
+    Type: String
+    Description: >
+      The registry ALB as CloudWatch names it in the AWS/ApplicationELB LoadBalancer
+      dimension: app/<load-balancer-name>/<id>, i.e. the LoadBalancerFullName attribute
+      (the compute stack exports it as AlbFullName). A bare load balancer name matches
+      no metric and leaves the ALB widgets empty.
+    AllowedPattern: '^app/[A-Za-z0-9-]+/[a-f0-9]+$'
+    ConstraintDescription: Must be app/<load-balancer-name>/<id> (the ALB LoadBalancerFullName)
   EnvironmentName:
     Type: String
     Default: mcp-gateway
@@ -30,13 +43,6 @@ Parameters:
     Default: ''
     Description: Comma-separated private subnet IDs for VPC endpoints (optional)
 
-  # Retention Settings
-  PrometheusRetentionDays:
-    Type: Number
-    Default: 30
-    Description: Number of days to retain metrics in Prometheus
-    MinValue: 1
-    MaxValue: 365
 
   # Alert Configuration
   EnableAlerts:
@@ -167,8 +173,10 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # NOTE: AWS::APS::AlertManagerDefinition is not supported in CloudFormation
-  # Alert Manager must be configured via AWS CLI or Console after deployment:
+  # NOTE: there is no standalone AWS::APS::AlertManagerDefinition resource type,
+  # but the Alert Manager definition CAN be set in CloudFormation through the
+  # AlertManagerDefinition property of AWS::APS::Workspace. This workshop leaves
+  # it unset; configuring it afterwards is optional, e.g. via the CLI:
   #   aws amp create-alert-manager-definition \
   #     --workspace-id <WORKSPACE_ID> \
   #     --data <BASE64_ENCODED_CONFIG> \
@@ -242,6 +250,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: DeployGrafana
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-grafana-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -278,6 +287,7 @@ Resources:
   PrometheusRemoteWriteRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-prometheus-write-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -348,7 +358,7 @@ Resources:
               "width": 24,
               "height": 1,
               "properties": {
-                "markdown": "# MCP Gateway Registry - Observability Dashboard\n**Prometheus Workspace:** [Open AMP Console](https://${AWS::Region}.console.aws.amazon.com/prometheus/home?region=${AWS::Region}#/workspaces/${PrometheusWorkspace}/overview)"
+                "markdown": "# MCP Gateway Registry - Observability Dashboard\n**Prometheus Workspace:** [Open AMP Console](https://${AWS::Region}.console.aws.amazon.com/prometheus/home?region=${AWS::Region}#/workspaces/${PrometheusWorkspace.WorkspaceId}/overview)"
               }
             },
             {
@@ -398,7 +408,7 @@ Resources:
                 "view": "timeSeries",
                 "stacked": false,
                 "metrics": [
-                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Sum", "label": "Total Requests"}]
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${AlbFullName}", {"stat": "Sum", "label": "Total Requests"}]
                 ],
                 "region": "${AWS::Region}",
                 "period": 60
@@ -415,7 +425,7 @@ Resources:
                 "view": "timeSeries",
                 "stacked": false,
                 "metrics": [
-                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Average", "label": "Avg Response Time"}],
+                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbFullName}", {"stat": "Average", "label": "Avg Response Time"}],
                   ["...", {"stat": "p95", "label": "p95 Response Time"}]
                 ],
                 "region": "${AWS::Region}",
@@ -433,7 +443,7 @@ Resources:
                 "view": "timeSeries",
                 "stacked": true,
                 "metrics": [
-                  ["AWS/ApplicationELB", "HTTPCode_Target_2XX_Count", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Sum", "label": "2XX", "color": "#2ca02c"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_2XX_Count", "LoadBalancer", "${AlbFullName}", {"stat": "Sum", "label": "2XX", "color": "#2ca02c"}],
                   [".", "HTTPCode_Target_4XX_Count", ".", ".", {"stat": "Sum", "label": "4XX", "color": "#ff7f0e"}],
                   [".", "HTTPCode_Target_5XX_Count", ".", ".", {"stat": "Sum", "label": "5XX", "color": "#d62728"}]
                 ],
@@ -527,6 +537,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: DeployMetricsService
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-metrics-service-task-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -541,6 +552,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: DeployMetricsService
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-metrics-service-exec-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -698,6 +710,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: DeployGrafanaOSS
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-grafana-oss-task-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -747,6 +760,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: DeployGrafanaOSS
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-grafana-oss-exec-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -969,7 +983,7 @@ Outputs:
 
   MetricsServicePrometheusEndpoint:
     Condition: DeployMetricsService
-    Description: Metrics service Prometheus endpoint (for ADOT scraping)
+    Description: Metrics service Prometheus endpoint (for a Prometheus-compatible scraper)
     Value: !Sub 'metrics-service.${EnvironmentName}.local:9465'
     Export:
       Name: !Sub '${EnvironmentName}-MetricsServicePrometheusEndpoint'

@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Register + Cleanup"
+title: "Tools Gateway: register + cleanup"
 weight: 54
 ---
 

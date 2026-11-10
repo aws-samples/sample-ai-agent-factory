@@ -50,7 +50,7 @@ def get_admin_key(secret_arn: str, region: str) -> str:
 
 
 # Core workshop models to register via /model/new API.
-# The full 55-alias catalog is in reference/litellm-config.yaml for reference.
+# The wider 24-alias catalog is in reference/litellm-config.yaml for reference.
 # That file is reference documentation only — it is NOT mounted into the
 # container; this table is what the deployed proxy actually serves.
 #
@@ -65,13 +65,14 @@ def get_admin_key(secret_arn: str, region: str) -> str:
 # The flags are PREFERENCE HINTS, not assertions:
 #   - Claude 4.x, Nova-2, and any model with a ``global.`` profile -> prefer_global=True
 #     (region-agnostic, zero geo derivation).
-#   - Older Nova v1 / Llama / Mistral-large / DeepSeek -> needs_profile=True,
-#     prefer_global=False (geo prefix derived from the deploy region).
-#   - Bare foundation models (cohere, mistral-large-3, deepseek-v3) -> needs_profile=False.
+#   - Older Nova v1 -> needs_profile=True, prefer_global=False (geo prefix
+#     derived from the deploy region).
+#   - Bare foundation models (mistral-large-3, deepseek-v3.2) -> needs_profile=False.
 # A model with no invocable flavor in the deploy region is SKIPPED, so
-# participants never see an endpoint that 400s at invoke time. Regional gaps are
-# real: verified live on 2026-08-15, eu-west-1 carries neither the Llama nor the
-# DeepSeek entries below.
+# participants never see an endpoint that 400s at invoke time; so is any model
+# Bedrock reports LEGACY or EOL there (bedrock_region.available_ids), because
+# new accounts cannot adopt a Legacy model. Regional gaps are real: verified
+# live on 2026-08-15, eu-west-1 did not carry the DeepSeek entry below.
 WORKSHOP_MODELS = [
     # Anthropic Claude 4.x — global. inference profile (region-agnostic).
     ("claude-opus", "anthropic.claude-opus-4-6-v1", True, True),
@@ -80,8 +81,8 @@ WORKSHOP_MODELS = [
     ("claude-opus-4.6", "anthropic.claude-opus-4-6-v1", True, True),
     ("claude-sonnet-4.6", "anthropic.claude-sonnet-4-6", True, True),
     ("claude-opus-4.5", "anthropic.claude-opus-4-5-20251101-v1:0", True, True),
-    ("claude-sonnet-4.5", "anthropic.claude-sonnet-4-5-20250929-v1:0", True, True),
     ("claude-haiku-4.5", "anthropic.claude-haiku-4-5-20251001-v1:0", True, True),
+    # Claude Sonnet 4.5 (Legacy on Bedrock since 2026-10-08, EOL 2027-04-08) and
     # Claude 4 and 4.1 are deliberately absent: superseded by the 4.5/4.6
     # entries above, which cover every capability they had.
     # Amazon Nova — Nova-2 uses global.; older Nova v1 uses geo-scoped profiles.
@@ -89,18 +90,19 @@ WORKSHOP_MODELS = [
     ("nova-pro", "amazon.nova-pro-v1:0", True, False),
     ("nova-lite", "amazon.nova-lite-v1:0", True, False),
     ("nova-2-lite", "amazon.nova-2-lite-v1:0", True, True),
-    # Meta Llama — geo-scoped inference profiles (no global. profile)
-    ("llama3.3-70b", "meta.llama3-3-70b-instruct-v1:0", True, False),
-    ("llama3.1-70b", "meta.llama3-1-70b-instruct-v1:0", True, False),
+    # Meta Llama is deliberately absent: Llama 3.2 reached EOL on Bedrock on
+    # 2026-07-07 and every remaining Llama (3, 3.1, 3.3, 4) entered the Legacy
+    # stage on 2026-09-30, which new accounts cannot adopt.
     # Mistral — both are bare ON_DEMAND models; Mistral has no geo profiles
     ("mistral-large-3", "mistral.mistral-large-3-675b-instruct", False, False),
     ("mistral-large", "mistral.mistral-large-2407-v1:0", False, False),
     # Cohere Command R and Command R+ are deliberately absent: both reach end of
     # life on Bedrock on 2026-08-19, so registering either would hand
     # participants an endpoint that stops working during the workshop's lifetime.
-    # DeepSeek — r1 is a geo-scoped profile, v3 is a bare ON_DEMAND model
-    ("deepseek-r1", "deepseek.r1-v1:0", True, False),
-    ("deepseek-v3", "deepseek.v3-v1:0", False, False),
+    # DeepSeek — V3.2 is a bare ON_DEMAND model. R1 and V3.1 are deliberately
+    # absent: both entered the Legacy stage on Bedrock on 2026-09-30 (EOL
+    # 2027-03-30), which new accounts cannot adopt.
+    ("deepseek-v3.2", "deepseek.v3.2", False, False),
 ]
 
 
@@ -378,7 +380,7 @@ def main() -> None:
             json={
                 "team_alias": alias,
                 "max_budget": budget,
-                "models": ["claude-sonnet", "claude-haiku", "llama3.3-70b", "nova-2-lite"],
+                "models": ["claude-sonnet", "claude-haiku", "nova-pro", "nova-2-lite"],
             },
             headers=headers,
             timeout=10,
@@ -394,13 +396,14 @@ def main() -> None:
     print("[5/6] Creating virtual keys...")
     keys = {}
     # The admin key gets every registered model; the dev key gets a
-    # *restricted* subset (no `llama3.3-70b`) so Step 3.3 can actually
+    # *restricted* subset (no `nova-pro`) so Step 3.3 can actually
     # demonstrate that virtual keys enforce their allowlist — the content
-    # calls llama3.3-70b with the dev key and expects an HTTP 403 with
-    # type "key_model_access_denied" (verified live 2026-06-03).
+    # calls nova-pro with the dev key and expects an HTTP 401 with
+    # type "key_model_access_denied" (LiteLLM answers 401 for a key
+    # that is not allowed to call a model; verified live 2026-11-08).
     for key_name, team_alias, budget, cognito_group, model_list in [
         ("workshop-admin-key", "platform-team", 10.0, "admins",
-         ["claude-sonnet", "claude-haiku", "llama3.3-70b", "nova-2-lite"]),
+         ["claude-sonnet", "claude-haiku", "nova-pro", "nova-2-lite"]),
         ("workshop-dev-key", "workload-team", 5.0, "developers",
          ["claude-sonnet", "claude-haiku", "nova-2-lite"]),
     ]:

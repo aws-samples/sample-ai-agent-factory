@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Test Both Paths"
+title: "Tools Gateway: test both paths"
 weight: 52
 ---
 
@@ -219,11 +219,17 @@ STREAM=$(aws logs describe-log-streams \
   --output text --region $REGION 2>/dev/null)
 
 if [ -n "$STREAM" ] && [ "$STREAM" != "None" ]; then
-  aws logs get-log-events \
-    --log-group-name "$LOG_GROUP" \
-    --log-stream-name "$STREAM" \
-    --limit 5 --region $REGION \
-    --query "events[].message" --output text
+  # Events land a few seconds after the invocation; poll briefly before giving up.
+  for _ in $(seq 1 6); do
+    EVENTS=$(aws logs get-log-events \
+      --log-group-name "$LOG_GROUP" \
+      --log-stream-name "$STREAM" \
+      --limit 5 --region $REGION \
+      --query "events[].message" --output text)
+    [ -n "$EVENTS" ] && break
+    sleep 5
+  done
+  echo "${EVENTS:-No events ingested yet — re-run this block in a few seconds.}"
 else
   echo "No interceptor log stream yet — invoke a tool through the gateway, then re-run."
 fi

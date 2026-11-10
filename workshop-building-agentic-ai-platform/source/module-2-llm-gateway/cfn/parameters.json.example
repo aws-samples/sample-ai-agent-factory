@@ -5,7 +5,7 @@
   },
   {
     "ParameterKey": "PostgresImageTag",
-    "ParameterValue": "16.7"
+    "ParameterValue": "16.12"
   },
   {
     "ParameterKey": "AdminKey",

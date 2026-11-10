@@ -5,7 +5,7 @@ weight: 75
 
 Connect the travel agent to the pre-deployed AgentCore Gateway (`ac-tools-gateway`). This step wires the agent to the gateway, which has the Flights and Hotels tools as Lambda targets.
 
-::alert[Follow this page if you're on **Track 1 (fast path)** using the AgentCore registry, or you completed **Module 3b** (AgentCore Registry). If you completed Module 3a (OSS MCP Registry), use the [MCP Path](../connect-gateway-mcp/) instead.]{type="info"}
+::alert[Follow this page if you're on **Track 1 (fast path)** using the AWS Agent Registry, or you completed **Module 3b** (AWS Agent Registry). If you completed Module 3a (OSS MCP Registry), use the [MCP Path](../connect-gateway-mcp/) instead.]{type="info"}
 
 ## The auth challenge
 
@@ -223,6 +223,6 @@ The agent should call `search_flights` and `search_hotels` through the gateway a
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`04b-connect-gateway-agentcore.ipynb`**.

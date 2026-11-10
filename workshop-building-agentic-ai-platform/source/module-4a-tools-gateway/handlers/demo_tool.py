@@ -6,8 +6,8 @@ A simple Lambda that responds to MCP protocol calls (tools/list and tools/call)
 via the AgentCore Gateway. Used by Notebook 05 to demonstrate Lambda-backed
 tools accessible only through Path B.
 
-In Module 5, this placeholder is replaced by a real Bedrock Knowledge Base
-Retrieve API integration.
+The corpus below is canned demo data; the Lambda stays a demo tool throughout the
+workshop (no module swaps it for a Bedrock Knowledge Base).
 """
 
 import json
@@ -15,7 +15,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Sample product knowledge base (replaced by real KB in Module 5)
+# Sample product knowledge base (canned demo data)
 _KNOWLEDGE_BASE = [
     {
         "title": "Return Policy",
@@ -72,13 +72,22 @@ def _unwrap_event(event):
     """
     if isinstance(event, str):
         event = json.loads(event)
-    # AgentCore Gateway wraps requests in {"mcp": {"gatewayRequest": {"body": ...}}}
-    if "mcp" in event and "gatewayRequest" in event.get("mcp", {}):
+    body = event
+    # Some gateways wrap requests in {"mcp": {"gatewayRequest": {"body": ...}}}
+    if isinstance(event, dict) and "mcp" in event and "gatewayRequest" in event.get("mcp", {}):
         body = event["mcp"]["gatewayRequest"].get("body", {})
         if isinstance(body, str):
             body = json.loads(body)
-        return body
-    return event
+    # Bare tool arguments (what an AgentCore Gateway Lambda target receives): no
+    # JSON-RPC envelope, so wrap them in a tools/call for the single tool served here.
+    if isinstance(body, dict) and "method" not in body and "jsonrpc" not in body:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "search-knowledge-base", "arguments": body},
+        }
+    return body
 
 
 def handler(event, context):

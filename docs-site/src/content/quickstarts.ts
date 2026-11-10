@@ -191,7 +191,7 @@ export const quickstarts: Quickstart[] = [
       command: './deploy-cfn.sh destroy',
       source: {
         file: WORKSHOP_README,
-        heading: 'Delete Everything',
+        heading: 'Delete everything',
         quote: './deploy-cfn.sh destroy',
       },
     },

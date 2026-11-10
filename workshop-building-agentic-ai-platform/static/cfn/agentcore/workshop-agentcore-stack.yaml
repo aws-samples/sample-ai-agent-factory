@@ -17,11 +17,35 @@ Parameters:
     Type: String
     Description: S3 key for the boto3 Lambda Layer zip
     Default: agentcore/boto3-lambda-layer.zip
+  OmniConsolePrincipalArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of the IAM role or user that opens CloudWatch Omni from the AWS console (Module 5).
+      Workshop Studio passes the participant role ({{.ParticipantRoleArn}}); deploy-cfn.sh passes
+      OMNI_CONSOLE_PRINCIPAL_ARN only when it names an identity other than the one running the
+      deploy, which already becomes Space Admin as the space's creator. Omni rejects a grant for a
+      principal that does not exist, and a second SPACE_ADMIN grant for a principal that already
+      holds one, so leave this empty to create no console grant.
+  OmniConsolePrincipalType:
+    Type: String
+    Default: IAM_ROLE
+    AllowedValues: [IAM_ROLE, IAM_USER]
+    Description: Principal type of OmniConsolePrincipalArn.
 
 Conditions:
   HasBoto3Layer: !Not [!Equals [!Ref Boto3LayerBucket, '']]
+  HasOmniConsolePrincipal: !Not [!Equals [!Ref OmniConsolePrincipalArn, '']]
 
 Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        # E3006 "resource type does not exist": cfn-lint's bundled spec predates the CloudWatch
+        # Omni types. The live registry reports AWS::CloudWatch::Domain/Space/AccessGrant and
+        # AWS::ObservabilityAdmin::DatasetIntegration as LIVE in us-west-2, us-east-1 and
+        # eu-west-1 (describe-type, 2026-11-09).
+        - E3006
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -33,6 +57,11 @@ Metadata:
         Parameters:
           - Boto3LayerBucket
           - Boto3LayerKey
+      - Label:
+          default: CloudWatch Omni console identity (Module 5)
+        Parameters:
+          - OmniConsolePrincipalArn
+          - OmniConsolePrincipalType
 
 Resources:
 
@@ -71,6 +100,7 @@ Resources:
   CognitoInitLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-cognito-init-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -291,6 +321,165 @@ Resources:
           Fn::Sub: ${EnvironmentName}-CognitoDomain
       Version: '2.1'
 
+  #--------------------------------------------------------------------------
+  # Token vault bootstrap -- makes AgentCore Identity's default token vault
+  # exist before any participant creates a credential provider.
+  #
+  # The vault is created lazily by the first Create*CredentialProvider call in
+  # an account, and that lazy creation authorizes as
+  # bedrock-agentcore:CreateTokenVault. Access Analyzer does not know that
+  # action (INVALID_ACTION), and the Workshop Studio build gates the six
+  # participant policy files on Access Analyzer, so the participant set cannot
+  # name it; the only build-passing spelling was the Create* wildcard. Creating
+  # (and immediately deleting) a throwaway API-key provider here, under a role
+  # that CAN name the action, moves the one-time vault creation to stack
+  # provisioning and lets the participant policy grant exactly
+  # CreateOauth2CredentialProvider. See POLICY_NOTES.md.
+  #--------------------------------------------------------------------------
+
+  TokenVaultInitLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
+      RoleName: !Sub 'workshop-ac-token-vault-init-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TokenVaultBootstrap
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # GetTokenVault authorizes against a path-style ARN (probed live, see
+              # POLICY_NOTES); CreateTokenVault against token-vault/default.
+              - Sid: TokenVaultProbeAndCreate
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetTokenVault
+                  - bedrock-agentcore:CreateTokenVault
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:/identities/get-token-vault
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/default
+              - Sid: ThrowawayApiKeyProvider
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateApiKeyCredentialProvider
+                  - bedrock-agentcore:DeleteApiKeyCredentialProvider
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/default
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/default/apikeycredentialprovider/workshop-*
+              # AgentCore Identity stores provider material in Secrets Manager under
+              # this service-owned prefix; the create/delete calls above need it.
+              - Sid: ProviderSecretLifecycle
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:TagResource
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:bedrock-agentcore-identity!default/apikey/workshop-*
+      Tags:
+        - Key: Name
+          Value: ac-token-vault-init-role
+        - Key: Module
+          Value: agentcore
+
+  TokenVaultInitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ac-token-vault-init
+      RetentionInDays: 7
+
+  TokenVaultInitLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: TokenVaultInitLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: ac-token-vault-init
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt TokenVaultInitLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json, logging, secrets, urllib.request
+          import boto3
+          from botocore.exceptions import ClientError
+
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          PROVIDER = 'workshop-token-vault-bootstrap'
+
+          def send(event, status, reason=''):
+              body = json.dumps({'Status': status, 'Reason': reason[:900],
+                                 'PhysicalResourceId': 'token-vault-init',
+                                 'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                                 'LogicalResourceId': event['LogicalResourceId']})
+              req = urllib.request.Request(event['ResponseURL'], data=body.encode(),
+                                           headers={'Content-Type': ''}, method='PUT')
+              urllib.request.urlopen(req)
+
+          def vault_exists(ctl):
+              try:
+                  ctl.get_token_vault()
+                  return True
+              except ClientError as e:
+                  if e.response['Error']['Code'] in ('ResourceNotFoundException', 'NotFoundException'):
+                      return False
+                  raise
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  # The vault is account-level and shared; never remove it.
+                  send(event, 'SUCCESS', 'token vault left in place')
+                  return
+              try:
+                  ctl = boto3.client('bedrock-agentcore-control')
+                  if vault_exists(ctl):
+                      log.info('default token vault already exists')
+                      send(event, 'SUCCESS', 'token vault already present')
+                      return
+                  # First credential provider in the account creates the vault.
+                  ctl.create_api_key_credential_provider(name=PROVIDER, apiKey=secrets.token_urlsafe(32))
+                  try:
+                      ctl.delete_api_key_credential_provider(name=PROVIDER)
+                  except ClientError as e:
+                      log.warning('throwaway provider cleanup failed (non-fatal): %s', e.response['Error']['Code'])
+                  if not vault_exists(ctl):
+                      raise RuntimeError('token vault still absent after bootstrap provider creation')
+                  log.info('default token vault created')
+                  send(event, 'SUCCESS', 'token vault created')
+              except Exception as e:  # surface at provisioning time, where it is cheap to fix
+                  log.exception('token vault bootstrap failed')
+                  send(event, 'FAILED', f'{type(e).__name__}: {e}')
+      Tags:
+        - Key: Name
+          Value: ac-token-vault-init
+        - Key: Module
+          Value: agentcore
+
+  TokenVaultInit:
+    Type: Custom::TokenVaultInit
+    Properties:
+      ServiceToken: !GetAtt TokenVaultInitLambda.Arn
+      Version: '1.0'
+
   #============================================================================
   # 2. Persona IAM Roles (Registry access boundaries)
   #============================================================================
@@ -319,6 +508,7 @@ Resources:
               separate from RegistryPublisherRole below to demonstrate
               separation-of-duties for participants.
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-registry-admin-${AWS::Region}'
       Description: Admin persona - full CRUD and approval on AgentCore Registry
       AssumeRolePolicyDocument:
@@ -483,6 +673,7 @@ Resources:
               sandbox account is the outer boundary (self-hosted: dedicated
               disposable account + optional static/cfn/self-service-scp.json).
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-registry-publisher-${AWS::Region}'
       Description: Publisher persona - create/update/submit tools but cannot approve
       AssumeRolePolicyDocument:
@@ -544,6 +735,7 @@ Resources:
               during Module 3b and so cannot be pre-declared here; List* and
               Search* APIs do not support resource-level scoping either.
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-registry-consumer-${AWS::Region}'
       Description: Consumer persona - read-only and search on registry records
       AssumeRolePolicyDocument:
@@ -587,6 +779,7 @@ Resources:
   AgentCoreGatewayRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-gateway-role-${AWS::Region}'
       Description: Role assumed by AgentCore Gateway for tool dispatch
       AssumeRolePolicyDocument:
@@ -655,6 +848,7 @@ Resources:
   RequestInterceptorRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-request-interceptor-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -841,7 +1035,7 @@ Resources:
                       logger.warning("Access denied: groups=%s tool=%s", caller_groups, tool_name)
                       return {
                           "interceptorOutputVersion": "1.0",
-                          "mcp": {"transformedGatewayRequest": {"headers": headers, "body": {
+                          "mcp": {"transformedGatewayResponse": {"statusCode": 200, "headers": headers, "body": {
                               "jsonrpc": "2.0", "id": body.get("id", ""),
                               "error": {"code": -32600, "message": f"Access denied: your team does not have permission to call '{tool_name}'"},
                           }}},
@@ -882,6 +1076,7 @@ Resources:
   ResponseInterceptorRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-response-interceptor-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -906,6 +1101,18 @@ Resources:
                   - bedrock:ApplyGuardrail
                 Resource:
                   - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*
+              # The fail-open path publishes a GuardrailFailure metric so a
+              # guardrail outage is visible instead of silent. PutMetricData has
+              # no resource type; the namespace condition pins it to the
+              # interceptor's own namespace.
+              - Sid: GuardrailFailureMetricOwnNamespaceOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: AgentCoreGateway
       Tags:
         - Key: Name
           Value: ac-response-interceptor-role
@@ -1337,6 +1544,7 @@ Resources:
   AutoReviewLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-auto-review-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -1560,6 +1768,7 @@ Resources:
   RegistryGatewaySyncRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub 'workshop-ac-registry-gateway-sync-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -1845,6 +2054,14 @@ Resources:
                   if isinstance(remotes, list) and remotes and isinstance(remotes[0], dict):
                       server_url = remotes[0].get("url", "")
 
+              # Lambda targets need only the credential provider type; MCP server
+              # targets under GATEWAY_IAM_ROLE must also name the SigV4 signing
+              # service the endpoint verifies against ("Specify the authorization
+              # type and credentials to access the gateway target"): AgentCore
+              # Runtime -> bedrock-agentcore, API Gateway -> execute-api, Lambda
+              # function URLs -> lambda; anything else is signed as execute-api
+              # (a target that does not verify SigV4 ignores the signature).
+              credential_providers = [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
               if lambda_arn:
                   target_configuration = {
                       "mcp": {
@@ -1855,10 +2072,31 @@ Resources:
                       },
                   }
               elif server_url:
-                  url_config = {"url": server_url}
+                  # Remote MCP servers use the `mcpServer` member of the
+                  # McpTargetConfiguration union (endpoint is its only required
+                  # field). Unlike the Lambda target's structured toolSchema,
+                  # McpServerTargetConfiguration.mcpToolSchema.inlinePayload is a
+                  # JSON *string*; the registry's tools descriptor is already the
+                  # MCP tools/list document, so it is serialised as-is. Without
+                  # it the gateway discovers tools from the server itself.
+                  mcp_server_config = {"endpoint": server_url}
                   if tool_schemas:
-                      url_config["toolSchema"] = {"inlinePayload": tool_schemas}
-                  target_configuration = {"mcp": {"openApiSseUrl": url_config}}
+                      mcp_server_config["mcpToolSchema"] = {
+                          "inlinePayload": json.dumps(tools_def)
+                      }
+                  target_configuration = {"mcp": {"mcpServer": mcp_server_config}}
+                  host = re.sub(r"^https?://", "", server_url).split("/", 1)[0].lower()
+                  if re.search(r"\.bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$", host):
+                      signing_service = "bedrock-agentcore"
+                  elif re.search(r"\.lambda-url\.[a-z0-9-]+\.on\.aws(:\d+)?$", host):
+                      signing_service = "lambda"
+                  else:
+                      signing_service = "execute-api"
+                  signing_service = server_def.get("sigv4Service") or signing_service
+                  credential_providers = [{
+                      "credentialProviderType": "GATEWAY_IAM_ROLE",
+                      "credentialProvider": {"iamCredentialProvider": {"service": signing_service}},
+                  }]
               else:
                   logger.info(
                       "Record %s carries neither lambdaArn nor a URL in its "
@@ -1875,9 +2113,7 @@ Resources:
                       gatewayIdentifier=GATEWAY_ID,
                       name=target_name,
                       targetConfiguration=target_configuration,
-                      credentialProviderConfigurations=[
-                          {"credentialProviderType": "GATEWAY_IAM_ROLE"}
-                      ],
+                      credentialProviderConfigurations=credential_providers,
                   )
                   logger.info(
                       "Created gateway target: name=%s id=%s tools=%d",
@@ -1932,6 +2168,298 @@ Resources:
   #============================================================================
   # 11. Outputs & Exports
   #============================================================================
+
+  # ---------------------------------------------------------------------------
+  # Module 5 — CloudWatch Omni observability and evaluation
+  #
+  # Transaction Search is the one-time prerequisite for every AgentCore span
+  # (Runtime, Gateway, Memory) to reach CloudWatch. It is enabled here, during
+  # provisioning, so the ~10 minute propagation is over before participants
+  # arrive and the GenAI Observability page in Module 4 has data. The three
+  # roles below are the ones Omni and AgentCore Evaluations assume; creating
+  # them in the stack means participants only need iam:PassRole, never
+  # iam:CreateRole.
+  # ---------------------------------------------------------------------------
+
+  # The documented Transaction Search resource policy: X-Ray writes spans into
+  # aws/spans. Without it, AWS::XRay::TransactionSearchConfig fails with a 403
+  # ("XRay does not have permission to call PutLogEvents on the aws/spans Log
+  # Group") in an account that has never had Transaction Search on.
+  TransactionSearchLogsPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub '${EnvironmentName}-transaction-search'
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "TransactionSearchXRayAccess",
+              "Effect": "Allow",
+              "Principal": {"Service": "xray.amazonaws.com"},
+              "Action": "logs:PutLogEvents",
+              "Resource": [
+                "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws/spans:*",
+                "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/application-signals/data:*"
+              ],
+              "Condition": {
+                "ArnLike": {"aws:SourceArn": "arn:${AWS::Partition}:xray:${AWS::Region}:${AWS::AccountId}:*"},
+                "StringEquals": {"aws:SourceAccount": "${AWS::AccountId}"}
+              }
+            }
+          ]
+        }
+
+  # 100% indexing: workshop traffic is a few dozen traces per participant, and
+  # every one of them should be visible in Omni and in the GenAI Observability
+  # dashboard. Production accounts normally keep the 1% default.
+  TransactionSearchConfig:
+    Type: AWS::XRay::TransactionSearchConfig
+    DependsOn: TransactionSearchLogsPolicy
+    Properties:
+      IndexingPercentage: 100
+
+  # Space operator role. Omni assumes it to manage the space, run telemetry
+  # queries and run evaluations. Trust policy and permissions boundary follow
+  # the Omni documentation ("Cross-service confused deputy prevention"):
+  # aws:SourceAccount only. A narrower aws:SourceArn on space/* lets CreateSpace
+  # succeed but breaks credential vending for the Omni web UI (observed live).
+  OmniSpaceAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # This is the ONE workshop role that does not carry workshop-permissions-boundary:
+      # CloudWatch Omni requires the space access role to carry the AWS managed
+      # CloudWatchOmniSpaceAccessPolicy as its boundary (below), and a role takes
+      # exactly one. self-service-deploy-policy-4 allows either boundary on CreateRole.
+      RoleName: !Sub 'CloudWatchOmniSpaceAccessRole-${EnvironmentName}'
+      Description: Assumed by CloudWatch Omni to operate the workshop space (Module 5).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+              - sts:SetSourceIdentity
+              - sts:SetContext
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchOmniModelInferencePolicy
+      PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy
+      Tags:
+        - Key: Name
+          Value: omni-space-access-role
+        - Key: Module
+          Value: omni
+
+  # Dataset integration execution role. CloudWatch Logs assumes it to forward
+  # the account's log groups and spans into the CloudWatch Dataset that backs
+  # the space. Trust: logs.amazonaws.com, limited to this account's dataset
+  # integration (documented trust policy).
+  OmniDatasetIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
+      RoleName: !Sub 'CloudWatchOmniDatasetIntegrationRole-${EnvironmentName}'
+      Description: Assumed by CloudWatch Logs to forward telemetry into the Omni Dataset (Module 5).
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:observabilityadmin:${AWS::Region}:${AWS::AccountId}:dataset-integration/*
+      Policies:
+        - PolicyName: DatasetForwarding
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Every log group in the account: the workshop's value is seeing
+              # the LLM Gateway, the interceptors, the Runtime and aws/spans
+              # side by side. Narrow this to prefixes in production.
+              - Sid: IntegrateLogGroups
+                Effect: Allow
+                Action:
+                  - logs:IntegrateWithDataset
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+              # PutRecords has no resource-level support.
+              - Sid: PutRecordsIntoDatasetNoResourceLevel
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutRecords
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: omni-dataset-integration-role
+        - Key: Module
+          Value: omni
+
+  # AgentCore Evaluations execution role. Passed to Omni at CreateSpace and to
+  # CreateOnlineEvaluationConfig. Permissions are the documented minimum from
+  # the AgentCore Evaluations prerequisites page. The span log group is the
+  # shared aws/spans group: Module 4 pins the FAST runtime to that destination
+  # (UNIFIED_TRACES_DESTINATION_ENABLED=false) so the data source and this
+  # index-policy statement agree.
+  AgentCoreEvaluationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
+      RoleName: !Sub 'AgentCoreEvaluationRole-${EnvironmentName}'
+      # /service-role/ path: CloudWatchOmniSpaceAccessPolicy lets the Omni operator
+      # role pass only roles named service-role/AgentCoreEvaluationRole*, which is
+      # what makes the online-evaluation flow in the Omni UI work too.
+      Path: /service-role/
+      Description: Execution role for AgentCore Evaluations (on-demand and online) in Module 5.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TrustPolicyStatement
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:ResourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:evaluator/*
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:online-evaluation-config/*
+      Policies:
+        - PolicyName: EvaluationExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Logs Insights has no resource-level support for these reads.
+              - Sid: CloudWatchLogReadNoResourceLevel
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:GetQueryResults
+                  - logs:StartQuery
+                Resource: '*'
+              - Sid: CloudWatchLogWrite
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/evaluations/*
+              - Sid: CloudWatchIndexPolicy
+                Effect: Allow
+                Action:
+                  - logs:DescribeIndexPolicies
+                  - logs:PutIndexPolicy
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws/spans
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws/spans:*
+              # Only custom evaluators invoke a judge model through this role;
+              # built-in evaluators run on service capacity. Kept so step 6's
+              # custom evaluator works without an IAM change mid-module.
+              - Sid: BedrockInvoke
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                # foundation-model is Region-wildcarded on purpose: the workshop's
+                # judge models are global.* inference profiles, which route to
+                # foundation models in other Regions.
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/*
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*
+      Tags:
+        - Key: Name
+          Value: agentcore-evaluation-role
+        - Key: Module
+          Value: omni
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Omni foundation (Module 5), pre-provisioned so participants only
+  # verify it. Omni decides who may enter a space with access GRANTS, never IAM
+  # policies: the identity that creates the space is the only automatic admin.
+  # Created here by CloudFormation, the space would admit nobody, so the two
+  # participant identities are granted explicitly - WSParticipantRole below (the
+  # console identity) and the Code Editor instance role in code-editor.yaml (the
+  # terminal and notebook identity; it deploys after this stack and imports the
+  # ac-OmniDomainId / ac-OmniSpaceId exports). Lives in this stack because the
+  # three roles the space assumes and the Transaction Search config it depends
+  # on are defined here, and Workshop Studio allows at most five templates.
+  # ---------------------------------------------------------------------------
+  OmniDomain:
+    Type: AWS::CloudWatch::Domain
+    Properties:
+      # The name becomes the sign-in host, https://<name>.cloudwatch-omni.global.app.aws,
+      # and must be unique across all of Omni; the account ID makes it so. IAM-only:
+      # workshop accounts have no Identity Center instance.
+      Name: !Sub ws-platform-${AWS::AccountId}
+      IdentityProviders:
+        - IAM
+      Tags:
+        - Key: Workshop
+          Value: AgentCore-Platform
+        - Key: Module
+          Value: Omni
+
+  OmniSpace:
+    Type: AWS::CloudWatch::Space
+    DependsOn: TransactionSearchConfig
+    Properties:
+      Name: !Sub ${EnvironmentName}-space
+      DomainId: !GetAtt OmniDomain.DomainId
+      DataAccessRoleArn: !GetAtt OmniSpaceAccessRole.Arn
+      AgentCoreEvaluationRoleArn: !GetAtt AgentCoreEvaluationRole.Arn
+      Tags:
+        - Key: Workshop
+          Value: AgentCore-Platform
+        - Key: Module
+          Value: Omni
+
+  # Forwards every log group in the account (and aws/spans) into the CloudWatch
+  # Dataset the space queries. One per account and Region.
+  OmniDatasetIntegration:
+    Type: AWS::ObservabilityAdmin::DatasetIntegration
+    Properties:
+      RoleArn: !GetAtt OmniDatasetIntegrationRole.Arn
+
+  # The console identity: participants reach Omni through the CloudWatch console's
+  # "Launch Omni -> Sign in", which signs them in as the role the console session
+  # holds - WSParticipantRole in a Workshop Studio event (contentspec passes
+  # {{.ParticipantRoleArn}}). Omni gives the identity that creates the space a
+  # system-managed Space Admin grant of its own (WSSystemRole in an event, the
+  # deployer on the self-paced path), and CreateAccessGrant rejects both a
+  # principal that does not exist ("Principal does not exist for the supplied
+  # ARN", probed live 2026-11-09) and a second SPACE_ADMIN grant for one that
+  # already holds it (409 ConflictException, probed live 2026-11-10). So the grant
+  # is conditional: deploy-cfn.sh leaves the parameter empty unless
+  # OMNI_CONSOLE_PRINCIPAL_ARN names a different console identity.
+  OmniParticipantSpaceAdminGrant:
+    Type: AWS::CloudWatch::AccessGrant
+    Condition: HasOmniConsolePrincipal
+    Properties:
+      Name: participant-space-admin
+      DomainId: !GetAtt OmniDomain.DomainId
+      SpaceId: !GetAtt OmniSpace.SpaceId
+      Permission: SPACE_ADMIN
+      Principal:
+        PrincipalType: !Ref OmniConsolePrincipalType
+        PrincipalId: !Ref OmniConsolePrincipalArn
+      Tags:
+        - Key: Workshop
+          Value: AgentCore-Platform
+
 
 Outputs:
 
@@ -2006,3 +2534,38 @@ Outputs:
     Value: !Ref AdminPasswordSecret
     Export:
       Name: ac-AdminPasswordSecretArn
+
+  OmniSpaceAccessRoleArn:
+    Description: Space operator role Omni assumes for the workshop space (Module 5)
+    Value: !GetAtt OmniSpaceAccessRole.Arn
+    Export:
+      Name: ac-OmniSpaceAccessRoleArn
+
+  OmniDatasetIntegrationRoleArn:
+    Description: Dataset integration execution role (Module 5)
+    Value: !GetAtt OmniDatasetIntegrationRole.Arn
+    Export:
+      Name: ac-OmniDatasetIntegrationRoleArn
+
+  AgentCoreEvaluationRoleArn:
+    Description: AgentCore Evaluations execution role (Module 5)
+    Value: !GetAtt AgentCoreEvaluationRole.Arn
+    Export:
+      Name: ac-AgentCoreEvaluationRoleArn
+
+  OmniDomainId:
+    Description: CloudWatch Omni domain ID (Module 5)
+    Value: !GetAtt OmniDomain.DomainId
+    Export:
+      Name: ac-OmniDomainId
+  OmniSpaceId:
+    Description: CloudWatch Omni space ID (Module 5)
+    Value: !GetAtt OmniSpace.SpaceId
+    Export:
+      Name: ac-OmniSpaceId
+  OmniSignInUrl:
+    Description: >-
+      Omni sign-in host for this account - the domain NAME, not get-domain's domainEndpointUrl (Module 5)
+    Value: !Sub https://ws-platform-${AWS::AccountId}.cloudwatch-omni.global.app.aws
+    Export:
+      Name: ac-OmniSignInUrl

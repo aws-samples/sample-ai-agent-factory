@@ -1,7 +1,7 @@
 # Pinned to exact tested versions for supply-chain reproducibility.
-# boto3 1.43.72: the Agent Registry clients (agent-registry-control) that
+# boto3 1.43.126: the Agent Registry clients (agent-registry-control) that
 # modules 3b and 4b use only exist from 1.43.66 onward.
-boto3==1.43.72
+boto3==1.43.126
 # requests 2.33.0 fixes the insecure temp-file reuse in extract_zipped_paths.
 requests==2.33.0
 # pydantic 2.13.4: 2.10.6 is too old for strands-agents 1.52.0 (pip reports

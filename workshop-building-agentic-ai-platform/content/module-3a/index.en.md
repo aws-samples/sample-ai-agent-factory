@@ -40,7 +40,7 @@ The Registry answers *"what tools exist and who is allowed to use them?"* The To
 
 The workshop bootstrap deployed the MCP Gateway & Registry on Amazon ECS Fargate with:
 
-- **Registry UI and API** — Gradio dashboard and FastAPI backend for registration and discovery
+- **Registry UI and API** — web UI and FastAPI backend for registration and discovery (`mcpgateway/registry:v1.0.16`)
 - **Auth Server** — OAuth2/OIDC proxy bridging Amazon Cognito with the Registry
 - **MCP Gateway** — aggregates tools from registered MCP servers behind a single endpoint
 - **Demo MCP servers** — CurrentTime and RealServerFakeTools for testing
@@ -66,15 +66,15 @@ Your job is to register the MCP servers and the agent card in the platform regis
 | Step | What | Why |
 |------|------|-----|
 | **Workshop Architecture** | Understand the deployed infrastructure and how components connect | Know what you're working with |
-| **Registry Overview** | Log in, explore pre-registered content, get an API token | Orient before making changes |
-| **Register MCP Servers** | Register the Flights and Hotels MCP servers | Make the tools discoverable to agents |
+| **Registry overview** | Log in, explore pre-registered content, get an API token | Orient before making changes |
+| **Register MCP servers** | Register the Flights and Hotels MCP servers | Make the tools discoverable to agents |
 | **Register an A2A Agent** | Register a Travel Agent card with skills metadata | Enable agent-to-agent discovery |
-| **Create a Service Account** | Create an M2M identity with scoped access for the AgentCore agent | Give the agent a governed identity |
-| **Verify and Hand Off** | Run end-to-end checks and share credentials with the developer team | Confirm readiness for the Tools Gateway and Module 4 |
+| **Create a service account** | Create an M2M identity with scoped access for the AgentCore agent | Give the agent a governed identity |
+| **Verify and hand off** | Run end-to-end checks and share credentials with the developer team | Confirm readiness for the Tools Gateway and Module 4 |
 
 ::alert[This module is part of Track 2 (Build the Platform) and Track 3 (The Full Journey).]{type="info"}
 
 ## Prerequisites
 
-- Completed Module 1 (The Vision)
+- Completed Module 1 (The vision)
 - Access to the workshop AWS account

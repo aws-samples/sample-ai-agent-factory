@@ -56,7 +56,7 @@ def test_model_health(client: LLMGatewayClient) -> None:
         print(f"  Unhealthy models: {len(unhealthy)}")
         if unhealthy:
             print()
-            print("  Unhealthy (not enabled in Bedrock Model Access):")
+            print("  Unhealthy (not invocable in this Region — Legacy/EOL lifecycle, IAM or SCP denial, or the one-time Anthropic use-case form):")
             for ep in unhealthy[:8]:
                 print(f"    - {ep.get('model', 'unknown')}")
     except Exception as e:
@@ -75,7 +75,7 @@ def test_list_models(client: LLMGatewayClient) -> None:
             for m in models.data:
                 print(f"  - {m.id}")
         else:
-            print("  No models found. Check litellm-config.yaml.")
+            print("  No models found. Models are registered by scripts/setup_keys.py (POST /model/new) -- re-run it.")
     except Exception as e:
         print(f"  Failed: {e}")
 
@@ -91,7 +91,7 @@ def test_chat_completion(client: LLMGatewayClient) -> None:
         print(f"  Response:\n  {response}")
     except Exception as e:
         print(f"  Chat completion failed: {e}")
-        print("  Ensure Bedrock model access is enabled in your account.")
+        print("  Serverless Bedrock models are enabled on first use; check IAM/SCP permissions, the model lifecycle in this Region, and the Anthropic use-case form (Module 2 step 2).")
 
 
 def test_caching(client: LLMGatewayClient) -> None:

@@ -45,7 +45,7 @@
         "arn:aws:rds:*:*:cluster:workshop-*",
         "arn:aws:rds:*:*:db:workshop-*",
         "arn:aws:rds:*:*:subgrp:workshop-*",
-        "arn:aws:rds:*:*:cluster-pg:*"
+        "arn:aws:rds:*:*:cluster-pg:workshop-*"
       ],
       "Condition": {
         "StringEquals": {
@@ -193,27 +193,11 @@
       }
     },
     {
-      "Sid": "SsmParametersForWorkshopNoResourceLevel",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:GetParameters"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
       "Sid": "SsmParametersForWorkshop",
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
+        "ssm:GetParameters",
         "ssm:GetParametersByPath",
         "ssm:PutParameter",
         "ssm:DeleteParameter",

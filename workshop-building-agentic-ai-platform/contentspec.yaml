@@ -67,6 +67,13 @@ awsAccountConfig:
       - static/cfn/workshop-iam-policy-core.json
       - static/cfn/workshop-iam-policy-core-2.json
       - static/cfn/workshop-iam-policy-core-3.json
+      # Module 5: CloudWatch Omni (cloudwatch namespace), Observability Admin
+      # dataset integration, AgentCore Evaluations, PassRole for the three
+      # roles the AgentCore stack pre-creates.
+      - static/cfn/workshop-iam-policy-core-4.json
+      # Seventh file (2026-11): IAM counts policy size on a normalized document; see
+      # POLICY_NOTES.md "How IAM counts the 6,144 characters".
+      - static/cfn/workshop-iam-policy-core-5.json
       - static/cfn/workshop-iam-policy-infra.json
       - static/cfn/workshop-iam-policy-network.json
 
@@ -157,6 +164,9 @@ infrastructure:
       parameters:
         - templateParameter: EnvironmentName
           defaultValue: "workshop"
+        # The console identity Omni admits (Module 5): the event's participant role.
+        - templateParameter: OmniConsolePrincipalArn
+          defaultValue: "{{.ParticipantRoleArn}}"
 
     - templateLocation: static/cfn/code-editor.yaml
       label: code-editor
@@ -177,3 +187,4 @@ infrastructure:
           defaultValue: "{{.AssetsBucketName}}"
         - templateParameter: WorkshopAssetsPrefix
           defaultValue: "{{.AssetsBucketPrefix}}"
+

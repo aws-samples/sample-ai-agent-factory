@@ -1,5 +1,5 @@
 ---
-title: "Verify Infrastructure"
+title: "Verify infrastructure"
 weight: 62
 ---
 

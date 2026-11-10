@@ -6,8 +6,10 @@
 # It is loaded by the LiteLLM proxy at startup.
 #
 # All models use the Bedrock Converse API via IAM task role auth.
-# Participants must enable model access in Amazon Bedrock > Model Access
-# before using each model.
+# Serverless Bedrock models are enabled automatically on first invocation
+# (the console's "Model access" page was retired in October 2025). Anthropic
+# models additionally need a one-time use case submission per account, done
+# through the Model catalog playground as Module 2 step 2 describes.
 
 model_list:
   # ─────────────────────────────────────────────────────────
@@ -29,11 +31,6 @@ model_list:
   - model_name: claude-opus-4.5
     litellm_params:
       model: bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: claude-sonnet-4.5
-    litellm_params:
-      model: bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-haiku-4.5
@@ -84,78 +81,11 @@ model_list:
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────
-  # Meta Llama
-  # ─────────────────────────────────────────────────────────
-  - model_name: llama4-scout
-    litellm_params:
-      model: bedrock/us.meta.llama4-scout-17b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama4-maverick
-    litellm_params:
-      model: bedrock/us.meta.llama4-maverick-17b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Llama 3.3
-  - model_name: llama3.3-70b
-    litellm_params:
-      model: bedrock/us.meta.llama3-3-70b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Llama 3.2
-  - model_name: llama3.2-90b
-    litellm_params:
-      model: bedrock/us.meta.llama3-2-90b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama3.2-11b
-    litellm_params:
-      model: bedrock/us.meta.llama3-2-11b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama3.2-3b
-    litellm_params:
-      model: bedrock/us.meta.llama3-2-3b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama3.2-1b
-    litellm_params:
-      model: bedrock/us.meta.llama3-2-1b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Llama 3.1
-  - model_name: llama3.1-70b
-    litellm_params:
-      model: bedrock/us.meta.llama3-1-70b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama3.1-8b
-    litellm_params:
-      model: bedrock/us.meta.llama3-1-8b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Llama 3
-  - model_name: llama3-70b
-    litellm_params:
-      model: bedrock/meta.llama3-70b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: llama3-8b
-    litellm_params:
-      model: bedrock/meta.llama3-8b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
   # Mistral AI
   # ─────────────────────────────────────────────────────────
   - model_name: mistral-large-3
     litellm_params:
       model: bedrock/mistral.mistral-large-3-675b-instruct
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: devstral-2
-    litellm_params:
-      model: bedrock/mistral.devstral-2-123b
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: magistral-small
@@ -183,67 +113,24 @@ model_list:
       model: bedrock/mistral.mistral-large-2407-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  - model_name: mixtral-8x7b
-    litellm_params:
-      model: bedrock/mistral.mixtral-8x7b-instruct-v0:1
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: mistral-7b
-    litellm_params:
-      model: bedrock/mistral.mistral-7b-instruct-v0:2
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Cohere Command R and Command R+ are intentionally absent: both reach
-  # end of life on Bedrock on 2026-08-19, so an alias for either would stop
-  # resolving during the lifetime of this workshop.
+  # Lifecycle policy: this catalog lists only models Bedrock reports ACTIVE.
+  # New accounts cannot adopt a Legacy model and EOL models fail at invoke
+  # time, so neither belongs on a menu for a fresh workshop account. Removed
+  # against the Model lifecycle (Legacy) page on 2026-11-08: Claude Sonnet 4.5
+  # (EOL 2027-04-08); every Meta Llama (3.2 EOL 2026-07-07; 3, 3.1, 3.3 and 4
+  # EOL 2027-03-30); Mistral 7B, Mixtral 8x7B and Devstral 2; DeepSeek R1 and
+  # V3.1; Gemma 3; Nemotron Nano 9B/12B; Qwen3 Coder 30B/480B; MiniMax M2/M2.1;
+  # Kimi K2 Thinking; GLM 4.7 and 4.7 Flash (all EOL 2027-03-30); Palmyra X4/X5
+  # (EOL 2027-03-09/-21); Cohere Command R/R+ (EOL 2026-08-19). Re-check the
+  # page before adding an alias: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle-legacy.html
 
   # ─────────────────────────────────────────────────────────
   # DeepSeek
   # ─────────────────────────────────────────────────────────
-  - model_name: deepseek-r1
-    litellm_params:
-      model: bedrock/us.deepseek.r1-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: deepseek-v3
-    litellm_params:
-      model: bedrock/deepseek.v3-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: deepseek-v3.2
     litellm_params:
       model: bedrock/deepseek.v3.2
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # Writer
-  # ─────────────────────────────────────────────────────────
-  - model_name: palmyra-x5
-    litellm_params:
-      model: bedrock/us.writer.palmyra-x5-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: palmyra-x4
-    litellm_params:
-      model: bedrock/us.writer.palmyra-x4-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # Google (Gemma)
-  # ─────────────────────────────────────────────────────────
-  - model_name: gemma-3-27b
-    litellm_params:
-      model: bedrock/google.gemma-3-27b-it
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: gemma-3-12b
-    litellm_params:
-      model: bedrock/google.gemma-3-12b-it
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: gemma-3-4b
-    litellm_params:
-      model: bedrock/google.gemma-3-4b-it
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────
@@ -254,23 +141,9 @@ model_list:
       model: bedrock/nvidia.nemotron-nano-3-30b
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  - model_name: nemotron-nano-12b
-    litellm_params:
-      model: bedrock/nvidia.nemotron-nano-12b-v2
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: nemotron-nano-9b
-    litellm_params:
-      model: bedrock/nvidia.nemotron-nano-9b-v2
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
   # ─────────────────────────────────────────────────────────
   # Qwen
   # ─────────────────────────────────────────────────────────
-  - model_name: qwen3-coder-480b
-    litellm_params:
-      model: bedrock/qwen.qwen3-coder-480b-a35b-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: qwen3-235b
     litellm_params:
@@ -282,48 +155,13 @@ model_list:
       model: bedrock/qwen.qwen3-32b-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  - model_name: qwen3-coder-30b
-    litellm_params:
-      model: bedrock/qwen.qwen3-coder-30b-a3b-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # MiniMax
-  # ─────────────────────────────────────────────────────────
-  - model_name: minimax-m2.1
-    litellm_params:
-      model: bedrock/minimax.minimax-m2.1
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: minimax-m2
-    litellm_params:
-      model: bedrock/minimax.minimax-m2
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
   # ─────────────────────────────────────────────────────────
   # Moonshot / Kimi
   # ─────────────────────────────────────────────────────────
-  - model_name: kimi-k2-thinking
-    litellm_params:
-      model: bedrock/moonshot.kimi-k2-thinking
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: kimi-k2.5
     litellm_params:
       model: bedrock/moonshotai.kimi-k2.5
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # Zhipu AI (GLM)
-  # ─────────────────────────────────────────────────────────
-  - model_name: glm-4.7
-    litellm_params:
-      model: bedrock/zai.glm-4.7
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: glm-4.7-flash
-    litellm_params:
-      model: bedrock/zai.glm-4.7-flash
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────

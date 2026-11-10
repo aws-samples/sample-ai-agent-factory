@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Introduction"
+title: "Tools Gateway: introduction"
 weight: 47
 ---
 
@@ -8,7 +8,7 @@ Add a governed tool access layer on top of the MCP Registry using Amazon Bedrock
 ## The problem
 
 - The MCP Registry provides an NGINX reverse proxy (Path A) -- fast but ungoverned
-- Agents need Lambda-backed tools and external APIs that NGINX can't serve
+- Agents need Lambda-backed tools that NGINX can't serve (it proxies HTTP; a `lambda://` URL has nothing to proxy to)
 - There is no audit trail, content screening, or group-based access control on tool calls
 - Platform teams need to control which teams can access which tools
 
@@ -17,9 +17,9 @@ Add a governed tool access layer on top of the MCP Registry using Amazon Bedrock
 | Path | Entry Point | Authentication | Audit | Guardrails | Tool Types |
 |------|-------------|---------------|-------|------------|------------|
 | **Path A (Direct)** | CloudFront/NGINX | Session cookie or static token | NGINX access logs only | None | Docker MCP servers |
-| **Path B (Governed)** | AgentCore Gateway | Cognito JWT (CUSTOM\_JWT) | CloudWatch structured audit log | Bedrock Guardrails | Lambda functions, external APIs, Docker servers (via CloudFront) |
+| **Path B (Governed)** | AgentCore Gateway | Cognito JWT (CUSTOM\_JWT) | CloudWatch structured audit log | Bedrock Guardrails | Lambda-backed tools registered with a `lambda://` URL (the Sync Lambda skips HTTP MCP servers: they stay on Path A) |
 
-The Tools Gateway adds **Path B** -- the AgentCore Gateway -- as a thin integration layer. It reads tools from the MCP Registry and creates gateway targets, adding:
+The Tools Gateway adds **Path B** -- the AgentCore Gateway -- as a thin integration layer. The Sync Lambda reads the Registry's servers and creates one gateway target per Lambda-backed server (`proxy_pass_url` starting with `lambda://`); the Docker MCP servers keep being served through Path A only. The flights and hotels Lambdas end up on both paths — their Function URLs through Path A, their Lambda targets through Path B — while `search-knowledge-base`, which has no HTTP front door, is Path B only. Path B adds:
 
 - **Group-based access control** -- Cognito groups determine which tools each team can see and call
 - **Audit logging** -- Every `tools/call` and `tools/list` request logged to CloudWatch (with optional DynamoDB)
@@ -53,13 +53,12 @@ graph TB
     GW --> REQ
     GW --> RESP
     GW -->|Lambda target| DEMO
-    GW -->|MCP via CloudFront| CF
     SYNC -->|read servers| REG
     SYNC -->|create targets| GW
     COG["Cognito<br/>(MCP Registry)"] -->|JWT validation| GW
 ```
 
-### What the Tools Gateway does NOT duplicate
+### What the Tools Gateway does not duplicate
 
 The Tools Gateway is intentionally thin:
 
@@ -90,7 +89,7 @@ Follow the notebooks in the sidebar:
 1. [Explore the Deployed Stack](../tg-explore-stack/) -- Verify the auto-provisioned stack and create the AgentCore Gateway
 1. [Register New Tools](../tg-curate-tools/) -- Add Lambda and OpenAPI tools to the Registry
 1. [Sync to Gateway](../tg-automated-sync/) -- Invoke the Sync Lambda to create gateway targets
-1. [Test Both Paths](../tg-test-both-paths/) -- Compare Path A vs Path B side by side
+1. [Test both paths](../tg-test-both-paths/) -- Compare Path A vs Path B side by side
 1. [Bedrock Guardrails](../tg-guardrails/) -- Add content screening to Path B
 1. [Register Gateway + Cleanup](../tg-register-cleanup/) -- Make the gateway discoverable, then tear down
 

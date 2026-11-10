@@ -1,14 +1,15 @@
 ---
-title: "Add Guardrails"
+title: "Add guardrails"
 weight: 67
 ---
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-The AgentCore Gateway is routing tool calls, but every response passes through without filtering. In this step you add two governance layers that raw Lambda endpoints cannot provide:
+The AgentCore Gateway is routing tool calls, but every response passes through without filtering. In this step you add three governance layers that raw Lambda endpoints cannot provide:
 
 - **Bedrock Guardrails** on tool output — screen every response for PII and harmful content
 - **Group-based tool access control** — restrict which tools each Cognito group can invoke
+- **Cedar policies in the AgentCore Policy Engine** (optional, Part C) — declarative, auditable authorization rules alongside the interceptor's allow-list
 
 These are the safety rails that demonstrate enterprise governance patterns. For production deployment, additional security hardening and review are required.
 
@@ -75,8 +76,8 @@ This guardrail will:
 
 | PII Type | Action |
 |----------|--------|
-| Email addresses | **Anonymize** — replaced with `[EMAIL]` |
-| Phone numbers | **Anonymize** — replaced with `[PHONE]` |
+| Email addresses | **Anonymize** — replaced with the `{EMAIL}` identifier tag |
+| Phone numbers | **Anonymize** — replaced with the `{PHONE}` identifier tag |
 | Social Security numbers | **Block** — entire response blocked |
 | Credit/debit card numbers | **Block** — entire response blocked |
 
@@ -260,11 +261,14 @@ policy = json.dumps({
     "_default": ["*"],
     "gateway-admins": ["*"],
     "gateway-developers": [
-        "*search_flights*",
-        "*search_hotels*",
-        "*get_flight_details*",
-        "*get_hotel_details*",
-        "*search-knowledge-base*",
+        # fnmatch patterns; a gateway tool name is <target>___<tool>, so anchoring
+        # the pattern at the end keeps search_flights_by_budget and
+        # search_hotels_by_budget out while *search_flights* would let them in.
+        "*search_flights",
+        "*search_hotels",
+        "*get_flight_details",
+        "*get_hotel_details",
+        "*search-knowledge-base",
     ],
 })
 
@@ -458,7 +462,7 @@ The engine and its policies now exist, but this CLI path deliberately stops shor
 | **Access control L1** | Request Interceptor + TOOL_ACCESS_POLICY | Fast, custom tool filtering by Cognito group |
 | **Access control L2** | Policy Engine + Cedar policies | Declarative, auditable authorization rules |
 
-Three independent governance layers — all enforced by the platform, transparent to individual tool Lambdas.
+Three independent governance layers, all transparent to individual tool Lambdas. The Gateway enforces the first two on every call. The Cedar layer exists as policies in the Policy Engine; if you attach the engine as described above it runs in `LOG_ONLY` mode, so its decisions are recorded, not enforced.
 
 ---
 

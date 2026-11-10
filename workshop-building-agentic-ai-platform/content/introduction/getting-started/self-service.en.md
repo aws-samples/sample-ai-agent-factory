@@ -1,5 +1,5 @@
 ---
-title: "Self-Paced Setup"
+title: "Self-paced setup"
 weight: 13
 ---
 
@@ -28,7 +28,7 @@ The deploy wrapper checks for `aws` and `yq` up front and exits with an install 
 
 ### Region
 
-Deploy into any of the **validated regions** below. The workshop has been built and tested against the Amazon Bedrock model and Amazon Bedrock AgentCore availability in these regions. Other regions are not supported — the Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere (it returns an internal error in regions such as `eu-central-1` and `ap-southeast-1`), which breaks Modules 3b and 4.
+Deploy into any of the **validated regions** below. The same three regions apply to both paths: the self-service deploy policies fence every call to them, `contentspec.yaml` lists them as the deployable regions for Workshop Studio events (`us-west-2` is the default), and the workshop has been built and tested against the Amazon Bedrock model and Amazon Bedrock AgentCore availability in each.
 
 | Region | Location |
 |---|---|
@@ -42,7 +42,7 @@ The deploy script reads your region from your AWS CLI configuration and adapts a
 aws configure set region <region>   # one of: us-west-2, us-east-1, eu-west-1
 :::
 
-::alert[Your account must have access to the required Bedrock models **in your chosen region** — model access is granted per region. If it does not, request it first in the **Bedrock console → Model access** page (confirm the console region selector matches your deploy region). Module 2 includes the full model-access steps.]{type="info"}
+::alert[Serverless Bedrock foundation models are enabled automatically on first invocation (the console's **Model access** page was retired in 2025), so a failed model call means an IAM policy or Service Control Policy denies it, or a Marketplace subscription or first-use form is still pending. Anthropic models need a one-time use case submission per account — Module 2 step 2 walks through it in the **Model catalog** playground (confirm the console region selector matches your deploy region).]{type="info"}
 
 ### AWS account and permissions
 
@@ -65,7 +65,7 @@ If the first number is within 1 of the second, the registry stack fails partway 
 VPC  CREATE_FAILED  The maximum number of VPCs has been reached.
 :::
 
-Request an increase from **Service Quotas → Amazon VPC → VPCs per Region** before you start, or deploy into a region with more room. The other quotas the deploy touches (2 Elastic IPs, 2 NAT gateways, 1 Application Load Balancer, 1 CloudFront distribution) sit well inside their defaults.
+Request an increase from **Service Quotas → Amazon VPC → VPCs per Region** before you start, or deploy into a region with more room. The other quotas the deploy touches sit well inside their defaults: 2 Elastic IPs (the LLM gateway's NAT gateway and the Code Editor instance; the registry's regional NAT gateway manages its own addresses), 2 NAT gateways (LLM gateway and registry VPCs), 2 Application Load Balancers (the LLM gateway's internal ALB and the registry ALB) and 2 CloudFront distributions (the registry and the Code Editor IDE).
 
 The deploying principal needs permission to create that infrastructure (CloudFormation, EC2/VPC, ECS, Lambda, IAM roles, Secrets Manager, DocumentDB/RDS, Cognito, Bedrock, AgentCore, CloudFront, and more). Attach the **scoped deploy policies** included in this repository:
 
@@ -76,13 +76,14 @@ The deploying principal needs permission to create that infrastructure (CloudFor
 - `static/cfn/self-service-deploy-policy-5.json`
 - `static/cfn/self-service-deploy-policy-6.json`
 - `static/cfn/self-service-deploy-policy-7.json`
+- `static/cfn/self-service-deploy-policy-8.json`
 
-They grant only the **explicit actions the workshop stacks actually use** (no `service:*` wildcards), with every regional statement restricted to the validated regions via an `aws:RequestedRegion` condition. Where an action supports resource-level permissions the statement names concrete ARN patterns; the statements that must use `Resource: "*"` are the ones for actions AWS authorizes only at the account level (for example `bedrock:CreateGuardrail` and `lambda:ListFunctions`), and those are grouped into clearly-labelled `…NoResourceLevel` statements. The action list is split across seven files because it exceeds a single IAM managed policy's 6,144-character limit.
+They grant only the **explicit actions the workshop stacks actually use** (no `service:*` wildcards), with every regional statement restricted to the validated regions via an `aws:RequestedRegion` condition. Where an action supports resource-level permissions the statement names concrete ARN patterns; the statements that must use `Resource: "*"` are the ones for actions AWS authorizes only at the account level (for example `bedrock:CreateGuardrail` and `lambda:ListFunctions`), and those are grouped into clearly-labelled `…NoResourceLevel` statements. The action list is split across eight files because it exceeds a single IAM managed policy's 6,144-character limit.
 
-The paths above are relative to the repository root, so clone the repository first (the [Clone the Workshop Repository](#clone-the-workshop-repository) step below), then run this from that root to create each file as a customer-managed policy and attach all seven to the user or role that runs the deploy:
+The paths above are relative to the repository root, so clone the repository first (the [Clone the Workshop Repository](#clone-the-workshop-repository) step below), then run this from that root to create each file as a customer-managed policy and attach all eight to the user or role that runs the deploy:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-for n in 1 2 3 4 5 6 7; do
+for n in 1 2 3 4 5 6 7 8; do
   # Safe to re-run: if the policy already exists, update it in place rather
   # than failing with EntityAlreadyExists.
   arn=$(aws iam list-policies --scope Local \
@@ -97,7 +98,7 @@ for n in 1 2 3 4 5 6 7; do
     fi
     # Report the outcome, not the attempt: an unconditional "updated" line here
     # would print even when IAM rejected the document, and the participant would
-    # start the deploy believing all seven policies were current.
+    # start the deploy believing all eight policies were current.
     if aws iam create-policy-version --policy-arn "$arn" --set-as-default \
          --policy-document "file://static/cfn/self-service-deploy-policy-${n}.json" >/dev/null; then
       echo "updated $arn"
@@ -117,11 +118,11 @@ done
 # aws iam attach-user-policy --user-name <you> --policy-arn <arn-from-above>
 :::
 
-::alert[An IAM user or role can have at most **10** managed policies attached by default, so all seven fit alongside anything already attached. If you hit `LimitExceeded`, attach them to a dedicated deploy role instead.]{type="info"}
+::alert[An IAM user or role can have at most **10** managed policies attached by default, so all eight fit alongside up to two policies already attached. If you hit `LimitExceeded`, attach them to a dedicated deploy role instead.]{type="info"}
 
-::alert[Prefer not to manage seven policies? `AdministratorAccess` on the deploying principal also works for a dedicated workshop account — the scoped policies are the least-privilege option for accounts where that matters.]{type="info"}
+::alert[Prefer not to manage eight policies? `AdministratorAccess` on the deploying principal also works for a dedicated workshop account — the scoped policies are the least-privilege option for accounts where that matters.]{type="info"}
 
-::alert[**What the scoped policies do and do not contain.** They stop the deploy from touching resources outside the workshop's own naming prefixes, tags and regions. They are *not* a containment boundary against a hostile principal: the deploy must be able to create the workshop's IAM roles and attach policies to them, and any principal that can do that can grant itself more permission (via `iam:PutRolePolicy` plus `iam:PassRole` to Lambda). Closing that would require an IAM permissions boundary on every role the stacks create. This is why the recommendation above is a dedicated, disposable account rather than a shared one. See `static/cfn/POLICY_NOTES.md` for the full analysis.]{type="warning"}
+::alert[**What the scoped policies do and do not contain.** They stop the deploy from touching resources outside the workshop's own naming prefixes, tags and regions, and since 2026-11 every IAM role the deploy creates carries the `workshop-permissions-boundary` managed policy (created by the first stack): the deploying principal may only create or change roles that carry that boundary, and a bounded role cannot shed it or grant anything IAM-shaped beyond creating further bounded roles. That closes the create-a-role-and-attach-admin path the earlier policies left open. They are still *not* a containment boundary for the account itself — the deploying principal is you, and the real isolation remains a dedicated, disposable AWS account. `static/cfn/POLICY_NOTES.md` has the full argument.]{type="warning"}
 
 ::alert[If your account is part of an AWS Organization and you want an extra guardrail, you can apply [`static/cfn/self-service-scp.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-scp.json) as a Service Control Policy — it restricts the account to the validated regions and blocks account/billing changes. This is optional hardening, not required to run the workshop.]{type="info"}
 
@@ -151,6 +152,8 @@ This script:
 1. Confirms your AWS credentials, required tools (`aws`, `yq`), and resolves your configured region (warning you if it is outside the supported-region allow-list).
 2. Deploys all workshop CloudFormation stacks in dependency order — LLM Gateway, MCP Gateway & Registry, Tools Gateway, AgentCore, and the Code Editor IDE.
 3. Prints the IDE **URL** and **IdePassword** when it finishes.
+
+The AgentCore stack also pre-provisions the CloudWatch Omni domain and space that Module 5 uses. The identity running the deploy creates the space, and Omni makes the creator its first Space Admin (an IAM user as itself, an assumed role as its role ARN), so you can open Omni from the CloudWatch console later with no extra grant; the script prints `CloudWatch Omni: … creates the space and becomes its Space Admin`. If you deploy with one identity but use the console as another, set `OMNI_CONSOLE_PRINCIPAL_ARN` to that role or user ARN (and `OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_USER` for a user) before running the script, and the stack grants it Space Admin too — or add the grant later from the IDE, as Module 5 step 1 shows.
 
 ::alert[The full deployment takes approximately **30–45 minutes** (the Registry stack alone is 20–30 minutes). Keep the terminal open — the script runs synchronously and reports each stack as it completes. If a stack fails, the script prints the failure reason; run `./deploy-cfn.sh cleanup` to remove broken stacks before retrying.]{type="info"}
 
@@ -223,4 +226,4 @@ This removes all five stacks in reverse dependency order (including the GuardDut
 
 ## What's next
 
-Proceed to **Module 1: The Vision** to understand the platform architecture and choose your track.
+Proceed to **Module 1: The vision** to understand the platform architecture and choose your track.

@@ -82,10 +82,14 @@ All endpoints are on port 4000 (single port).
 
 Use the **friendly names** the gateway registers, not full Bedrock model IDs.
 The table below is a **representative sample**, not the full registry: `scripts/setup_keys.py`
-registers 17 aliases across Anthropic Claude, Amazon Nova, Meta Llama, Mistral AI, and DeepSeek.
-`reference/litellm-config.yaml` is a wider 55-alias *reference* catalog (it adds Writer, Google
-Gemma, NVIDIA Nemotron, Qwen, MiniMax, Moonshot, Z.ai, and OpenAI OSS) — it is documentation, not
-mounted into the container, so it is a menu rather than a description of the live gateway.
+registers 13 aliases across Anthropic Claude, Amazon Nova, Mistral AI, and DeepSeek. Only models
+Bedrock reports ACTIVE are registered: Meta Llama (3.2 end-of-life, the rest Legacy), DeepSeek R1 and
+V3.1 (Legacy since 2026-09-30) and Claude Sonnet 4.5 (Legacy since 2026-10-08) were dropped because
+new accounts cannot adopt a Legacy model, and `bedrock_region.available_ids` skips anything whose
+lifecycle status flips in the deploy region.
+`reference/litellm-config.yaml` is a wider 24-alias *reference* catalog (it adds NVIDIA Nemotron,
+Qwen, Moonshot, and OpenAI OSS) — it is documentation, not mounted into the container, so it is a
+menu rather than a description of the live gateway.
 
 | Friendly Name | Bedrock Model ID (as registered in `us-west-2`) |
 |--------------|--------------------------------------|
@@ -95,9 +99,8 @@ mounted into the container, so it is a menu rather than a description of the liv
 | `nova-pro` | `us.amazon.nova-pro-v1:0` |
 | `nova-lite` | `us.amazon.nova-lite-v1:0` |
 | `nova-2-lite` | `global.amazon.nova-2-lite-v1:0` |
-| `llama3.3-70b` | `us.meta.llama3-3-70b-instruct-v1:0` |
 | `mistral-large-3` | `mistral.mistral-large-3-675b-instruct` |
-| `deepseek-r1` | `us.deepseek.r1-v1:0` |
+| `deepseek-v3.2` | `deepseek.v3.2` |
 
 Only the **friendly name** is a stable contract — the Bedrock ID column is what
 `scripts/setup_keys.py` resolves in `us-west-2`, and the prefix is chosen per
@@ -130,9 +133,9 @@ Admin Key (admin — create teams, keys, view all spend)
 
 Each agent gets its own virtual key. The platform tracks per-key spend, enforces per-key budgets, and rate-limits independently.
 
-## Cross-module integration (Module 5)
+## Cross-module integration (Module 4)
 
-In Module 5, the agent combines all platform services:
+In Module 4 (Build your agent), the FAST agent combines all platform services; Module 5 then observes and evaluates it with CloudWatch Omni:
 
 ```python
 import os
@@ -149,7 +152,7 @@ model = LiteLLMModel(
     model_id="openai/claude-sonnet",
 )
 
-# Tool discovery via Module 3 (MCP Registry) + Module 4 (Tools Gateway)
+# Tool discovery via Module 3 (MCP Registry / AgentCore Registry and Gateway)
 tools = discover_tools_from_gateway(os.environ["TOOLS_GATEWAY_URL"])
 
 agent = Agent(model=model, tools=tools)

@@ -3,7 +3,7 @@ Description: >
   MCP Gateway Registry - Data Stack (Consolidated)
   Creates DocumentDB, Cognito User Pool, Secrets Manager, SSM Parameters, and KMS.
   Matches terraform/aws-ecs/documentdb.tf and secrets.tf.
-  Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+  Deploys to the region specified by AWS::Region; the regions a Workshop Studio event may use come from contentspec.yaml regionConfiguration.deployableRegions, and the self-paced deployer accepts any supported region (us-west-2 is the default).
 
 Parameters:
   EnvironmentName:
@@ -539,6 +539,7 @@ Resources:
   SsmSecureStringLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-ssm-securestring-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -569,6 +570,12 @@ Resources:
                   - ssm:ListTagsForResource
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
+              # The connection-string parameter is assembled from the DocumentDB
+              # credentials secret at run time (see SsmDocumentDBConnectionString).
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DocumentDBCredentialsSecret
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-ssm-securestring-role
@@ -595,8 +602,30 @@ Resources:
         ZipFile: |
           # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
           # SPDX-License-Identifier: Apache-2.0
+          import json
+          import urllib.parse
+
           import boto3
           import cfnresponse
+
+          PASSWORD_TOKEN = '__PASSWORD__'
+
+          def _resolve_password(props):
+              """Read the password out of Secrets Manager at run time.
+
+              CloudFormation does not resolve Secrets Manager dynamic references in
+              custom-resource properties (the literal reaches the Lambda, and SSM
+              then rejects the value), so the template passes the secret's ARN
+              instead and the function reads the JSON secret itself. (Do not spell
+              the dynamic-reference syntax out in this code: CloudFormation scans
+              every property string, this ZipFile included, and tries to resolve it.)
+              """
+              arn = props.get('PasswordSecretArn')
+              if not arn:
+                  return None
+              key = props.get('PasswordSecretKey', 'password')
+              secret = boto3.client('secretsmanager').get_secret_value(SecretId=arn)
+              return json.loads(secret['SecretString'])[key]
 
           def handler(event, context):
               # Log request type only — event may contain secret values in ResourceProperties
@@ -617,6 +646,11 @@ Resources:
 
                   # Create or Update
                   value = event['ResourceProperties']['Value']
+                  password = _resolve_password(event['ResourceProperties'])
+                  if password is not None:
+                      # Percent-encode: a mongodb:// userinfo field cannot carry
+                      # ':', '@' or '/' literally.
+                      value = value.replace(PASSWORD_TOKEN, urllib.parse.quote(password, safe=''))
                   description = event['ResourceProperties'].get('Description', '')
                   tags = event['ResourceProperties'].get('Tags', [])
 
@@ -692,11 +726,23 @@ Resources:
     DependsOn:
       - SsmSecureStringLambda
       - DocumentDBCluster
+      - DocumentDBCredentialsSecret
     Properties:
       ServiceToken: !GetAtt SsmSecureStringLambda.Arn
       Name: !Sub /${EnvironmentName}/documentdb/connection_string
+      # The password is NOT interpolated here. CloudFormation does not resolve
+      # {{resolve:secretsmanager:...}} dynamic references in custom-resource
+      # properties -- the literal reached the Lambda and SSM rejected the value
+      # with ValidationException (observed live, 2026-11-08) -- and
+      # interpolating the DocumentDBPassword parameter alone produced
+      # mongodb://user:@host for every default deploy. The Lambda reads the
+      # password from DocumentDBCredentialsSecret (which holds the same value
+      # the cluster was created with in both branches of GenerateDocDBPassword)
+      # and substitutes it for __PASSWORD__, percent-encoded.
       Value: !Sub >-
-        mongodb://${DocumentDBUsername}:${DocumentDBPassword}@${DocumentDBCluster.Endpoint}:27017/?authMechanism=SCRAM-SHA-1&authSource=admin&tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false
+        mongodb://${DocumentDBUsername}:__PASSWORD__@${DocumentDBCluster.Endpoint}:27017/?authMechanism=SCRAM-SHA-1&authSource=admin&tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false
+      PasswordSecretArn: !Ref DocumentDBCredentialsSecret
+      PasswordSecretKey: password
       Description: DocumentDB Cluster connection string
       Tags:
         - Key: Name
@@ -712,6 +758,7 @@ Resources:
   DocumentDBInitLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-documentdb-init-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -990,6 +1037,7 @@ Resources:
   CognitoInitLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-cognito-init-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -1209,8 +1257,12 @@ Resources:
           AttributeDataType: String
           Required: false
           Mutable: true
+      # Workshop tag set explicitly (not left to stack-tag propagation): the
+      # ParticipantRole's CognitoWrite statement conditions every admin call on
+      # aws:ResourceTag/Workshop, so a missing tag would break Modules 2-5.
       UserPoolTags:
         Name: !Sub ${EnvironmentName}-user-pool
+        Workshop: AgentCore-Platform
 
   CognitoUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain

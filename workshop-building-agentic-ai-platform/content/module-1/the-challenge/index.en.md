@@ -1,5 +1,5 @@
 ---
-title: "The Enterprise Challenge"
+title: "The enterprise challenge"
 weight: 21
 ---
 

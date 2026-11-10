@@ -29,6 +29,46 @@ _BLOCKED_URL_PATTERNS = [
     r"^https?://\[?fe80:",            # IPv6 link-local
 ]
 
+# SigV4 signing service names by target host, for GATEWAY_IAM_ROLE on MCP server
+# targets. The gateway signs requests to an MCP server target with its service
+# role, and the API requires the service name the target verifies against
+# ("Specify the authorization type and credentials to access the gateway
+# target", AgentCore developer guide). Lambda targets need no provider block.
+_SIGV4_SERVICE_BY_HOST = [
+    (re.compile(r"\.bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$"), "bedrock-agentcore"),
+    (re.compile(r"\.execute-api\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$"), "execute-api"),
+    (re.compile(r"\.lambda-url\.[a-z0-9-]+\.on\.aws(:\d+)?$"), "lambda"),
+]
+_DEFAULT_SIGV4_SERVICE = "execute-api"
+
+
+def sigv4_service_for(endpoint: str, override: str | None = None) -> str:
+    """Return the SigV4 service name the gateway should sign with for ``endpoint``.
+
+    ``override`` (a Registry record's ``sigv4_service`` field) wins; otherwise the
+    host decides: AgentCore Runtime -> ``bedrock-agentcore``, API Gateway ->
+    ``execute-api``, Lambda function URLs -> ``lambda``. Anything else (the
+    CloudFront -> NGINX proxy in front of the in-cluster servers included) gets
+    ``execute-api``; a target that does not verify SigV4 ignores the signature.
+    """
+    if override:
+        return override
+    host = re.sub(r"^https?://", "", endpoint).split("/", 1)[0].lower()
+    for pattern, service in _SIGV4_SERVICE_BY_HOST:
+        if pattern.search(host):
+            return service
+    return _DEFAULT_SIGV4_SERVICE
+
+
+def iam_credential_provider_for(endpoint: str, override: str | None = None) -> list[dict]:
+    """GATEWAY_IAM_ROLE credential provider configuration for an MCP server target."""
+    return [{
+        "credentialProviderType": "GATEWAY_IAM_ROLE",
+        "credentialProvider": {
+            "iamCredentialProvider": {"service": sigv4_service_for(endpoint, override)}
+        },
+    }]
+
 
 class GatewaySyncService:
     """Maps Registry server entries to AgentCore Gateway targets."""
@@ -134,9 +174,9 @@ class GatewaySyncService:
                         }
                     }
                 },
-                "credentialProviderConfigurations": [
-                    {"credentialProviderType": "GATEWAY_IAM_ROLE"}
-                ],
+                "credentialProviderConfigurations": iam_credential_provider_for(
+                    proxy_url, server.get("sigv4_service")
+                ),
             }
 
         return None  # Unknown type, skip
@@ -169,9 +209,9 @@ class GatewaySyncService:
                         }
                     }
                 },
-                "credentialProviderConfigurations": [
-                    {"credentialProviderType": "GATEWAY_IAM_ROLE"}
-                ],
+                "credentialProviderConfigurations": iam_credential_provider_for(
+                    external_url, server.get("sigv4_service")
+                ),
             }
         return None
 
