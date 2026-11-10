@@ -47,22 +47,22 @@ export const limitations: Record<ProjectId, Limitation[]> = {
     },
     {
       id: 'workshop-registry-control-plane',
-      title: 'AgentCore Registry availability',
-      text: 'the Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere, which breaks Modules 3b and 4.',
+      title: 'AWS Agent Registry availability',
+      text: 'the AWS Agent Registry control plane is not yet generally available everywhere, which breaks Modules 3b and 4.',
       source: {
         file: WORKSHOP_README,
         heading: 'Prerequisites (self-paced)',
-        quote: 'Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere,',
+        quote: 'AWS Agent Registry control plane is not yet generally available everywhere,',
       },
     },
     {
       id: 'workshop-model-access',
       title: 'Model access',
-      text: 'Model access must be granted per region.',
+      text: 'Serverless Bedrock models enable on first invocation; Anthropic models need a one-time use-case submission per account.',
       source: {
         file: WORKSHOP_README,
         heading: 'Prerequisites (self-paced)',
-        quote: 'Model access must be granted per region.',
+        quote: 'one-time use case submission per account',
       },
     },
     {

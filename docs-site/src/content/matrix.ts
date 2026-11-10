@@ -284,10 +284,10 @@ export const capabilityMatrix: CapabilityRow[] = [
     cells: {
       workshop: {
         posture: 'illustrative',
-        text: 'Module 3a uses the open-source MCP Gateway & Registry; Module 3b creates an AgentCore Registry with a Publisher and Admin approval workflow.',
+        text: 'Module 3a uses the open-source MCP Gateway & Registry; Module 3b creates an AWS Agent Registry with a Publisher and Admin approval workflow.',
         source: {
           file: WORKSHOP_MODULE_3B,
-          quote: 'Created an AgentCore Registry and registered 3 MCP tools with metadata',
+          quote: 'Created an AWS Agent Registry and registered 3 MCP tools with metadata',
         },
       },
       'self-service': {
@@ -489,11 +489,11 @@ export const securityMatrix: SecurityRow[] = [
     cells: {
       workshop: {
         posture: 'illustrative',
-        text: 'Cognito JWT on the Tools Gateway and the AgentCore Registry; Admin, Publisher and Consumer IAM persona roles; the scoped WSParticipantRole at events.',
+        text: 'Cognito JWT on the Tools Gateway and the AWS Agent Registry; Admin, Publisher and Consumer IAM persona roles; the scoped WSParticipantRole at events.',
         source: {
           file: WORKSHOP_MODULE_3B,
           heading: 'Steps',
-          quote: 'Create an AgentCore Registry with Cognito JWT auth',
+          quote: 'Create an AWS Agent Registry with Cognito JWT auth',
         },
       },
       'self-service': {

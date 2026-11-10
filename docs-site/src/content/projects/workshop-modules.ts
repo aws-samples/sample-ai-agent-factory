@@ -56,7 +56,7 @@ export const workshopModules: WorkshopModule[] = [
   {
     id: 'module-3b',
     name: 'Module 3b',
-    title: 'AgentCore Registry & Gateway',
+    title: 'AWS Agent Registry & Gateway',
     summary:
       'AWS-native tool governance with Amazon Bedrock AgentCore, Cedar-based authorization, and EventBridge-driven approval workflows.',
     source: { ...WHAT_YOULL_BUILD, quote: 'AWS-native tool governance with Amazon Bedrock' },

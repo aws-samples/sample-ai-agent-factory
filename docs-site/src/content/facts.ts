@@ -194,7 +194,7 @@ export const facts: Record<ProjectId, ProjectFacts> = {
     },
     authAndPolicy: {
       value:
-        'Cognito JWT on the Tools Gateway and the AgentCore Registry; group-based access in interceptors and Cedar policies (Module 3b); scoped IAM deploy policies',
+        'Cognito JWT on the Tools Gateway and the AWS Agent Registry; group-based access in interceptors and Cedar policies (Module 3b); scoped IAM deploy policies',
       source: {
         file: WORKSHOP_README,
         heading: "What you'll build",
@@ -211,7 +211,7 @@ export const facts: Record<ProjectId, ProjectFacts> = {
       value: 'Follow the workshop Cleanup module for Module 4 and Module 3a resources, then run ./deploy-cfn.sh destroy from the workshop folder. At an AWS event Workshop Studio cleans up the account automatically.',
       source: {
         file: WORKSHOP_README,
-        heading: 'Delete Everything',
+        heading: 'Delete everything',
         quote: './deploy-cfn.sh destroy',
       },
     },

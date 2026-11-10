@@ -196,10 +196,10 @@ export const glossary: GlossaryTerm[] = [
       {
         projectId: 'workshop',
         meaning:
-          'Two registries: the open-source MCP Registry in Module 3a, and the AgentCore Registry in Module 3b with a Publisher and Admin approval workflow.',
+          'Two registries: the open-source MCP Registry in Module 3a, and the AWS Agent Registry in Module 3b with a Publisher and Admin approval workflow.',
         source: {
           file: WORKSHOP_MODULE_3B,
-          quote: 'Created an AgentCore Registry and registered 3 MCP tools with metadata',
+          quote: 'Created an AWS Agent Registry and registered 3 MCP tools with metadata',
         },
       },
       {
@@ -236,9 +236,9 @@ export const glossary: GlossaryTerm[] = [
   },
   {
     id: 'agent-registry-naming',
-    term: 'Agent Registry versus AgentCore Registry',
+    term: 'AWS Agent Registry naming',
     definition:
-      'The same AWS service under two names. The workshop calls it AgentCore Registry; the root README and the Blueprint call it AWS Agent Registry. The service-linked role and the GA service namespaces use agent-registry. Issue #29 tracks the Blueprint move from the preview bedrock-agentcore-control APIs, whose support ended on 2026-09-17, to the GA APIs.',
+      'One AWS service, named consistently across the workshop, the root README, and the Blueprint as AWS Agent Registry. The service-linked role and the GA service namespaces use agent-registry. Issue #29 tracks the Blueprint move from the preview bedrock-agentcore-control APIs, whose support ended on 2026-09-17, to the GA APIs.',
     source: {
       file: WORKSHOP_CONTENTSPEC,
       quote: "AWSServiceRoleForAgentRegistry itself on the account's first Agent Registry",
