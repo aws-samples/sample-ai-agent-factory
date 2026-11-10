@@ -282,20 +282,25 @@ Parameters:
       `openssl rand -hex 32`). Used by registry/auth-server to send metrics and by
       metrics-service for authentication.
 
+  # Cognito identifiers. Like the *ImageRepo / *ImageTag parameters above, these
+  # are NOT referenced by any resource: every task definition resolves the user
+  # pool, client, and domain with !ImportValue from the data stack's exports, so
+  # setting one has no effect. They are kept only so the parent
+  # workshop-registry-stack.yaml can keep passing them.
   CognitoUserPoolId:
     Type: String
     Default: ''
-    Description: Cognito User Pool ID (leave empty to use ImportValue)
+    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
 
   CognitoWebAppClientId:
     Type: String
     Default: ''
-    Description: Cognito web app client ID (leave empty to use ImportValue)
+    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
 
   CognitoDomain:
     Type: String
     Default: ''
-    Description: Cognito hosted UI domain (leave empty to use ImportValue)
+    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
 
 
 Conditions:
@@ -1531,7 +1536,7 @@ Resources:
 
   #============================================================================
   # Grafana OSS (custom mcpgateway/grafana image with dashboards and datasources
-  # pre-loaded -- see GrafanaImageRepo / GrafanaImageTag)
+  # pre-loaded; the image is pinned directly in the task definition below)
   # Provides dashboards for MCP Analytics and AWS Infrastructure monitoring
   #============================================================================
 

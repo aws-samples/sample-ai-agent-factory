@@ -52,7 +52,16 @@
         "bedrock:TagResource",
         "bedrock:UntagResource"
       ],
-      "Resource": "arn:aws:bedrock:*:*:guardrail/*"
+      "Resource": "arn:aws:bedrock:*:*:guardrail/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ACRegistryServiceLinkedRole",

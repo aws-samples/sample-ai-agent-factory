@@ -245,6 +245,12 @@ Resources:
             Status: Enabled
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
+    # Retained on stack delete/replace: this bucket holds the file assets (Lambda
+    # bundles, nested templates) that already-deployed CDK stacks still reference,
+    # so dropping it during a bootstrap teardown or replacement would orphan those
+    # live stacks. The LifecycleConfiguration above expires old versions, so the
+    # retained bucket does not grow without bound. When you decommission the
+    # bootstrap for good, empty and remove it by hand (aws s3 rm / rb).
     UpdateReplacePolicy: Retain
     DeletionPolicy: Retain
   StagingBucketPolicy:

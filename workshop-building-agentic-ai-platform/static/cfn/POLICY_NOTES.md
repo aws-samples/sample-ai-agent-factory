@@ -639,6 +639,22 @@ the List/Get actions genuinely have no resource-level support.
 models are enabled on first invocation; Anthropic still needs the use-case form), and
 nothing in the workshop calls it.
 
+## `bedrock` guardrail writes are region-fenced, not tag-scoped (2026-11)
+
+`workshop-iam-policy-core.json` [`BedrockGuardrailWrite`] grants Create / Apply / Get /
+Update / Delete / CreateVersion and Tag / Untag on `guardrail/*`. It now carries the same
+`aws:RequestedRegion` fence as `BedrockCatalogNoResourceLevel`; before 2026-11 it was the
+only Bedrock statement with no condition at all. A scanner reads the open Update / Delete /
+Tag as a chance for a participant to modify a *platform-owned* guardrail — but there are
+none: no template declares `AWS::Bedrock::Guardrail`, and the only guardrails that exist are
+the three the participant creates themselves in Modules 2, 3a and 3b
+(`workshop-content-filter`, `workshop-tool-guardrail`, `workshop-tool-output-guardrail`).
+Guardrail ARNs use generated IDs, so a name prefix cannot scope them, and the create
+commands do not tag, so an `aws:ResourceTag` condition on Update / Delete would lock a
+participant out of their own guardrail unless tagging were also added to all five create
+sites — breakage for no security gain in a single-tenant workshop account. The region fence
+is the proportionate control.
+
 ## Assuming CDK bootstrap roles: three of five, never `cfn-exec` or `lookup`
 
 `cdk bootstrap` creates five roles. Four are assumed by the CDK CLI during a deploy;
