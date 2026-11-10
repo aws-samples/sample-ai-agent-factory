@@ -1,5 +1,5 @@
 ---
-title: "Create a Service Account"
+title: "Create a service account"
 weight: 45
 ---
 
@@ -8,8 +8,8 @@ Agents running on Amazon Bedrock AgentCore authenticate against the registry usi
 In this step you will:
 
 1. Create a group (`workshop-agents`) that defines what the Travel Agent is allowed to access
-2. Create an M2M service account for the AgentCore-hosted agent
-3. Store the credentials in AWS Secrets Manager so AgentCore can retrieve them securely
+2. Retrieve the M2M service account credentials the registry stack pre-provisioned for the AgentCore-hosted agent
+3. Verify the shape of those credentials (the secret already lives in AWS Secrets Manager — there is nothing for you to store)
 
 ## Create the workshop agents group
 
@@ -119,4 +119,4 @@ All three fields should report a non-zero length, and `token_url` should end in
 
 ::alert[**Never write this secret back from your shell.** It is the platform's only copy of the M2M client secret, and Cognito will not re-issue it. A `put-secret-value` built from shell variables destroys the credentials the moment one of those variables is empty — which happens as soon as you run the write in a new terminal, or on its own, without the retrieve above. Nothing fails at that point: the damage only surfaces two modules later, when Module 4 reports `clientId is required for CLIENT_SECRET_BASIC`. This is the general rule for platform-owned secrets — the stack that creates a credential is the only thing that should write it.]{type="warning"}
 
-Proceed to the **Verify and Hand Off** step to confirm everything works end-to-end.
+Proceed to the **Verify and hand off** step to confirm everything works end-to-end.

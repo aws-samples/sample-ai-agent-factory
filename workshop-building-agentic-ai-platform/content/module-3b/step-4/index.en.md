@@ -1,5 +1,5 @@
 ---
-title: "Register Tools"
+title: "Register tools"
 weight: 64
 ---
 
@@ -223,7 +223,7 @@ done
 if [ -z "$PY" ]; then
   echo "No interpreter has an Agent Registry-capable boto3 — creating /tmp/registry-venv"
   python3 -m venv /tmp/registry-venv
-  /tmp/registry-venv/bin/pip install --quiet 'boto3==1.43.72' 'botocore==1.43.72'
+  /tmp/registry-venv/bin/pip install --quiet 'boto3==1.43.126' 'botocore==1.43.126'
   PY=/tmp/registry-venv/bin/python
 fi
 
@@ -364,7 +364,7 @@ The governance workflow: **Publisher registers → Admin approves → Consumer d
 
 ## Notebook walkthrough (optional alternative)
 
-> This notebook (04-register-tools.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook covers registration, approval workflow, and additional advanced topics (EventBridge automation, URL-based sync, Registry→Gateway sync).
+> This notebook (04-register-tools.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook covers registering a CUSTOM record, the record update and re-approval lifecycle, EventBridge approval automation, and push-sync of tool schemas from the Registry to the Gateway.
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >

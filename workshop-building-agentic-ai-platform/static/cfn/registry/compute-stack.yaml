@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  MCP Gateway Registry - Compute Stack (Consolidated) Creates ECS clusters, ALBs, target groups, listeners, ACM certificates (optional), Route53 records (optional), ECR, and IAM roles. Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+  MCP Gateway Registry - Compute Stack (Consolidated). Creates one ECS cluster, an Application Load Balancer with its target groups, listeners and listener rules, an ACM certificate and Route 53 record (optional, custom domain only), a CloudFront distribution, an Amazon Managed Service for Prometheus workspace and rule group, a Cloud Map private DNS namespace, a log group, a helper Lambda function and IAM roles. Container images come from Docker Hub; no ECR repository is created. Deploys to the region specified by AWS::Region; the regions a Workshop Studio event may use come from contentspec.yaml regionConfiguration.deployableRegions, and the self-paced deployer accepts any supported region (us-west-2 is the default).
 
 Parameters:
   EnvironmentName:
@@ -70,7 +70,10 @@ Parameters:
   UpstreamVersion:
     Type: String
     Default: 'v1.0.16'
-    Description: Version tag for container images (e.g., v1.0.16, latest)
+    Description: >
+      Upstream mcp-gateway-registry version this deployment is based on
+      (informational, shown in the registry console). The service templates pin
+      their container images directly, so this value selects no image tag.
 
 Conditions:
   UseRegionalDomainsCondition: !Equals
@@ -100,6 +103,7 @@ Resources:
   EcsServiceLinkedRoleLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-ecs-slr-lambda-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -298,6 +302,7 @@ Resources:
   EcsTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-task-execution-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -341,17 +346,6 @@ Resources:
                   - ssm:GetParameter
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
-        - PolicyName: EcsExecLogging
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:DescribeLogGroups
-                  - logs:DescribeLogStreams
-                  - logs:PutLogEvents
-                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${EnvironmentName}*
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-task-execution
@@ -359,6 +353,7 @@ Resources:
   EcsTaskRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-task-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -379,6 +374,18 @@ Resources:
                   - ssmmessages:OpenControlChannel
                   - ssmmessages:OpenDataChannel
                 Resource: '*'  # ssmmessages actions do not support resource-level permissions
+              # ECS Exec session logging (cluster ExecuteCommandConfiguration
+              # Logging: OVERRIDE) is written by the SSM agent inside the
+              # container, which runs under the TASK role, not the execution
+              # role ("Monitor Amazon ECS containers with ECS Exec", IAM
+              # permissions required for CloudWatch Logs logging).
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${EnvironmentName}*
         - PolicyName: AMPRemoteWrite
           PolicyDocument:
             Version: '2012-10-17'
@@ -859,6 +866,10 @@ Outputs:
   MainAlbDnsName:
     Description: Main ALB DNS Name
     Value: !GetAtt MainAlb.DNSName
+
+  AlbFullName:
+    Description: Registry ALB in the form CloudWatch uses for the AWS/ApplicationELB LoadBalancer dimension (app/<name>/<id>); pass it to observability-stack.yaml as AlbFullName
+    Value: !GetAtt MainAlb.LoadBalancerFullName
     Export:
       Name: !Sub ${EnvironmentName}-MainAlbDnsName
 
@@ -930,7 +941,9 @@ Outputs:
       Name: !Sub ${EnvironmentName}-PrometheusWorkspaceArn
 
   PrometheusRemoteWriteEndpoint:
-    Description: Prometheus remote write endpoint for ADOT collector
+    Description: >-
+      Prometheus remote write endpoint, used by the metrics-service's ADOT collector
+      sidecar (services-stack, EnableObservability=true)
     # Use WorkspaceId (not Ref which returns ARN) to construct correct endpoint URL
     Value: !Sub
       - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}/api/v1/remote_write'

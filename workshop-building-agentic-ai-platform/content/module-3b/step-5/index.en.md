@@ -1,5 +1,5 @@
 ---
-title: "Discover & Search"
+title: "Discover & search"
 weight: 65
 ---
 

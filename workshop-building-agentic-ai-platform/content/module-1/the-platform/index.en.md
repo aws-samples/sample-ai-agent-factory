@@ -26,7 +26,7 @@ As the diagram above shows, these layers are realized as a **multi-account AWS l
 | Without Platform | With Platform |
 |-----------------|---------------|
 | Each team builds their own model access layer | Shared LLM Gateway with cost attribution and guardrails |
-| Tools are hardcoded into individual agents | Centralized Tool Registry — via open-source MCP Registry or AWS-native AgentCore Registry |
+| Tools are hardcoded into individual agents | Centralized Tool Registry — via open-source MCP Registry or AWS-native AWS Agent Registry |
 | No visibility into agent behavior across teams | Unified observability with tracing and evaluation |
 | Security is an afterthought | Identity, access control, and audit built into the foundation |
 

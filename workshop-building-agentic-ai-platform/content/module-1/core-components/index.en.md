@@ -1,5 +1,5 @@
 ---
-title: "Core Components"
+title: "Core components"
 weight: 23
 ---
 
@@ -25,14 +25,14 @@ Rather than letting every agent directly access models, tools, and other agents,
 |---------|----------------|-----------------|
 | **LLM Gateway** | Model access — unified API, guardrails, cost attribution, rate limiting | Module 2 |
 | **Tool Gateway (Open-Source)** | Tool access via MCP Registry — discovery, access control, audit logging, Bedrock Guardrails | Module 3a |
-| **Tool Gateway (AWS-Native)** | Tool access via AgentCore Registry & Gateway — AgentCore Policy Engine (Cedar-based), Lambda targets | Module 3b |
+| **Tool Gateway (AWS-Native)** | Tool access via AWS Agent Registry & AgentCore Gateway — AgentCore Policy Engine (Cedar-based), Lambda targets | Module 3b |
 | **Agent Gateway** | Agent-to-agent — A2A discovery, secure routing, entitlements | Modules 3a/3b (registry) |
 
 ## Registry vs. gateway: discovery and invocation
 
 The Registry and the Gateway answer two different questions, and it helps to keep them straight:
 
-- **Agent Registry** (or **AgentCore Registry**) is a discovery and metadata catalog. It answers *"what tools exist and who is allowed to use them?"* — names, descriptions, schemas, ownership, and access policies.
+- **Agent Registry** (or **AWS Agent Registry**) is a discovery and metadata catalog. It answers *"what tools exist and who is allowed to use them?"* — names, descriptions, schemas, ownership, and access policies.
 - **AgentCore Gateway** is the execution and routing service. It answers *"what happens when a tool is actually called?"* — authenticating the caller, throttling requests, recording audit logs, and routing the call to the right target.
 
 The recommended workflow combines both:

@@ -57,7 +57,17 @@
         "cognito-idp:AdminSetUserPassword",
         "cognito-idp:AdminInitiateAuth"
       ],
-      "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "DynamoDBAccess",
@@ -93,20 +103,14 @@
       "Resource": "*"
     },
     {
-      "Sid": "APIGatewayAccess",
+      "Sid": "APIGatewayReadOnly",
       "Effect": "Allow",
       "Action": [
-        "apigateway:GET",
-        "apigateway:POST",
-        "apigateway:PUT",
-        "apigateway:DELETE",
-        "apigateway:PATCH",
-        "execute-api:Invoke"
+        "apigateway:GET"
       ],
       "Resource": [
         "arn:aws:apigateway:*::/restapis*",
-        "arn:aws:apigateway:*::/apis*",
-        "arn:aws:execute-api:*:*:*"
+        "arn:aws:apigateway:*::/apis*"
       ],
       "Condition": {
         "StringEquals": {
@@ -265,13 +269,38 @@
       }
     },
     {
-      "Sid": "CloudFrontTagAndInvalidate",
+      "Sid": "CloudFrontTagOnCreateWorkshopOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:TagResource"
+      ],
+      "Resource": "arn:aws:cloudfront::*:distribution/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "CloudFrontManageTaggedOnly",
       "Effect": "Allow",
       "Action": [
         "cloudfront:TagResource",
         "cloudfront:UntagResource",
-        "cloudfront:ListTagsForResource",
         "cloudfront:CreateInvalidation"
+      ],
+      "Resource": "arn:aws:cloudfront::*:distribution/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "CloudFrontListTags",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:ListTagsForResource"
       ],
       "Resource": "arn:aws:cloudfront::*:distribution/*"
     },

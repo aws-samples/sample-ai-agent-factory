@@ -28,7 +28,9 @@ class _FakeBedrock:
     """Minimal stand-in for the bedrock client used by available_ids()."""
 
     def __init__(self, profiles=(), models=(), pages=1):
-        self._profiles = list(profiles)
+        # profiles: profile id, or (profile id, [bare model ids behind it])
+        # models:   (model id, [inference types]) or (model id, types, lifecycle)
+        self._profiles = [p if isinstance(p, tuple) else (p, []) for p in profiles]
         self._models = list(models)
         self._pages = pages
         self.list_inference_profiles_calls = 0
@@ -38,18 +40,31 @@ class _FakeBedrock:
         # Emit one profile per page to exercise nextToken pagination.
         idx = self.list_inference_profiles_calls - 1
         chunk = self._profiles[idx : idx + 1]
-        resp = {"inferenceProfileSummaries": [{"inferenceProfileId": p} for p in chunk]}
+        resp = {
+            "inferenceProfileSummaries": [
+                {
+                    "inferenceProfileId": p,
+                    "models": [
+                        {"modelArn": f"arn:aws:bedrock:test-region-1::foundation-model/{m}"}
+                        for m in model_ids
+                    ],
+                }
+                for p, model_ids in chunk
+            ]
+        }
         if self.list_inference_profiles_calls < len(self._profiles):
             resp["nextToken"] = "more"
         return resp
 
     def list_foundation_models(self, **kwargs):
-        return {
-            "modelSummaries": [
-                {"modelId": m, "inferenceTypesSupported": types}
-                for m, types in self._models
-            ]
-        }
+        summaries = []
+        for entry in self._models:
+            model, types = entry[0], entry[1]
+            summary = {"modelId": model, "inferenceTypesSupported": types}
+            if len(entry) > 2:
+                summary["modelLifecycle"] = {"status": entry[2]}
+            summaries.append(summary)
+        return {"modelSummaries": summaries}
 
 
 @pytest.mark.parametrize(
@@ -122,6 +137,39 @@ def test_available_ids_unions_profiles_and_on_demand_models():
     assert "deepseek.v3.2" in ids
     assert "anthropic.claude-opus-4-6-v1" not in ids
     assert "amazon.titan-text-express-v1" not in ids
+
+
+def test_available_ids_drops_legacy_and_eol_models_and_their_profiles():
+    client = _FakeBedrock(
+        profiles=[
+            # Profile over an ACTIVE model stays.
+            ("global.anthropic.claude-sonnet-4-6", ["anthropic.claude-sonnet-4-6"]),
+            # Profile whose only model is LEGACY goes: new accounts cannot adopt it.
+            (
+                "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                ["anthropic.claude-sonnet-4-5-20250929-v1:0"],
+            ),
+            # Profile with no model list (older API shape) is kept as before.
+            ("us.amazon.nova-pro-v1:0", []),
+        ],
+        models=[
+            ("anthropic.claude-sonnet-4-6", ["INFERENCE_PROFILE"], "ACTIVE"),
+            ("anthropic.claude-sonnet-4-5-20250929-v1:0", ["INFERENCE_PROFILE"], "LEGACY"),
+            # Bare ON_DEMAND models: ACTIVE stays, LEGACY and EOL go, missing field = ACTIVE.
+            ("deepseek.v3.2", ["ON_DEMAND"], "ACTIVE"),
+            ("deepseek.v3-v1:0", ["ON_DEMAND"], "LEGACY"),
+            ("meta.llama3-2-90b-instruct-v1:0", ["ON_DEMAND"], "EOL"),
+            ("mistral.mistral-large-3-675b-instruct", ["ON_DEMAND"]),
+        ],
+    )
+    ids = available_ids("test-region-lifecycle-1", client=client)
+    assert "global.anthropic.claude-sonnet-4-6" in ids
+    assert "global.anthropic.claude-sonnet-4-5-20250929-v1:0" not in ids
+    assert "us.amazon.nova-pro-v1:0" in ids
+    assert "deepseek.v3.2" in ids
+    assert "mistral.mistral-large-3-675b-instruct" in ids
+    assert "deepseek.v3-v1:0" not in ids
+    assert "meta.llama3-2-90b-instruct-v1:0" not in ids
 
 
 def test_available_ids_caches_per_region():

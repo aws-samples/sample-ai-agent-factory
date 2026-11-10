@@ -35,6 +35,7 @@ Resources:
   ServiceNetworkHealthLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-svc-network-health-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -207,6 +208,7 @@ Resources:
   MCPRegistrationLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub ${EnvironmentName}-mcp-registration-lambda-role-${AWS::Region}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'

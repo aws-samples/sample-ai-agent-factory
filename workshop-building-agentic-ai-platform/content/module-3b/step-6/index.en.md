@@ -1,5 +1,5 @@
 ---
-title: "Test the Gateway"
+title: "Test the gateway"
 weight: 66
 ---
 
@@ -126,15 +126,26 @@ curl -s -X POST "$GATEWAY_URL" \
 The request interceptor runs on every `tools/call`. Verify it was invoked:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-aws logs filter-log-events \
-  --log-group-name "/aws/lambda/ac-gateway-request-interceptor" \
-  --limit 3 --region $REGION \
-  --start-time $(python3 -c "import time; print(int((time.time()-300)*1000))") \
-  --query "events[].message" --output text > /tmp/interceptor-events.log
-head -10 /tmp/interceptor-events.log
+# Lambda logs reach CloudWatch a few seconds after the invocation, so poll briefly
+# instead of reading once and seeing nothing.
+START_MS=$(python3 -c "import time; print(int((time.time()-300)*1000))")
+for _ in $(seq 1 6); do
+  aws logs filter-log-events \
+    --log-group-name "/aws/lambda/ac-gateway-request-interceptor" \
+    --filter-pattern '"audit"' --limit 3 --region $REGION \
+    --start-time "$START_MS" \
+    --query "events[].message" --output text > /tmp/interceptor-events.log
+  [ -s /tmp/interceptor-events.log ] && break
+  sleep 5
+done
+if [ -s /tmp/interceptor-events.log ]; then
+  head -3 /tmp/interceptor-events.log
+else
+  echo "No audit entry ingested yet — re-run this block in a few seconds."
+fi
 :::
 
-You should see `START` and `END` entries confirming the interceptor executed. In a production setup, the interceptor would log structured audit entries (caller identity, tool name, timestamp) to CloudWatch or DynamoDB.
+You should see one JSON audit entry per gateway call, for example `{"audit": true, "request_id": "...", "method": "tools/call", "tool_name": "tg-workshop-flights-mcp___search_flights", "client_id": "...", "timestamp": "..."}`: the caller identity, the tool name and a timestamp. CloudWatch Logs is the interceptor's primary audit sink; the DynamoDB sink is optional and off in this deployment.
 
 ---
 

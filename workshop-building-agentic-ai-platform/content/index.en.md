@@ -15,11 +15,12 @@ This workshop teaches you how to assemble these building blocks, govern them, an
 
 This workshop follows two complementary personas — the **platform engineer** who provides governed LLM and tool infrastructure (Modules 2, 3a, 3b), and the **AI/ML engineer** who builds agents on top of it (Module 4). You pick the **track** that matches your role and available time:
 
-- **Module 1: The Vision** — why enterprises need a platform approach to agentic AI, not just individual agents (all tracks)
+- **Module 1: The vision** — why enterprises need a platform approach to agentic AI, not just individual agents (all tracks)
 - **Module 2: LLM Gateway** — deploy LiteLLM Proxy on ECS Fargate for governed, cost-attributed access to Amazon Bedrock models
 - **Module 3a: MCP Registry + Tools Gateway** — register tools in the MCP Gateway & Registry, then layer an AgentCore Tools Gateway on top for JWT auth, audit, and guardrails
-- **Module 3b: AgentCore Registry & Gateway** — AWS-native tool governance using Amazon Bedrock AgentCore with Cedar-based authorization and EventBridge-driven approval workflows
-- **Module 4: Build Your Agent** — deploy a full-stack travel agent using FAST (Fullstack AgentCore Solution Template) on Amazon Bedrock AgentCore, wired to the platform via either the MCP path or the AgentCore path
+- **Module 3b: AWS Agent Registry & AgentCore Gateway** — AWS-native tool governance using Amazon Bedrock AgentCore with Cedar-based authorization and EventBridge-driven approval workflows
+- **Module 4: Build your agent** — deploy a full-stack travel agent using FAST (Fullstack AgentCore Solution Template) on Amazon Bedrock AgentCore, wired to the platform via either the MCP path or the AgentCore path
+- **Module 5: Observe & evaluate with CloudWatch Omni** — put the platform's logs, traces and agent runs in one Amazon CloudWatch Omni space, then score agent quality with AgentCore Evaluations, on demand and continuously
 
 ## Learning outcomes
 
@@ -31,14 +32,15 @@ After completing this workshop you will be able to:
 4. **Front those tools with an AgentCore Gateway** — expose curated tools over MCP with JWT machine-to-machine auth, request/response interceptors, and an audit trail of every tool call.
 5. **Build and deploy a production-shaped agent** — ship a full-stack Strands agent on Amazon Bedrock AgentCore Runtime with memory, a code interpreter, and a React frontend, wired to the platform rather than calling Bedrock directly.
 6. **Prove the governance path, not assume it** — verify from the CLI that model calls flow through the gateway, that spend is recorded, and that traces land in CloudWatch.
+7. **Measure quality, not only health** — read an agent run end to end in CloudWatch Omni and score it with evaluators, so a wrong answer with a 200 status is visible before customers report it.
 
 ## Choose your track
 
 | Track | Best For | You Do | Duration |
 |-------|----------|--------|----------|
-| **Track 1: Fast Path** | AI/ML Engineers who want to build an agent | Jump straight to Module 4 — platform is pre-deployed | ~1.5–2 hrs |
-| **Track 2: Build the Platform** | Platform Engineers | Modules 1 → 2 → 3a → 3b (stops before agent) | ~2–3 hrs |
-| **Track 3: Full Journey** | Solutions Architects, Tech Leads | Modules 1 → 2 → 3a → 3b → 4 end-to-end | ~3–4 hrs |
+| **Track 1: Fast Path** | AI/ML Engineers who want to build an agent | Jump straight to Module 4 — platform is pre-deployed, then Module 5 Part B | ~2–2.5 hrs |
+| **Track 2: Build the Platform** | Platform Engineers | Modules 1 → 2 → 3a → 3b → 5 Part A (stops before agent) | ~2.5–3.5 hrs |
+| **Track 3: Full Journey** | Solutions Architects, Tech Leads | Modules 1 → 2 → 3a → 3b → 4 → 5 end-to-end | ~3.5–4.5 hrs |
 
 All tracks share **Module 1** (the vision). Module 1 concludes with a track selector so you can pick the right path for your goals.
 
@@ -46,7 +48,7 @@ All tracks share **Module 1** (the vision). Module 1 concludes with a track sele
 
 This 300 level workshop is designed for Platform Engineers, AI/ML Engineers, and Solutions Architects who want hands-on experience building the foundational infrastructure for enterprise agentic AI workloads. It is ideal for those looking to move AI agents from proof-of-concept to production with proper governance, security, and observability.
 
-**Estimated Duration:** 1.5-4 hours depending on track chosen
+**Estimated Duration:** 2-4.5 hours depending on track chosen
 
 ### Prerequisites
 

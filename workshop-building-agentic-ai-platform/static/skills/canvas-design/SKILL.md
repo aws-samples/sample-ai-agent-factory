@@ -36,8 +36,8 @@ it for interactive interfaces; use `frontend-design` for those.
 
 ## Export requirements
 
-- Vector output (`.pdf`, or `.png` rendered at 2× or higher) so text stays sharp when
-  projected or zoomed.
+- Vector output for `.pdf`; a `.png` is a raster export and must be rendered at 2× or
+  higher so text stays sharp when projected or zoomed.
 - Text as text, not as rasterised pixels, wherever the format allows it.
 - Legible when printed in greyscale: check that the composition survives losing
   colour, since meaning must not depend on hue alone.

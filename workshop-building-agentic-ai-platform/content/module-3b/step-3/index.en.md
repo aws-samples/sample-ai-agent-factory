@@ -9,7 +9,7 @@ weight: 63
 
 ## CLI walkthrough
 
-Create an AgentCore Registry with Cognito JWT authentication and manual approval workflow.
+Create an AWS Agent Registry with Cognito JWT authentication and manual approval workflow.
 
 ### Gather stack outputs
 

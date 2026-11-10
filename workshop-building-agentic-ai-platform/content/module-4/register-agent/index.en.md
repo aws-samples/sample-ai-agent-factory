@@ -1,5 +1,5 @@
 ---
-title: "Register Agent in Registry (Optional)"
+title: "Register the agent in the registry (optional)"
 weight: 78
 ---
 
@@ -29,8 +29,10 @@ REGION=$(aws configure get region)
 
 RUNTIME_ARN=$(aws cloudformation describe-stacks --stack-name FAST-stack --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text --region $REGION)
 
-RUNTIME_ID=$(echo "$RUNTIME_ARN" | awk -F'/' '{print $NF}')
-AGENT_URL="https://${RUNTIME_ID}.runtime.bedrock-agentcore.${REGION}.amazonaws.com"
+# AgentCore Runtime invocation endpoint: regional host, /runtimes/<URL-encoded ARN>/invocations,
+# the same URL the Run the agent smoke test calls. The ARN is URL-encoded because it contains ':' and '/'.
+ENCODED_ARN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$RUNTIME_ARN")
+AGENT_URL="https://bedrock-agentcore.${REGION}.amazonaws.com/runtimes/${ENCODED_ARN}/invocations?qualifier=DEFAULT"
 
 echo "Runtime ARN: $RUNTIME_ARN"
 echo "Agent URL:   $AGENT_URL"
@@ -159,7 +161,7 @@ fi
 BLOCK
 :::
 
-Now switch to the admin role and approve the record. Re-derive the IDs here too, since `unset` wipes all env vars and we need fresh admin-side calls:
+Now switch to the admin role and approve the record. The `unset` line clears only the publisher role's temporary credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), so the `assume-role` call for the admin role is made from the IDE's own role rather than from the publisher session; `REGION` and the IDs are re-derived so the block also works in a fresh shell:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 source /dev/stdin <<'BLOCK'
@@ -248,6 +250,6 @@ The Registry is now a complete catalog of both **tools** (MCP) and **agents** (A
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`07-register-agent.ipynb`**.

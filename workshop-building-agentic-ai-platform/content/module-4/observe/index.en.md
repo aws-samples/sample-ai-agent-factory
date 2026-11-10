@@ -1,5 +1,5 @@
 ---
-title: "Observe the Platform"
+title: "Observe the platform"
 weight: 77
 ---
 
@@ -29,9 +29,11 @@ Key log entries to look for:
 
 ## GenAI observability
 
-Amazon Bedrock provides a GenAI Observability dashboard in CloudWatch. Open it to see traces for your agent:
+Amazon CloudWatch provides a GenAI Observability dashboard (generative AI observability) that ingests the AgentCore Runtime telemetry. Open it to see traces for your agent:
 
 :button[Open GenAI Observability]{target="_blank" href="https://console.aws.amazon.com/cloudwatch/home#gen-ai-observability" variant="primary" iconName="external" iconAlign="right"}
+
+::alert[Traces appear here only because CloudWatch Transaction Search is on for the account. `workshop-agentcore-stack` enabled it during provisioning (it takes about 10 minutes to apply). If the dashboard is empty, confirm `aws xray get-trace-segment-destination` reports `CloudWatchLogs`, and that you applied the *Keep prompts and responses on the spans* patch on the deploy page before `cdk deploy`.]{type="info"}
 
 Select a trace to see the full request flow — from the user's prompt through model calls, tool invocations, and the final response. Each span shows latency, status, and metadata.
 
@@ -51,11 +53,21 @@ for LG in /aws/lambda/agentcore-gateway-request-interceptor \
     --query "logGroups[?logGroupName=='$LG'].logGroupName" --output text \
     | grep -q . || continue
   echo "=== $LG ==="
-  aws logs filter-log-events \
-    --log-group-name "$LG" \
-    --filter-pattern '"tools"' \
-    --limit 5 --region $REGION \
-    --query "events[].message" --output text
+  # Always pass --start-time: without it FilterLogEvents scans from the log group's
+  # beginning and can hand back an empty first page, which looks like "no entries".
+  # Lambda logs also take a few seconds to arrive, so poll briefly.
+  START_MS=$(python3 -c "import time; print(int((time.time()-7200)*1000))")
+  for _ in $(seq 1 4); do
+    EVENTS=$(aws logs filter-log-events \
+      --log-group-name "$LG" \
+      --filter-pattern '"tools"' \
+      --start-time "$START_MS" \
+      --limit 5 --region $REGION \
+      --query "events[].message" --output text)
+    [ -n "$EVENTS" ] && break
+    sleep 5
+  done
+  echo "${EVENTS:-(no audit entries in the last two hours)}"
 done
 :::
 
@@ -123,12 +135,14 @@ Each event represents a conversation turn stored by the `AgentCoreMemorySessionM
 
 This observability stack demonstrates the patterns needed for an enterprise solution — every layer is instrumented and auditable.
 
+Each surface answers a question about one component. [Module 5](/module-5) puts them in one CloudWatch Omni space, reads a whole conversation as a session of traces, and adds the question none of these surfaces answers: was the answer any good.
+
 ## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`06-observe.ipynb`**.

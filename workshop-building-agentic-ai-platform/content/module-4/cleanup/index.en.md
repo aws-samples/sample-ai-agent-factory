@@ -169,6 +169,6 @@ For cleanup of platform resources (LLM Gateway, Registry, Tools Gateway stacks),
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`08-cleanup.ipynb`**.

@@ -1,5 +1,5 @@
 ---
-title: "Architecture Overview"
+title: "Architecture overview"
 weight: 31
 ---
 
@@ -76,7 +76,7 @@ The ECS Fargate task runs **two containers** in the same task definition:
 | Container | Image | Port | Purpose |
 |-----------|-------|------|---------|
 | `litellm` | `litellm-database:v1.88.6` | 4000 | LLM proxy, virtual keys, spend tracking, Admin UI |
-| `postgres` | `postgres:16.7` (Debian) | 5432 | Stores virtual keys, teams, spend logs |
+| `postgres` | `postgres:16.12` (Debian) | 5432 | Stores virtual keys, teams, spend logs |
 
 PostgreSQL data is persisted on EFS, so it survives task restarts. The LiteLLM container waits for PostgreSQL to be healthy before starting.
 
@@ -86,7 +86,7 @@ Requests flow through: **Client → API Gateway (HTTPS) → VPC Link → Interna
 
 ## Available models
 
-The gateway is pre-configured with Bedrock models from multiple providers including Anthropic Claude, Amazon Nova, Meta Llama, Mistral AI, and DeepSeek. You will explore the full model list in the next step.
+The gateway is pre-configured with Bedrock models from multiple providers including Anthropic Claude, Amazon Nova, Mistral AI, and DeepSeek. You will explore the full model list in the next step.
 
 ---
 

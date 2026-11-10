@@ -111,16 +111,17 @@ if match:
     print(f"  Gateway ID:  {gateway_id}")
     print(f"  Status:      {match[0]['status']}")
 
-    # Update gateway to ensure the authorizer config is current. Interceptors are
-    # set at create time and persist for the life of the gateway; update_gateway
-    # does not accept interceptorConfigurations, so it is intentionally omitted
-    # here (passing it raises a parameter-validation error on re-runs).
+    # Update gateway so the authorizer config AND the interceptor chain match
+    # this script on every re-run (UpdateGateway accepts
+    # interceptorConfigurations, boto3 >= 1.43; the member is reconciled, not
+    # merged, so the full list is passed each time).
     try:
         client.update_gateway(
             gatewayIdentifier=gateway_id,
             name=GATEWAY_NAME,
             roleArn=GATEWAY_ROLE_ARN,
             protocolType="MCP",
+            interceptorConfigurations=INTERCEPTOR_CONFIGS,
             protocolConfiguration={
                 "mcp": {
                     "supportedVersions": ["2025-03-26"],

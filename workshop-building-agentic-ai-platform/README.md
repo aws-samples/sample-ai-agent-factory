@@ -162,11 +162,12 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 ├── content/                      # Workshop markdown (Workshop Studio builds from here)
 │   ├── index.en.md               # Landing page
 │   ├── introduction/             # Intro + getting-started (aws-event + self-service paths)
-│   ├── module-1/                 # The Vision (all tracks)
+│   ├── module-1/                 # The vision (all tracks)
 │   ├── module-2/                 # LLM Gateway (tracks 2, 3)
 │   ├── module-3a/                # MCP Registry + Tools Gateway (tracks 2, 3)
 │   ├── module-3b/                # AgentCore Registry & Gateway (tracks 2, 3)
 │   ├── module-4/                 # FAST agent — dual-path (MCP or AgentCore) (tracks 1, 3)
+│   ├── module-5/                 # CloudWatch Omni observability + AgentCore Evaluations (all tracks)
 │   ├── summary/
 │   └── cleanup/
 ├── source/                       # Module source code (pre-staged into /workshop in the IDE)
@@ -174,13 +175,14 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 │   ├── module-3a-mcp-registry/   # MCP Registry scripts + notebooks
 │   ├── module-3b-agentcore/      # AgentCore Registry + Gateway + Cedar notebooks
 │   ├── module-4a-tools-gateway/  # Tools Gateway Lambdas + CDK
-│   └── module-4b-fast/           # FAST agent notebooks (connects to the gateways)
+│   ├── module-4b-fast/           # FAST agent notebooks (connects to the gateways)
+│   └── module-5-omni/            # CloudWatch Omni + Evaluations notebooks
 ├── static/
 │   ├── cfn/
 │   │   ├── llm-gateway/           # Stack 1 — LiteLLM Proxy on ECS (Module 2)
 │   │   ├── registry/              # Stack 2 — MCP Gateway & Registry nested stacks (Module 3a)
 │   │   ├── tools-gateway/         # Stack 3 — AgentCore Tools Gateway (Module 3a upper layer)
-│   │   ├── agentcore/             # Stack 4 — AgentCore Registry & Gateway (Module 3b)
+│   │   ├── agentcore/             # Stack 4 — AgentCore Registry & Gateway (Module 3b) + Transaction Search and Omni/Evaluations roles (Module 5)
 │   │   ├── code-editor.yaml       # Stack 5 — browser VS Code IDE on EC2 (all tracks)
 │   │   ├── workshop-iam-policy-core.json     # ParticipantRole policy (bedrock, agentcore, secrets)
 │   │   ├── workshop-iam-policy-infra.json    # ParticipantRole policy (ECS, EFS, ELB, etc.)

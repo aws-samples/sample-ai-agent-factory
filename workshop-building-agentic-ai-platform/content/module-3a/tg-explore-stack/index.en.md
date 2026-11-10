@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Explore the Stack"
+title: "Tools Gateway: explore the stack"
 weight: 49
 ---
 
@@ -81,7 +81,7 @@ python3 create_gateway.py
 
 ### What is the sync Lambda?
 
-The **Sync Lambda** is one of the three Lambda functions deployed by `workshop-tools-gateway-stack` (alongside the request and response interceptors). You can see it in the AWS Console as `agentcore-gateway-sync` under **Lambda → Functions**, or in the CloudFormation **Resources** tab of the tools-gateway stack. Its job is to read the MCP Registry's catalog on a schedule (EventBridge every 5 minutes, see [Automated Sync](../tg-automated-sync/)), compare it to the AgentCore Gateway's current targets, and create / update targets for any tool it finds. That's why you only had to register a tool in the Registry UI in the previous step — the Sync Lambda picked it up and wired it into the gateway automatically.
+The **Sync Lambda** is one of the three Lambda functions deployed by `workshop-tools-gateway-stack` (alongside the request and response interceptors). You can see it in the AWS Console as `agentcore-gateway-sync` under **Lambda → Functions**, or in the CloudFormation **Resources** tab of the tools-gateway stack. Its job is to read the MCP Registry's catalog on a schedule (EventBridge every 5 minutes, see [automated sync](../tg-automated-sync/)), compare it to the AgentCore Gateway's current targets, and create / update targets for any tool it finds. That's why you only had to register a tool in the Registry UI in the previous step — the Sync Lambda picked it up and wired it into the gateway automatically.
 
 The Lambda needs to know **which** gateway to write targets into. That is passed via its `GATEWAY_ID` environment variable.
 

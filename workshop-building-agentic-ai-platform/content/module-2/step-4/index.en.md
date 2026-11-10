@@ -1,5 +1,5 @@
 ---
-title: "Test Model Access"
+title: "Test model access"
 weight: 34
 ---
 
@@ -135,7 +135,9 @@ model = LiteLLMModel(
     model_id="openai/claude-sonnet",
 )
 
-agent = Agent(model=model)
+# callback_handler=None turns off Strands' streaming printer, otherwise the answer
+# is printed twice: once as it streams and once by print(result).
+agent = Agent(model=model, callback_handler=None)
 result = agent("What is 15 * 23? Think step by step.")
 print(result)
 PYEOF
@@ -166,7 +168,7 @@ The test script runs 8 tests and prints results for each. If `strands-agents[lit
 >
 > Navigate to `source/module-2-llm-gateway/notebooks/` and open the corresponding notebook.
 
-Open **`step-4-test-models.ipynb`**. This notebook demonstrates four different ways to interact with the LLM Gateway, with inline output so you can compare approaches side by side:
+Open **`step-4-test-models.ipynb`**. This notebook walks through eight sections that exercise the LLM Gateway, with inline output so you can compare approaches side by side:
 
 1. **Health check** — Quick liveness probe to confirm the gateway is reachable.
 2. **List available models** — Queries the OpenAI-compatible `/models` endpoint and prints every configured model alias.
@@ -177,4 +179,4 @@ Open **`step-4-test-models.ipynb`**. This notebook demonstrates four different w
 7. **Strands Agent integration** — Creates a Strands `Agent` using `LiteLLMModel` pointed at the gateway. This is the pattern Module 4 agents will use in production.
 8. **Workshop client library** — Shows the `LLMGatewayClient` convenience wrapper for quick interactions.
 
-::alert[The Strands Agent cell (section 7) requires `strands-agents[litellm]` to be installed. The notebook installs it automatically in the first cell.]{type="info"}
+::alert[The Strands Agent cell (section 7) requires `strands-agents[litellm]`. The Workshop IDE pre-installs `strands-agents[litellm,openai]==1.52.0` (the same pin as the CLI section) in the `Python 3 (workshop)` kernel, so the notebook has no install cell — if you run it elsewhere, install that package first.]{type="info"}

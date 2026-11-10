@@ -30,7 +30,7 @@ pip install -r requirements.txt --quiet
 python scripts/setup_keys.py --stack-name workshop-llm-gateway-stack
 :::
 
-This registers 17 Bedrock models (Claude, Nova, Llama, Mistral, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
+This registers 13 Bedrock model aliases (Claude, Nova, Mistral, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
 
 ## Retrieve the LLM Gateway credentials
 
@@ -165,6 +165,6 @@ If spend is greater than $0, the agent is routing through the LLM Gateway.
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`03-connect-llm-gateway.ipynb`**.

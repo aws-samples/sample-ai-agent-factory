@@ -80,15 +80,25 @@ def _unwrap_event(event):
     absence of "method" / "jsonrpc" keys and synthesise a tools/call body so the
     rest of the handler can use a single code-path.
     """
+    body = event
     if isinstance(event, dict) and "mcp" in event and "gatewayRequest" in event.get("mcp", {}):
         body = event["mcp"]["gatewayRequest"].get("body", {})
         if isinstance(body, str):
             body = json.loads(body)
-        return body
     # API Gateway / ALB wraps in {"body": "..."}
-    if isinstance(event, dict) and isinstance(event.get("body"), str):
-        return json.loads(event["body"])
-    return event
+    elif isinstance(event, dict) and isinstance(event.get("body"), str):
+        body = json.loads(event["body"])
+    # Bare tool arguments (what an AgentCore Gateway Lambda target receives): no
+    # JSON-RPC envelope at all, so wrap them in a tools/call for the single tool
+    # this function serves.
+    if isinstance(body, dict) and "method" not in body and "jsonrpc" not in body:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": TOOL_DEFINITION["name"], "arguments": body},
+        }
+    return body
 
 
 def handler(event, context):

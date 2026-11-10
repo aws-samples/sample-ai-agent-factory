@@ -1,5 +1,5 @@
 ---
-title: "Enterprise Guardrails"
+title: "Enterprise guardrails"
 weight: 35
 ---
 

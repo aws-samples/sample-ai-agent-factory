@@ -12,13 +12,13 @@ Parameters:
     Type: String
     Default: 'v1.0.16'
     Description: >
-      Upstream mcp-gateway-registry version this deployment is based on.
-      Used for display purposes in the registry console. Image tags default
-      to 'latest' unless explicitly overridden via *ImageTag parameters.
+      Upstream mcp-gateway-registry version this deployment is based on, shown
+      in the registry console. The service templates pin the Docker Hub images
+      mcpgateway/*:v1.0.16 directly; the *ImageRepo/*ImageTag parameters below
+      are legacy inputs that the child stacks declare but no longer read.
     AllowedPattern: '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$|^latest$'
     ConstraintDescription: Must be a semantic version (e.g., v1.0.16, 1.0.16) or 'latest'
 
-  # Build Trigger - increment to force CodeBuild rebuild
   EnvironmentName:
     Type: String
     Default: workshop
@@ -79,56 +79,58 @@ Parameters:
       - db.r5.xlarge
       - db.r5.2xlarge
 
-  # Container image configuration (ECR repositories and tags)
+  # Legacy container image parameters. Nothing builds or pushes images (no CodeBuild, no
+  # ECR): the service templates pin Docker Hub images mcpgateway/*:v1.0.16. These stay so
+  # existing stacks update without parameter errors.
   RegistryImageRepo:
     Type: String
     Default: 'mcp-gateway-registry'
-    Description: ECR repository name for Registry service
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for Registry service
 
   RegistryImageTag:
     Type: String
     Default: ''
-    Description: Image tag for Registry service (defaults to 'latest' if empty)
+    Description: Image tag for Registry service (legacy, unused; passed to the child stack as 'latest' when empty)
 
   AuthServerImageRepo:
     Type: String
     Default: 'mcp-gateway-auth-server'
-    Description: ECR repository name for Auth Server
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for Auth Server
 
   AuthServerImageTag:
     Type: String
     Default: ''
-    Description: Image tag for Auth Server (defaults to 'latest' if empty)
+    Description: Image tag for Auth Server (legacy, unused; passed to the child stack as 'latest' when empty)
 
   CurrentTimeImageRepo:
     Type: String
     Default: 'mcp-gateway-currenttime'
-    Description: ECR repository name for CurrentTime MCP server
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for CurrentTime MCP server
 
   CurrentTimeImageTag:
     Type: String
     Default: ''
-    Description: Image tag for CurrentTime MCP server (defaults to 'latest' if empty)
+    Description: Image tag for CurrentTime MCP server (legacy, unused; passed to the child stack as 'latest' when empty)
 
   McpgwImageRepo:
     Type: String
     Default: 'mcp-gateway-mcpgw'
-    Description: ECR repository name for MCPGW MCP server
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for MCPGW MCP server
 
   McpgwImageTag:
     Type: String
     Default: ''
-    Description: Image tag for MCPGW MCP server (defaults to 'latest' if empty)
+    Description: Image tag for MCPGW MCP server (legacy, unused; passed to the child stack as 'latest' when empty)
 
   RealServerFakeToolsImageRepo:
     Type: String
     Default: 'mcp-gateway-realserverfaketools'
-    Description: ECR repository name for RealServerFakeTools MCP server
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for RealServerFakeTools MCP server
 
   RealServerFakeToolsImageTag:
     Type: String
     Default: ''
-    Description: Image tag for RealServerFakeTools MCP server (defaults to 'latest' if empty)
+    Description: Image tag for RealServerFakeTools MCP server (legacy, unused; passed to the child stack as 'latest' when empty)
 
   ServiceCpu:
     Type: String
@@ -250,7 +252,7 @@ Parameters:
       - 'false'
     Description: Add security-pending tag to servers that fail security scan
 
-  # Observability Configuration (ADOT + Amazon Managed Service for Prometheus + Grafana + Metrics Service)
+  # Observability Configuration (metrics-service with ADOT sidecar + Amazon Managed Service for Prometheus + Grafana)
   # NOTE: Set to 'false' by default because observability-stack must be deployed
   # BEFORE services-stack for ImportValue references to resolve.
   # Deploy observability-stack separately first, then set to 'true' on stack update.
@@ -261,8 +263,10 @@ Parameters:
       - 'true'
       - 'false'
     Description: >
-      Enable full observability stack (Grafana OSS, metrics-service, ADOT collector).
-      When enabled, deploys Grafana dashboards for MCP Analytics and AWS Infrastructure monitoring.
+      Enable the observability features of services-stack: the metrics-service task
+      with its ADOT collector sidecar (which remote-writes metrics to the Amazon Managed
+      Service for Prometheus workspace that observability-stack creates) and Grafana OSS
+      dashboards for MCP Analytics and AWS infrastructure monitoring.
 
   AMPRemoteWriteEndpoint:
     Type: String
@@ -274,22 +278,22 @@ Parameters:
   GrafanaImageRepo:
     Type: String
     Default: 'mcp-gateway-grafana'
-    Description: ECR repository name for Grafana (with dashboards baked in from cloudformation/aws-ecs/grafana/)
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for Grafana (with dashboards baked in from cloudformation/aws-ecs/grafana/)
 
   GrafanaImageTag:
     Type: String
     Default: ''
-    Description: Image tag for Grafana (defaults to 'latest' if empty)
+    Description: Image tag for Grafana (legacy, unused; passed to the child stack as 'latest' when empty)
 
   MetricsServiceImageRepo:
     Type: String
     Default: 'mcp-gateway-metrics-service'
-    Description: ECR repository name for metrics-service
+    Description: Legacy, unused (images are pinned Docker Hub tags). Former ECR repository name for metrics-service
 
   MetricsServiceImageTag:
     Type: String
     Default: ''
-    Description: Image tag for metrics-service (defaults to 'latest' if empty)
+    Description: Image tag for metrics-service (legacy, unused; passed to the child stack as 'latest' when empty)
 
   # Template S3 Location (for nested stacks)
   # NOTE: TemplateS3Prefix must include trailing slash (e.g., "path/to/templates/")
@@ -319,7 +323,8 @@ Parameters:
       contentspec.yaml). Leave empty to reuse TemplateS3Bucket.
 
 Conditions:
-  # Image tag conditions - use UpstreamVersion as default when individual tags are empty
+  # Legacy image tag conditions - an empty tag is passed to the ServicesStack as 'latest';
+  # the child templates pin their images and do not read these values
   UseDefaultRegistryTag: !Equals [!Ref RegistryImageTag, '']
   UseDefaultAuthServerTag: !Equals [!Ref AuthServerImageTag, '']
   UseDefaultCurrentTimeTag: !Equals [!Ref CurrentTimeImageTag, '']

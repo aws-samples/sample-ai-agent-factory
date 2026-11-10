@@ -2,14 +2,29 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "ServiceDiscoveryCreateAndListNoResourceLevel",
+      "Sid": "ServiceDiscoveryCreateNamespaceWorkshopTagged",
       "Effect": "Allow",
       "Action": [
-        "servicediscovery:CreatePrivateDnsNamespace",
+        "servicediscovery:CreatePrivateDnsNamespace"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:RequestTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "ServiceDiscoveryListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
         "servicediscovery:ListNamespaces",
         "servicediscovery:GetOperation",
-        "servicediscovery:TagResource",
-        "servicediscovery:UntagResource",
         "servicediscovery:ListTagsForResource"
       ],
       "Resource": "*",
@@ -132,35 +147,7 @@
       "Resource": "arn:aws:cognito-idp:*:*:userpool/*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "ApiGatewayV2ForLlmGateway",
-      "Effect": "Allow",
-      "Action": [
-        "apigateway:GET",
-        "apigateway:POST",
-        "apigateway:PUT",
-        "apigateway:DELETE",
-        "apigateway:PATCH",
-        "apigateway:TagResource",
-        "apigateway:UntagResource"
-      ],
-      "Resource": [
-        "arn:aws:apigateway:*::/apis",
-        "arn:aws:apigateway:*::/apis/*",
-        "arn:aws:apigateway:*::/vpclinks",
-        "arn:aws:apigateway:*::/vpclinks/*",
-        "arn:aws:apigateway:*::/tags/*"
-      ],
-      "Condition": {
-        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
           "aws:RequestedRegion": [
             "us-west-2",
             "us-east-1",
@@ -265,7 +252,7 @@
       }
     },
     {
-      "Sid": "AgentRegistryManage",
+      "Sid": "AgentRegistryGetDeleteNoConditionKeysAvailable",
       "Effect": "Allow",
       "Action": [
         "agent-registry:GetRegistry",
@@ -273,6 +260,31 @@
       ],
       "Resource": "arn:aws:agent-registry:*:*:registry/*",
       "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "MarketplaceSubscribeWorkshopAnthropicModelsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "aws-marketplace:Subscribe"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws-marketplace:ProductId": [
+            "prod-ffvjxvh4ltq64",
+            "prod-xdkflymybwmvi",
+            "prod-jhuafngbly644",
+            "prod-5ukwuglpt66kg"
+          ]
+        },
         "StringEquals": {
           "aws:RequestedRegion": [
             "us-west-2",

@@ -95,7 +95,7 @@ if ! CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text 2>/dev/
   echo "       disposable AWS account you own. The deploy creates IAM roles and"
   echo "       infrastructure, so the principal needs broad permissions:"
   echo "       use AdministratorAccess, or attach the scoped"
-  echo "       policies in static/cfn/self-service-deploy-policy-{1..7}.json."
+  echo "       policies in static/cfn/self-service-deploy-policy-{1..8}.json."
   echo "       Try:  aws configure   (or set AWS_PROFILE / AWS_ACCESS_KEY_ID etc.)"
   exit 1
 fi

@@ -69,11 +69,9 @@
         "ec2:CreateInternetGateway",
         "ec2:CreateNatGateway",
         "ec2:AllocateAddress",
-        "ec2:ReleaseAddress",
         "ec2:CreateRouteTable",
         "ec2:CreateSecurityGroup",
         "ec2:CreateNetworkInterface",
-        "ec2:DeleteNetworkInterface",
         "ec2:CreateVpcEndpoint"
       ],
       "Resource": [
@@ -169,17 +167,13 @@
         "ec2:DeleteRoute",
         "ec2:DeleteSecurityGroup",
         "ec2:DeleteVpcEndpoints",
-        "ec2:StartInstances",
-        "ec2:StopInstances",
         "ec2:AttachVolume",
         "ec2:DetachVolume",
-        "ec2:ModifyInstanceAttribute",
-        "ec2:AssociateIamInstanceProfile",
-        "ec2:DisassociateIamInstanceProfile",
-        "ec2:ReplaceIamInstanceProfileAssociation",
         "ec2:TerminateInstances",
         "ec2:DeleteVolume",
-        "ec2:DeleteLaunchTemplate"
+        "ec2:DeleteLaunchTemplate",
+        "ec2:DeleteNetworkInterface",
+        "ec2:ReleaseAddress"
       ],
       "Resource": [
         "arn:aws:ec2:*:*:vpc/*",
@@ -224,28 +218,24 @@
             "us-west-2",
             "us-east-1",
             "eu-west-1"
-          ]
+          ],
+          "aws:ResourceTag/GuardDutyManaged": "true"
         }
       }
     },
     {
-      "Sid": "Ec2IdeCreateScopedToResourceTypes",
+      "Sid": "Ec2IdeCreateSupportingResourceTypes",
       "Effect": "Allow",
       "Action": [
         "ec2:RunInstances",
-        "ec2:CreateVolume",
-        "ec2:CreateLaunchTemplate",
-        "ec2:AssociateAddress",
-        "ec2:DisassociateAddress"
+        "ec2:CreateLaunchTemplate"
       ],
       "Resource": [
-        "arn:aws:ec2:*:*:instance/*",
         "arn:aws:ec2:*:*:volume/*",
         "arn:aws:ec2:*:*:network-interface/*",
         "arn:aws:ec2:*:*:key-pair/*",
         "arn:aws:ec2:*:*:security-group/*",
         "arn:aws:ec2:*:*:subnet/*",
-        "arn:aws:ec2:*:*:elastic-ip/*",
         "arn:aws:ec2:*:*:launch-template/*",
         "arn:aws:ec2:*:*:placement-group/*",
         "arn:aws:ec2:*::image/*",
@@ -258,6 +248,47 @@
             "us-east-1",
             "eu-west-1"
           ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2IdeCreateWorkshopTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances"
+      ],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:RequestTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2IdeAddressWorkshopTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AssociateAddress",
+        "ec2:DisassociateAddress"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:*:instance/*",
+        "arn:aws:ec2:*:*:elastic-ip/*",
+        "arn:aws:ec2:*:*:network-interface/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
         }
       }
     }

@@ -1,5 +1,5 @@
 ---
-title: "Module 1: The Vision"
+title: "Module 1: The vision"
 weight: 20
 ---
 
@@ -18,7 +18,7 @@ You do not need prior AgentCore experience. You do need to be comfortable readin
 - Working knowledge of the AWS CLI and basic AWS concepts (IAM roles, CloudFormation, VPCs)
 - Ability to read Python — you will run and edit small scripts and notebooks, not write services from scratch
 - Familiarity with REST APIs and JSON
-- An AWS account with the workshop infrastructure deployed, plus the Workshop IDE (both are provided for you at an AWS event; see [Getting Started](../introduction/getting-started/) if you are running this yourself)
+- An AWS account with the workshop infrastructure deployed, plus the Workshop IDE (both are provided for you at an AWS event; see [Getting started](../introduction/getting-started/) if you are running this yourself)
 
 Helpful but not required: prior exposure to the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), Amazon Bedrock, or LiteLLM.
 
@@ -26,7 +26,7 @@ Helpful but not required: prior exposure to the [Model Context Protocol (MCP)](h
 
 **At an AWS-run event, use `us-west-2` (Oregon).** It is the only region the event account is provisioned in, and the Workshop Studio guardrail blocks API calls to other regions — switching regions mid-workshop will fail rather than fall back.
 
-**Deploying into your own account?** `us-west-2` is the primary validated region and the one every command in this workshop assumes. `us-east-1` (N. Virginia) also works, including the optional Cedar Policy Engine section in Module 3b — the AgentCore Policy Engine API is available in both regions. AgentCore is not available in every region, so if you pick a third region, check the [AgentCore endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock-agentcore.html) first — sections that depend on a capability your region lacks are marked Optional.
+**Deploying into your own account?** The self-service path is validated in three regions — `us-west-2` (the primary region, and the one every command in this workshop assumes), `us-east-1` (N. Virginia) and `eu-west-1` (Ireland); the self-service deploy policies fence every call to those three. `us-east-1` also covers the optional Cedar Policy Engine section in Module 3b — the AgentCore Policy Engine API is available in both US regions. Workshop Studio events stay in `us-west-2` only. AgentCore is not available in every region, so do not pick a fourth region without checking the [AgentCore endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/bedrock_agentcore.html) first — sections that depend on a capability your region lacks are marked Optional.
 
 ## Cost
 

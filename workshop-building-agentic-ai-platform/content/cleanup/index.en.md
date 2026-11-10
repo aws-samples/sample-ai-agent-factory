@@ -13,6 +13,10 @@ To avoid ongoing charges, delete the AWS resources created during this workshop.
 
 Delete resources in reverse order of creation. The exact steps depend on which modules you completed.
 
+### Step 0: Module 5 — CloudWatch Omni
+
+If you completed Module 5, delete the online evaluation configuration first: it references the evaluation role that `workshop-agentcore-stack` owns, and it keeps scoring (and billing) until it is gone. Follow the [Module 5 Cleanup](../module-5/step-7/) page. Do **not** delete the Omni domain, space or Dataset integration by hand — `workshop-agentcore-stack` owns them (the participant policy cannot delete them anyway) and `./deploy-cfn.sh destroy` removes them with the stack.
+
 ### Step 1: Module 4 — FAST agent
 
 If you completed Module 4, destroy the FAST CDK stack and clean up associated resources — this applies to both the MCP path and the AgentCore path. Follow the detailed cleanup instructions in the [Module 4 Cleanup](../module-4/cleanup/) page, which covers:
@@ -109,7 +113,7 @@ if [ -n "$GATEWAY_ID" ] && [ "$GATEWAY_ID" != "None" ]; then
 fi
 :::
 
-### Step 3: Module 3b — AgentCore registry & gateway
+### Step 3: Module 3b — AWS Agent Registry & gateway
 
 If you completed Module 3b, clean up the AgentCore-specific resources:
 

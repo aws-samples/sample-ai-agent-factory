@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Automated Sync (Optional)"
+title: "Tools Gateway: automated sync (optional)"
 weight: 51
 ---
 
@@ -40,9 +40,9 @@ Since you already created gateway targets manually in step 3, the Sync Lambda wi
 
 | Registry Server | Gateway Target? | Why? |
 |---|---|---|
-| `workshop-flights-mcp` | Already exists | Created manually in step 3 |
-| `workshop-hotels-mcp` | Already exists | Created manually in step 3 |
-| `search-knowledge-base` | Already exists | Created manually in step 3 |
+| `workshop-flights-mcp` | Already exists | Created manually in step 3; its Registry entry is an `https://` Function URL, so the Sync Lambda skips it |
+| `workshop-hotels-mcp` | Already exists | Created manually in step 3; its Registry entry is an `https://` Function URL, so the Sync Lambda skips it |
+| `search-knowledge-base` | Already exists | Created manually in step 3 from the Lambda ARN; it has no Registry entry, so the Sync Lambda never sees it |
 | `currenttime-server` | No | Docker server (in-cluster `http://` — intentional for internal service-to-service traffic), skipped by Sync Lambda |
 | `realserverfaketools` | No | Docker server, skipped |
 
@@ -68,13 +68,15 @@ The response contains count fields for synced servers, targets created (should b
 
 ```json
 {
-  "synced": 5,
+  "synced": 6,
   "created": 0,
-  "skipped": 5,
+  "skipped": 6,
   "filtered": 0,
   "errors": 0
 }
 ```
+
+`synced` and `skipped` count the Registry's servers — the three demo servers, `agentcore-gateway`, and the flights and hotels servers you registered earlier in this module (4 and 4 if you skipped that registration). `created` stays 0 because none of them uses the `lambda://` scheme.
 
 If `errors` is non-zero or `synced` is 0, check the Sync Lambda CloudWatch log group `/aws/lambda/agentcore-gateway-sync` for the latest invocation.
 

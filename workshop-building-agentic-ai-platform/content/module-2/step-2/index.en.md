@@ -9,7 +9,7 @@ The LLM Gateway CloudFormation stack was automatically deployed when your worksh
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-::alert[**First-time Anthropic model access in a fresh account.** Before the LLM Gateway can invoke any Claude model on your behalf, Anthropic requires a one-time use case submission for this AWS account. You must prime **both** Claude Sonnet 4.5 and 4.6 — Module 2 and the LLM Gateway path use 4.6, and the baseline Module 4 agent uses 4.5. Open the Bedrock console, prime each model, and return here.]{type="warning"}
+::alert[**First-time Anthropic model access in a fresh account.** Before the LLM Gateway can invoke any Claude model on your behalf, Anthropic requires a one-time use case submission for this AWS account. You must prime **Claude Sonnet 4.6** — the model behind the LLM Gateway's `claude-sonnet` alias and the one the Module 4 agent uses. Do not prime Claude Sonnet 4.5: it is in Bedrock's Legacy stage (end of life April 8, 2027) and new accounts cannot adopt it. Open the Bedrock console, prime the model, and return here.]{type="warning"}
 
 ::alert[Before opening the Bedrock console, ensure you are logged into the correct Workshop Studio AWS account. If not, open the **Event Dashboard** first (link in the left menu) to access your account, then return here to open Bedrock.]{type="warning"}
 
@@ -21,13 +21,12 @@ The LLM Gateway CloudFormation stack was automatically deployed when your worksh
 
 ::::expand{header="First-time setup — step by step"}
 1. In the Bedrock console left navigation, open **Model catalog**.
-2. Find **Claude Sonnet 4.5** (use the search/filter if needed) and click the model card.
+2. Find **Claude Sonnet 4.6** (use the search/filter if needed) and click the model card.
 3. Click **Open in playground** in the top-right of the model page.
 4. Type `hi` in the prompt box and click **Run**.
 5. If the **Submit use case details for Anthropic** dialog appears, fill the form (use `Workshop testing` for the use case) and click **Submit**.
 6. Wait for the model to return a response.
-7. Go back to **Model catalog** and repeat steps 2–6 for **Claude Sonnet 4.6**.
-8. You can now close the playground — the account is primed for both models (LiteLLM and the baseline FAST agent).
+7. You can now close the playground — the account is primed for Anthropic models (LiteLLM and the FAST agent both use Claude Sonnet 4.6).
 ::::
 
 ## What was deployed

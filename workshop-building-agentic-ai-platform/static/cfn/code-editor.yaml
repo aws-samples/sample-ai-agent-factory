@@ -118,6 +118,10 @@ Conditions:
   ]
 
 Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - E3006  # AWS::CloudWatch::AccessGrant predates cfn-lint's bundled spec; LIVE in the registry
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -250,6 +254,7 @@ Resources:
   SecretPlaintextLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -775,7 +780,7 @@ Resources:
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} restore .
                     rm -rf /tmp/branch
                     rm -rf /tmp/git
-                    echo "Branches downloaded. Checking configuration: $HomeFolder"
+                    echo "Branches downloaded. Checking configuration: ${HomeFolder}"
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} branch
                     ls -la ${HomeFolder}
                   fi
@@ -938,14 +943,6 @@ Resources:
               documentParameters:
                 ExtensionId: AmazonWebServices.aws-toolkit-vscode
                 CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallAmazonQExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: AmazonWebServices.amazon-q-vscode
-                CodeEditorUser: !Ref CodeEditorUser
           - name: InstallLiveServerExtension
             action: aws:runDocument
             inputs:
@@ -1063,10 +1060,13 @@ Resources:
               runCommand:
                 - '#!/bin/bash'
                 # - set -euo pipefail # Uncomment to throw error on failure
-                - echo "Writing MCP config"
-                - !Sub mkdir -p /home/${CodeEditorUser}/.aws/amazonq/cli-agents
+                # Kiro CLI (the renamed Amazon Q Developer CLI) reads global custom agents
+                # from ~/.kiro/agents/; the legacy ~/.aws/amazonq/cli-agents location is only
+                # migrated for pre-existing Q CLI installs, which a fresh IDE never has.
+                - echo "Writing the Kiro CLI custom agent"
+                - !Sub mkdir -p /home/${CodeEditorUser}/.kiro/agents
                 - !Sub |
-                  tee /home/${CodeEditorUser}/.aws/amazonq/cli-agents/participant.json <<EOF
+                  tee /home/${CodeEditorUser}/.kiro/agents/participant.json <<EOF
                   {
                     "name": "participant",
                     "description": "Coding Expert",
@@ -1102,9 +1102,9 @@ Resources:
                       "@aws_core"
                     ],
                     "resources": [
-                      "file://AmazonQ.md",
+                      "file://AGENTS.md",
                       "file://README.md",
-                      "file://.amazonq/rules/**/*.md"
+                      "file://.kiro/steering/**/*.md"
                     ],
                     "hooks": {},
                     "toolsSettings": {},
@@ -1112,16 +1112,20 @@ Resources:
                     "model": null
                   }
                   EOF
-                - !Sub mkdir -p /home/${CodeEditorUser}/.local/share/amazon-q/settings
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.kiro
+                # Let the CLI write its own settings file (location is an implementation
+                # detail of the installed version); fall back to the documented path if the
+                # binary is missing so the bootstrap never fails here.
                 - !Sub |
-                  tee /home/${CodeEditorUser}/.local/share/amazon-q/settings.json <<EOF
-                  {
-                    "chat.defaultAgent": "participant",
-                    "mcp.loadedBefore": true
-                  }
-                  EOF
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - echo "Amazon Q Custom Agent configured"
+                  if sudo -i -u ${CodeEditorUser} kiro-cli settings chat.defaultAgent participant >/dev/null 2>&1; then
+                    echo "Kiro CLI default agent set to 'participant'"
+                  else
+                    mkdir -p /home/${CodeEditorUser}/.local/share/kiro-cli
+                    printf '{\n  "chat.defaultAgent": "participant"\n}\n' > /home/${CodeEditorUser}/.local/share/kiro-cli/settings.json
+                    chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.local/share/kiro-cli
+                    echo "Kiro CLI not on PATH yet; wrote settings.json directly"
+                  fi
+                - echo "Kiro CLI custom agent configured"
           - name: Installuv
             action: aws:runShellScript
             inputs:
@@ -1160,8 +1164,8 @@ Resources:
                       echo 'eval "$(uv generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
                     fi
                 - !Sub |
-                    if uvx generate-shell-completion bash &>/dev/null; then
-                      echo 'eval "$(uvx generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
+                    if uvx --generate-shell-completion bash &>/dev/null; then
+                      echo 'eval "$(uvx --generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
                     fi
                 - echo "uv installed. Checking configuration"
                 - !Sub sudo -i -u ${CodeEditorUser} uv --version
@@ -1223,15 +1227,18 @@ Resources:
                 # made `pip install -r requirements.txt` a no-op).
                 # This set MUST stay in step with
                 # source/module-2-llm-gateway/requirements.txt.
-                # boto3/botocore 1.43.72: the Agent Registry API moved to the
-                # agent-registry-control service on 2026-08-06 and anything older
-                # than 1.43.66 cannot build that client at all.
+                # boto3/botocore 1.43.126: two floors sit under this pin. The Agent
+                # Registry API moved to the agent-registry-control service on
+                # 2026-08-06 and anything older than 1.43.66 cannot build that
+                # client; the CloudWatch Omni client (cloudwatchomni) and the
+                # observabilityadmin dataset-integration calls Module 5 uses first
+                # appeared in 1.43.100, so anything older breaks that module.
                 - !Sub |
                   pip_retry sudo -u ${CodeEditorUser} python3.13 -m pip install --user \
                     --retries 10 --timeout 60 \
                     jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
                     pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
-                    boto3==1.43.72 botocore==1.43.72 \
+                    boto3==1.43.126 botocore==1.43.126 \
                     pydantic==2.13.4 openai==2.54.0 litellm==1.88.6 \
                     'strands-agents[litellm,openai]==1.52.0'
                 # Register an ipykernel under a unique name so VS Code auto-selects it
@@ -1297,7 +1304,7 @@ Resources:
                     --retries 10 --timeout 60 \
                     jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
                     pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
-                    boto3==1.43.72 botocore==1.43.72 \
+                    boto3==1.43.126 botocore==1.43.126 \
                     pydantic==2.13.4 openai==2.54.0 litellm==1.88.6 \
                     'strands-agents[litellm,openai]==1.52.0'
                 - !Sub |
@@ -1353,10 +1360,13 @@ Resources:
                     # the participant nothing to act on. A prompt only ever appears
                     # when a kernel has actually died, which is precisely when the
                     # reason needs to be visible.
+                    # The interpreter path follows what InstallPythonDnf/InstallPythonApt
+                    # installed: python3.13 on AL2023, the distro python3 on Ubuntu.
+                    PY_BIN=$(command -v python3.13 || command -v python3)
                     tmp=$(mktemp)
-                    jq '. + {
+                    jq --arg py "$PY_BIN" '. + {
                       "python.testing.pytestEnabled": true,
-                      "python.defaultInterpreterPath": "/usr/bin/python3.13",
+                      "python.defaultInterpreterPath": $py,
                       "python.createEnvironment.trigger": "off",
                       "jupyter.kernels.trusted": [
                         "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
@@ -1369,20 +1379,19 @@ Resources:
                 # Write a workspace-level settings file so /workshop/* notebooks pick
                 # the named 'workshop' kernel on first open without a picker prompt.
                 - !Sub |
-                    mkdir -p /workshop/.vscode
-                    cat > /workshop/.vscode/settings.json <<'WSSETTINGS'
-                    {
+                    mkdir -p ${HomeFolder}/.vscode
+                    PY_BIN=$(command -v python3.13 || command -v python3)
+                    jq -n --arg user "${CodeEditorUser}" --arg py "$PY_BIN" '{
                       "jupyter.kernels.trusted": [
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop-fast/kernel.json"
+                        ("/home/" + $user + "/.local/share/jupyter/kernels/workshop/kernel.json"),
+                        ("/home/" + $user + "/.local/share/jupyter/kernels/workshop-fast/kernel.json")
                       ],
                       "notebook.kernelPicker.type": "mru",
                       "jupyter.askForKernelRestart": true,
                       "python.createEnvironment.trigger": "off",
-                      "python.defaultInterpreterPath": "/usr/bin/python3.13"
-                    }
-                    WSSETTINGS
-                    chown -R ${CodeEditorUser}:${CodeEditorUser} /workshop/.vscode
+                      "python.defaultInterpreterPath": $py
+                    }' > ${HomeFolder}/.vscode/settings.json
+                    chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}/.vscode
                 - echo "Python and Pip installed. Checking configuration"
                 - !Sub sudo -i -u ${CodeEditorUser} python3 --version
                 - !Sub sudo -i -u ${CodeEditorUser} pip3 --version
@@ -1428,12 +1437,13 @@ Resources:
                     # (which now resolves to 2.0.0) — three stale/floating pins
                     # that nothing imported, and ~100 transitive packages of
                     # bootstrap time.
-                    # boto3/botocore 1.43.72: exact pin, and >=1.43.66 is a hard
-                    # floor for the agent-registry-control client notebook 07 uses.
+                    # boto3/botocore 1.43.126: exact pin; >=1.43.66 is a hard floor
+                    # for the agent-registry-control client notebook 07 uses, and
+                    # >=1.43.100 for the cloudwatchomni client Module 5 uses.
                     pip_retry sudo -u ${CodeEditorUser} $FAST_VENV/bin/pip install \
                       --retries 10 --timeout 60 \
                       jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 \
-                      boto3==1.43.72 botocore==1.43.72
+                      boto3==1.43.126 botocore==1.43.126
                     sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m ipykernel install --user \
                       --name workshop-fast --display-name "Python 3 (workshop-fast)"
                     sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m jupyter --version
@@ -1809,6 +1819,7 @@ Resources:
           - id: W11
             reason: The Amazon EC2 ssm:*CommandInvocation API actions do not support resource-level permissions, so you cannot control which individual resources users can view in the console. Therefore, the * wildcard is necessary in the Resource element. See https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssystemsmanager.html
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -1967,7 +1978,7 @@ Resources:
   # GENERATED FROM static/cfn/workshop-iam-policy-network.json -- DO NOT EDIT BY HAND.
   # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
   # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
-  # Minified size 6028/6144 bytes (IAM managed-policy limit).
+  # IAM-counted size 5690/6144 bytes (IAM managed-policy limit).
   CodeEditorParticipantPolicyNetwork:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -1981,20 +1992,45 @@ Resources:
             "Effect": "Allow"
             "Action":
               - "ec2:CreateVpc"
-              - "ec2:ModifyVpcAttribute"
               - "ec2:CreateSubnet"
               - "ec2:CreateInternetGateway"
-              - "ec2:AttachInternetGateway"
-              - "ec2:DetachInternetGateway"
               - "ec2:CreateNatGateway"
               - "ec2:AllocateAddress"
-              - "ec2:ReleaseAddress"
               - "ec2:CreateRouteTable"
+              - "ec2:CreateSecurityGroup"
+              - "ec2:CreateNetworkInterface"
+
+            "Resource":
+              - "arn:aws:ec2:*:*:vpc/*"
+              - "arn:aws:ec2:*:*:subnet/*"
+              - "arn:aws:ec2:*:*:internet-gateway/*"
+              - "arn:aws:ec2:*:*:natgateway/*"
+              - "arn:aws:ec2:*:*:elastic-ip/*"
+              - "arn:aws:ec2:*:*:route-table/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+              - "arn:aws:ec2:*:*:network-interface/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EC2VPCModifyWorkshopTaggedOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:ModifyVpcAttribute"
+              - "ec2:AttachInternetGateway"
+              - "ec2:DetachInternetGateway"
+              - "ec2:ReleaseAddress"
               - "ec2:CreateRoute"
               - "ec2:AssociateRouteTable"
               - "ec2:DisassociateRouteTable"
-              - "ec2:CreateSecurityGroup"
-              - "ec2:CreateNetworkInterface"
               - "ec2:DeleteNetworkInterface"
 
             "Resource":
@@ -2009,6 +2045,7 @@ Resources:
 
             "Condition":
               "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
                 "aws:RequestedRegion":
                   - "us-west-2"
                   - "us-east-1"
@@ -2169,51 +2206,6 @@ Resources:
 
 
           -
-            "Sid": "EFSDescribeNoResourceLevel"
-            "Effect": "Allow"
-            "Action":
-              - "elasticfilesystem:DescribeFileSystems"
-              - "elasticfilesystem:DescribeMountTargets"
-              - "elasticfilesystem:DescribeAccessPoints"
-
-            "Resource": "*"
-            "Condition":
-              "StringEquals":
-                "aws:RequestedRegion":
-                  - "us-west-2"
-                  - "us-east-1"
-                  - "eu-west-1"
-
-
-
-
-          -
-            "Sid": "EFSFileSystemAndAccessPointScoped"
-            "Effect": "Allow"
-            "Action":
-              - "elasticfilesystem:CreateFileSystem"
-              - "elasticfilesystem:DeleteFileSystem"
-              - "elasticfilesystem:CreateMountTarget"
-              - "elasticfilesystem:DeleteMountTarget"
-              - "elasticfilesystem:CreateAccessPoint"
-              - "elasticfilesystem:DeleteAccessPoint"
-              - "elasticfilesystem:TagResource"
-
-            "Resource":
-              - "arn:aws:elasticfilesystem:*:*:file-system/*"
-              - "arn:aws:elasticfilesystem:*:*:access-point/*"
-
-            "Condition":
-              "StringEquals":
-                "aws:RequestedRegion":
-                  - "us-west-2"
-                  - "us-east-1"
-                  - "eu-west-1"
-
-
-
-
-          -
             "Sid": "ELBManageWorkshopLoadBalancers"
             "Effect": "Allow"
             "Action":
@@ -2269,7 +2261,7 @@ Resources:
   # GENERATED FROM static/cfn/workshop-iam-policy-infra.json -- DO NOT EDIT BY HAND.
   # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
   # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
-  # Minified size 5302/6144 bytes (IAM managed-policy limit).
+  # IAM-counted size 5761/6144 bytes (IAM managed-policy limit).
   CodeEditorParticipantPolicyInfra:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -2335,6 +2327,16 @@ Resources:
               - "cognito-idp:AdminInitiateAuth"
 
             "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
 
           -
             "Sid": "DynamoDBAccess"
@@ -2370,20 +2372,14 @@ Resources:
             "Resource": "*"
 
           -
-            "Sid": "APIGatewayAccess"
+            "Sid": "APIGatewayReadOnly"
             "Effect": "Allow"
             "Action":
               - "apigateway:GET"
-              - "apigateway:POST"
-              - "apigateway:PUT"
-              - "apigateway:DELETE"
-              - "apigateway:PATCH"
-              - "execute-api:Invoke"
 
             "Resource":
               - "arn:aws:apigateway:*::/restapis*"
               - "arn:aws:apigateway:*::/apis*"
-              - "arn:aws:execute-api:*:*:*"
 
             "Condition":
               "StringEquals":
@@ -2542,13 +2538,38 @@ Resources:
 
 
           -
-            "Sid": "CloudFrontTagAndInvalidate"
+            "Sid": "CloudFrontTagOnCreateWorkshopOnly"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:TagResource"
+
+            "Resource": "arn:aws:cloudfront::*:distribution/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestTag/Workshop": "AgentCore-Platform"
+
+
+
+          -
+            "Sid": "CloudFrontManageTaggedOnly"
             "Effect": "Allow"
             "Action":
               - "cloudfront:TagResource"
               - "cloudfront:UntagResource"
-              - "cloudfront:ListTagsForResource"
               - "cloudfront:CreateInvalidation"
+
+            "Resource": "arn:aws:cloudfront::*:distribution/*"
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+
+
+
+          -
+            "Sid": "CloudFrontListTags"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:ListTagsForResource"
 
             "Resource": "arn:aws:cloudfront::*:distribution/*"
 
@@ -2570,12 +2591,16 @@ Resources:
   # GENERATED FROM static/cfn/workshop-iam-policy-core.json -- DO NOT EDIT BY HAND.
   # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
   # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
-  # Minified size 5985/6144 bytes (IAM managed-policy limit).
+  # IAM-counted size 4458/6144 bytes (IAM managed-policy limit).
   CodeEditorParticipantPolicyCore:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       Description: >-
-        Workshop IDE participant permissions (core): Bedrock, AgentCore, Lambda, Cognito, Secrets Manager, S3, STS.
+        Workshop IDE participant permissions (core): Bedrock model invocation and
+        catalog, Bedrock guardrail writes, AgentCore gateway and policy-engine
+        create and read, events and memory read, S3, STS (CDK deploy and
+        publishing roles, same account only). Identity, SSM, EventBridge and
+        Secrets Manager moved to core-5 in 2026-11.
       PolicyDocument:
         "Version": "2012-10-17"
         "Statement":
@@ -2587,7 +2612,6 @@ Resources:
               - "bedrock:InvokeModelWithResponseStream"
               - "bedrock:GetFoundationModel"
               - "bedrock:GetInferenceProfile"
-              - "bedrock:PutFoundationModelEntitlement"
 
             "Resource":
               - "arn:aws:bedrock:*::foundation-model/*"
@@ -2662,12 +2686,21 @@ Resources:
 
 
           -
-            "Sid": "ACGatewaySyncOnCreate"
+            "Sid": "ACGatewaySyncAuthorizedOnWildcardArnByCreateGateway"
             "Effect": "Allow"
             "Action":
               - "bedrock-agentcore:SynchronizeGatewayTargets"
 
             "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
 
           -
             "Sid": "ACGatewayRead"
@@ -2681,50 +2714,6 @@ Resources:
               - "bedrock-agentcore:ListAgentRuntimes"
 
             "Resource": "*"
-
-          -
-            "Sid": "ACIdentityScoped"
-            "Effect": "Allow"
-            "Action":
-              - "bedrock-agentcore:CreateWorkloadIdentity"
-              - "bedrock-agentcore:CreateOauth2CredentialProvider"
-              - "bedrock-agentcore:GetWorkloadAccessToken"
-              - "bedrock-agentcore:GetResourceOauth2Token"
-
-            "Resource":
-              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
-              - "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
-
-            "Condition":
-              "StringEquals":
-                "aws:RequestedRegion":
-                  - "us-west-2"
-                  - "us-east-1"
-                  - "eu-west-1"
-
-
-
-
-          -
-            "Sid": "ACIdentityRead"
-            "Effect": "Allow"
-            "Action":
-              - "bedrock-agentcore:GetWorkloadIdentity"
-              - "bedrock-agentcore:ListWorkloadIdentities"
-              - "bedrock-agentcore:GetOauth2CredentialProvider"
-              - "bedrock-agentcore:ListOauth2CredentialProviders"
-              - "bedrock-agentcore:GetTokenVault"
-
-            "Resource": "*"
-            "Condition":
-              "StringEquals":
-                "aws:RequestedRegion":
-                  - "us-west-2"
-                  - "us-east-1"
-                  - "eu-west-1"
-
-
-
 
           -
             "Sid": "ACPolicyEngineCreate"
@@ -2772,33 +2761,6 @@ Resources:
             "Resource": "arn:aws:bedrock-agentcore:*:*:memory/*"
 
           -
-            "Sid": "Lambda"
-            "Effect": "Allow"
-            "Action":
-              - "lambda:CreateFunction"
-              - "lambda:DeleteFunction"
-              - "lambda:GetFunction"
-              - "lambda:GetFunctionConfiguration"
-              - "lambda:InvokeFunction"
-              - "lambda:UpdateFunctionConfiguration"
-              - "lambda:RemovePermission"
-              - "lambda:GetPolicy"
-
-            "Resource":
-              - "arn:aws:lambda:*:*:function:workshop-*"
-              - "arn:aws:lambda:*:*:function:ac-*"
-              - "arn:aws:lambda:*:*:function:agentcore-*"
-
-
-          -
-            "Sid": "LambdaList"
-            "Effect": "Allow"
-            "Action":
-              - "lambda:ListFunctions"
-
-            "Resource": "*"
-
-          -
             "Sid": "S3Access"
             "Effect": "Allow"
             "Action":
@@ -2811,13 +2773,32 @@ Resources:
               - "s3:GetBucketLocation"
               - "s3:GetBucketPolicy"
               - "s3:GetObjectAcl"
-              - "s3:PutObjectAcl"
               - "s3:GetBucketAcl"
 
             "Resource":
               - "arn:aws:s3:::workshop-*"
               - "arn:aws:s3:::fast-*"
-              - "arn:aws:s3:::cdk-*"
+              - "arn:aws:s3:::cdk-hnb659fds-assets-${aws:PrincipalAccount}-*"
+
+
+          -
+            "Sid": "S3ObjectAclForFastAmplifyStaging"
+            "Effect": "Allow"
+            "Action":
+              - "s3:PutObjectAcl"
+
+            "Resource": "arn:aws:s3:::fast-*/*"
+            "Condition":
+              "StringEquals":
+                "aws:ResourceAccount": "${aws:PrincipalAccount}"
+
+              "StringNotEqualsIfExists":
+                "s3:x-amz-acl":
+                  - "public-read"
+                  - "public-read-write"
+                  - "authenticated-read"
+
+
 
 
           -
@@ -2829,16 +2810,26 @@ Resources:
             "Resource": "*"
 
           -
-            "Sid": "STSAssume"
+            "Sid": "STSAssumePersonaRolesAndBoundaryCappedCdkRoles"
             "Effect": "Allow"
             "Action":
               - "sts:AssumeRole"
 
             "Resource":
-              - "arn:aws:iam::*:role/workshop-*"
-              - "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*"
-              - "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*"
-              - "arn:aws:iam::*:role/cdk-hnb659fds-lookup-role-*"
+              - "arn:aws:iam::*:role/workshop-ac-registry-admin-*"
+              - "arn:aws:iam::*:role/workshop-ac-registry-publisher-*"
+              - "arn:aws:iam::*:role/workshop-ac-registry-consumer-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*-us-west-2"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*-us-east-1"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*-eu-west-1"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*-us-west-2"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*-us-east-1"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*-eu-west-1"
+
+            "Condition":
+              "StringEquals":
+                "aws:ResourceAccount": "${aws:PrincipalAccount}"
+
 
 
           -
@@ -2848,75 +2839,20 @@ Resources:
               - "sts:GetCallerIdentity"
 
             "Resource": "*"
-
-          -
-            "Sid": "SSM"
-            "Effect": "Allow"
-            "Action":
-              - "ssm:GetParameter"
-              - "ssm:PutParameter"
-              - "ssm:DeleteParameter"
-              - "ssm:GetParametersByPath"
-
-            "Resource":
-              - "arn:aws:ssm:*:*:parameter/workshop*"
-              - "arn:aws:ssm:*:*:parameter/FAST-stack/*"
-              - "arn:aws:ssm:*:*:parameter/agentcore-gateway/*"
-              - "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
-
-
-          -
-            "Sid": "EB"
-            "Effect": "Allow"
-            "Action":
-              - "events:PutRule"
-              - "events:DeleteRule"
-              - "events:DescribeRule"
-              - "events:EnableRule"
-              - "events:DisableRule"
-              - "events:PutTargets"
-              - "events:RemoveTargets"
-              - "events:ListTargetsByRule"
-              - "events:ListTagsForResource"
-              - "events:TagResource"
-
-            "Resource":
-              - "arn:aws:events:*:*:rule/workshop-*"
-              - "arn:aws:events:*:*:rule/ac-*"
-              - "arn:aws:events:*:*:rule/agentcore-*"
-
-
-          -
-            "Sid": "EBList"
-            "Effect": "Allow"
-            "Action":
-              - "events:ListRules"
-
-            "Resource": "*"
-
-          -
-            "Sid": "SM"
-            "Effect": "Allow"
-            "Action":
-              - "secretsmanager:CreateSecret"
-              - "secretsmanager:DeleteSecret"
-              - "secretsmanager:DescribeSecret"
-              - "secretsmanager:GetSecretValue"
-              - "secretsmanager:PutSecretValue"
-              - "secretsmanager:TagResource"
-
-            "Resource":
-              - "arn:aws:secretsmanager:*:*:secret:workshop*"
-              - "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
   # GENERATED FROM static/cfn/workshop-iam-policy-core-2.json -- DO NOT EDIT BY HAND.
   # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
   # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
-  # Minified size 5721/6144 bytes (IAM managed-policy limit).
+  # IAM-counted size 5668/6144 bytes (IAM managed-policy limit).
   CodeEditorParticipantPolicyCore2:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       Description: >-
-        Workshop IDE participant permissions (core-2): CloudFormation, CloudWatch Logs, IAM PassRole, KMS via-service.
+        Workshop IDE participant permissions (core-2): IAM (PassRole to Bedrock,
+        AgentCore and Agent Registry, boundary-conditioned CDK bootstrap roles,
+        workshop-* policies, Deny on the boundary policy), CloudFormation (writes on
+        CDKToolkit only, reads on FAST and workshop stacks), CloudWatch Logs,
+        AgentCore gateway, identity and token-vault management (policy-engine
+        management moved to core-5 in 2026-11).
       PolicyDocument:
         "Version": "2012-10-17"
         "Statement":
@@ -2926,44 +2862,80 @@ Resources:
             "Action":
               - "iam:PassRole"
 
-            "Resource":
-              - "arn:aws:iam::*:role/workshop-*"
-              - "arn:aws:iam::*:role/cdk-hnb659fds-*"
-
+            "Resource": "arn:aws:iam::*:role/workshop-*"
             "Condition":
               "StringEquals":
                 "iam:PassedToService":
-                  - "lambda.amazonaws.com"
                   - "bedrock.amazonaws.com"
                   - "bedrock-agentcore.amazonaws.com"
                   - "agent-registry.amazonaws.com"
-                  - "cloudformation.amazonaws.com"
-                  - "ecs-tasks.amazonaws.com"
 
 
 
 
           -
-            "Sid": "IAMRole"
+            "Sid": "IAMRoleRead"
             "Effect": "Allow"
             "Action":
-              - "iam:CreateRole"
-              - "iam:DeleteRole"
               - "iam:GetRole"
-              - "iam:AttachRolePolicy"
-              - "iam:DetachRolePolicy"
-              - "iam:PutRolePolicy"
-              - "iam:DeleteRolePolicy"
               - "iam:GetRolePolicy"
               - "iam:ListRolePolicies"
               - "iam:ListAttachedRolePolicies"
-              - "iam:TagRole"
-              - "iam:UntagRole"
               - "iam:ListRoleTags"
 
             "Resource":
               - "arn:aws:iam::*:role/workshop-*"
               - "arn:aws:iam::*:role/cdk-hnb659fds-*"
+
+
+          -
+            "Sid": "IAMCdkRolesBounded"
+            "Effect": "Allow"
+            "Action":
+              - "iam:CreateRole"
+              - "iam:DeleteRole"
+              - "iam:PutRolePolicy"
+              - "iam:DeleteRolePolicy"
+
+            "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-*"
+            "Condition":
+              "ArnLike":
+                "iam:PermissionsBoundary": "arn:aws:iam::*:policy/workshop-permissions-boundary"
+
+
+
+          -
+            "Sid": "IAMCdkExecRoleAdminUnderBoundary"
+            "Effect": "Allow"
+            "Action":
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+
+            "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-cfn-exec-role-*"
+            "Condition":
+              "ArnLike":
+                "iam:PermissionsBoundary": "arn:aws:iam::*:policy/workshop-permissions-boundary"
+
+              "ArnEquals":
+                "iam:PolicyARN": "arn:aws:iam::aws:policy/AdministratorAccess"
+
+
+
+          -
+            "Sid": "IAMCdkLookupRoleReadOnlyUnderBoundary"
+            "Effect": "Allow"
+            "Action":
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+
+            "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-lookup-role-*"
+            "Condition":
+              "ArnLike":
+                "iam:PermissionsBoundary": "arn:aws:iam::*:policy/workshop-permissions-boundary"
+
+              "ArnEquals":
+                "iam:PolicyARN": "arn:aws:iam::aws:policy/ReadOnlyAccess"
+
 
 
           -
@@ -2982,6 +2954,19 @@ Resources:
 
 
           -
+            "Sid": "DenyTouchingTheWorkshopBoundaryPolicy"
+            "Effect": "Deny"
+            "Action":
+              - "iam:DeletePolicy"
+              - "iam:CreatePolicyVersion"
+              - "iam:DeletePolicyVersion"
+              - "iam:SetDefaultPolicyVersion"
+              - "iam:TagPolicy"
+              - "iam:UntagPolicy"
+
+            "Resource": "arn:aws:iam::*:policy/workshop-permissions-boundary"
+
+          -
             "Sid": "IAMListReadOnly"
             "Effect": "Allow"
             "Action":
@@ -2990,7 +2975,7 @@ Resources:
             "Resource": "*"
 
           -
-            "Sid": "CFN"
+            "Sid": "CFNCdkToolkitBootstrap"
             "Effect": "Allow"
             "Action":
               - "cloudformation:CreateStack"
@@ -3012,12 +2997,43 @@ Resources:
               - "cloudformation:TagResource"
 
             "Resource":
-              - "arn:aws:cloudformation:*:*:stack/workshop-*/*"
-              - "arn:aws:cloudformation:*:*:stack/FAST-stack/*"
-              - "arn:aws:cloudformation:*:*:stack/FAST-stack-*/*"
-              - "arn:aws:cloudformation:*:*:stack/code-editor/*"
               - "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
 
+
+          -
+            "Sid": "CFNReadFastStacks"
+            "Effect": "Allow"
+            "Action":
+              - "cloudformation:DescribeStacks"
+              - "cloudformation:DescribeStackEvents"
+              - "cloudformation:DescribeStackResource"
+              - "cloudformation:DescribeStackResources"
+              - "cloudformation:ListStackResources"
+              - "cloudformation:GetTemplate"
+              - "cloudformation:GetTemplateSummary"
+              - "cloudformation:DescribeChangeSet"
+              - "cloudformation:ListChangeSets"
+
+            "Resource":
+              - "arn:aws:cloudformation:*:*:stack/FAST-stack/*"
+              - "arn:aws:cloudformation:*:*:stack/FAST-stack-*/*"
+
+
+          -
+            "Sid": "CFNReadWorkshopStacks"
+            "Effect": "Allow"
+            "Action":
+              - "cloudformation:DescribeStacks"
+              - "cloudformation:DescribeStackEvents"
+              - "cloudformation:DescribeStackResource"
+              - "cloudformation:DescribeStackResources"
+              - "cloudformation:ListStackResources"
+              - "cloudformation:GetTemplate"
+              - "cloudformation:GetTemplateSummary"
+              - "cloudformation:DescribeChangeSet"
+              - "cloudformation:ListChangeSets"
+
+            "Resource": "arn:aws:cloudformation:*:*:stack/workshop-*/*"
 
           -
             "Sid": "CFNReadOnly"
@@ -3027,44 +3043,6 @@ Resources:
               - "cloudformation:ListExports"
               - "cloudformation:ListImports"
               - "cloudformation:ValidateTemplate"
-
-            "Resource": "*"
-
-          -
-            "Sid": "CWReadOnly"
-            "Effect": "Allow"
-            "Action":
-              - "cloudwatch:GetMetricData"
-              - "cloudwatch:GetMetricStatistics"
-              - "cloudwatch:ListMetrics"
-              - "cloudwatch:DescribeAlarms"
-              - "cloudwatch:GetDashboard"
-              - "cloudwatch:ListDashboards"
-
-            "Resource": "*"
-
-          -
-            "Sid": "CWWorkshopAlarmsAndDashboards"
-            "Effect": "Allow"
-            "Action":
-              - "cloudwatch:PutMetricAlarm"
-              - "cloudwatch:DeleteAlarms"
-              - "cloudwatch:PutDashboard"
-              - "cloudwatch:DeleteDashboards"
-              - "cloudwatch:TagResource"
-              - "cloudwatch:UntagResource"
-
-            "Resource":
-              - "arn:aws:cloudwatch:*:*:alarm:workshop-*"
-              - "arn:aws:cloudwatch::*:dashboard/workshop-*"
-              - "arn:aws:cloudwatch::*:dashboard/agentic-*"
-
-
-          -
-            "Sid": "CWNoResourceLevel"
-            "Effect": "Allow"
-            "Action":
-              - "cloudwatch:PutMetricData"
 
             "Resource": "*"
 
@@ -3095,60 +3073,6 @@ Resources:
 
 
           -
-            "Sid": "LogsReadOnly"
-            "Effect": "Allow"
-            "Action":
-              - "logs:DescribeLogGroups"
-              - "logs:DescribeLogStreams"
-              - "logs:GetLogEvents"
-              - "logs:FilterLogEvents"
-              - "logs:StartLiveTail"
-              - "logs:ListTagsForResource"
-              - "logs:StartQuery"
-              - "logs:GetQueryResults"
-              - "logs:StopQuery"
-
-            "Resource": "*"
-
-          -
-            "Sid": "KMSForWorkshopEncryptedResources"
-            "Effect": "Allow"
-            "Action":
-              - "kms:Decrypt"
-              - "kms:Encrypt"
-              - "kms:GenerateDataKey"
-              - "kms:DescribeKey"
-
-            "Resource": "arn:aws:kms:*:*:key/*"
-            "Condition":
-              "StringEquals":
-                "kms:ViaService":
-                  - "lambda.us-east-1.amazonaws.com"
-                  - "lambda.us-west-2.amazonaws.com"
-                  - "lambda.eu-west-1.amazonaws.com"
-                  - "secretsmanager.us-east-1.amazonaws.com"
-                  - "secretsmanager.us-west-2.amazonaws.com"
-                  - "secretsmanager.eu-west-1.amazonaws.com"
-
-
-              "ForAnyValue:StringLike":
-                "kms:ResourceAliases":
-                  - "alias/aws/lambda"
-                  - "alias/aws/secretsmanager"
-                  - "alias/workshop-*"
-
-
-
-
-          -
-            "Sid": "SecretsManagerListOnly"
-            "Effect": "Allow"
-            "Action":
-              - "secretsmanager:ListSecrets"
-
-            "Resource": "*"
-
-          -
             "Sid": "ACGatewayManage"
             "Effect": "Allow"
             "Action":
@@ -3173,42 +3097,32 @@ Resources:
               - "bedrock-agentcore:DeleteWorkloadIdentity"
 
             "Resource":
-              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default"
+              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default/workload-identity/registry-*"
 
 
           -
             "Sid": "ACTokenVaultManage"
             "Effect": "Allow"
             "Action":
-              - "bedrock-agentcore:Create*"
+              - "bedrock-agentcore:CreateOauth2CredentialProvider"
               - "bedrock-agentcore:DeleteOauth2CredentialProvider"
 
             "Resource":
               - "arn:aws:bedrock-agentcore:*:*:token-vault/default/oauth2credentialprovider/workshop-*"
               - "arn:aws:bedrock-agentcore:*:*:token-vault/default"
-
-
-          -
-            "Sid": "ACPolicyManage"
-            "Effect": "Allow"
-            "Action":
-              - "bedrock-agentcore:DeletePolicyEngine"
-              - "bedrock-agentcore:CreatePolicy"
-              - "bedrock-agentcore:UpdatePolicy"
-              - "bedrock-agentcore:DeletePolicy"
-              - "bedrock-agentcore:AuthorizeAction"
-
-            "Resource":
-              - "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*"
   CodeEditorParticipantPolicyCore3:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       Description: >-
-        Workshop IDE participant permissions (core-3): AgentCore Agent Registry
-        (Module 3b), CDK bootstrap, AWS Marketplace subscribe, AWS Amplify, and
-        the single-function ac-auto-review code update. Split into its own
-        managed policy because core is at its 6144-character quota; see
-        static/cfn/POLICY_NOTES.md.
+        Workshop IDE participant permissions (core-3): AWS Agent Registry (Module
+        3b), CDK bootstrap staging bucket, ECR repository and version parameter,
+        AWS Amplify, the CDK staging bucket policy, KMS via-service, CloudWatch
+        metrics/alarms/dashboards, Lambda read and invoke on workshop functions
+        and UpdateFunctionConfiguration (no layers) on the five platform
+        functions the content reconfigures. Split into its own managed policy
+        because core was at its
+        6144-character quota; see static/cfn/POLICY_NOTES.md.
       PolicyDocument:
         "Version": "2012-10-17"
         "Statement":
@@ -3291,7 +3205,7 @@ Resources:
               - "s3:PutBucketTagging"
               - "s3:GetBucketTagging"
 
-            "Resource": "arn:aws:s3:::cdk-*"
+            "Resource": "arn:aws:s3:::cdk-hnb659fds-assets-${aws:PrincipalAccount}-*"
 
           -
             "Sid": "CdkBootstrapEcrRepositoryConfiguration"
@@ -3315,32 +3229,6 @@ Resources:
               - "ssm:ListTagsForResource"
 
             "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
-
-          -
-            "Sid": "MarketplaceSubscribeNoResourceLevel"
-            "Effect": "Allow"
-            "Action":
-              - "aws-marketplace:Subscribe"
-              - "aws-marketplace:ViewSubscriptions"
-
-            "Resource": "*"
-            "Condition":
-              "StringEquals":
-                "aws:RequestedRegion":
-                  - "us-west-2"
-                  - "us-east-1"
-                  - "eu-west-1"
-
-
-
-
-          -
-            "Sid": "LambdaUpdateCodeAutoReview"
-            "Effect": "Allow"
-            "Action":
-              - "lambda:UpdateFunctionCode"
-
-            "Resource": "arn:aws:lambda:*:*:function:ac-auto-review"
 
           -
             "Sid": "AmplifyCreateAppScoped"
@@ -3377,37 +3265,710 @@ Resources:
 
 
           -
-            "Sid": "AmplifyAccess"
+            "Sid": "AmplifyRead"
+            "Effect": "Allow"
+            "Action":
+              - "amplify:GetApp"
+              - "amplify:GetBranch"
+              - "amplify:ListBranches"
+              - "amplify:GetJob"
+              - "amplify:ListJobs"
+
+            "Resource": "arn:aws:amplify:*:*:apps/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "AmplifyWriteScopedToApps"
             "Effect": "Allow"
             "Action":
               - "amplify:DeleteApp"
-              - "amplify:GetApp"
               - "amplify:UpdateApp"
               - "amplify:CreateBranch"
               - "amplify:DeleteBranch"
-              - "amplify:GetBranch"
-              - "amplify:ListBranches"
               - "amplify:CreateDeployment"
               - "amplify:StartDeployment"
-              - "amplify:GetJob"
-              - "amplify:ListJobs"
               - "amplify:StartJob"
               - "amplify:StopJob"
               - "amplify:TagResource"
               - "amplify:UntagResource"
 
             "Resource": "arn:aws:amplify:*:*:apps/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
 
           -
-            "Sid": "S3BucketPolicyOnWorkshopAndCdkStagingBucketsOnly"
+            "Sid": "S3BucketPolicyOnCdkStagingBucketOnly"
             "Effect": "Allow"
             "Action":
               - "s3:PutBucketPolicy"
               - "s3:DeleteBucketPolicy"
 
+            "Resource": "arn:aws:s3:::cdk-hnb659fds-assets-${aws:PrincipalAccount}-*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "KMSForWorkshopEncryptedResources"
+            "Effect": "Allow"
+            "Action":
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey"
+              - "kms:DescribeKey"
+
+            "Resource": "arn:aws:kms:*:*:key/*"
+            "Condition":
+              "StringEquals":
+                "kms:ViaService":
+                  - "lambda.us-east-1.amazonaws.com"
+                  - "lambda.us-west-2.amazonaws.com"
+                  - "lambda.eu-west-1.amazonaws.com"
+                  - "secretsmanager.us-east-1.amazonaws.com"
+                  - "secretsmanager.us-west-2.amazonaws.com"
+                  - "secretsmanager.eu-west-1.amazonaws.com"
+
+
+              "ForAnyValue:StringLike":
+                "kms:ResourceAliases":
+                  - "alias/aws/lambda"
+                  - "alias/aws/secretsmanager"
+                  - "alias/workshop-*"
+
+
+
+
+          -
+            "Sid": "CWReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:GetMetricData"
+              - "cloudwatch:GetMetricStatistics"
+              - "cloudwatch:ListMetrics"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:GetDashboard"
+              - "cloudwatch:ListDashboards"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CWWorkshopAlarmsAndDashboards"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:PutMetricAlarm"
+              - "cloudwatch:DeleteAlarms"
+              - "cloudwatch:PutDashboard"
+              - "cloudwatch:DeleteDashboards"
+              - "cloudwatch:TagResource"
+              - "cloudwatch:UntagResource"
+
             "Resource":
-              - "arn:aws:s3:::workshop-*"
-              - "arn:aws:s3:::cdk-hnb659fds-assets-*"
+              - "arn:aws:cloudwatch:*:*:alarm:workshop-*"
+              - "arn:aws:cloudwatch::*:dashboard/workshop-*"
+              - "arn:aws:cloudwatch::*:dashboard/agentic-*"
+
+
+          -
+            "Sid": "CWNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:PutMetricData"
+
+            "Resource": "*"
+
+          -
+            "Sid": "Lambda"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:GetFunction"
+              - "lambda:GetFunctionConfiguration"
+              - "lambda:InvokeFunction"
+
+            "Resource":
+              - "arn:aws:lambda:*:*:function:workshop-*"
+              - "arn:aws:lambda:*:*:function:ac-*"
+              - "arn:aws:lambda:*:*:function:agentcore-*"
+
+
+          -
+            "Sid": "LambdaUpdateConfigurationPlatformFunctionsOnly"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:UpdateFunctionConfiguration"
+
+            "Resource":
+              - "arn:aws:lambda:*:*:function:agentcore-gateway-sync"
+              - "arn:aws:lambda:*:*:function:agentcore-gateway-response-interceptor"
+              - "arn:aws:lambda:*:*:function:ac-gateway-request-interceptor"
+              - "arn:aws:lambda:*:*:function:ac-gateway-response-interceptor"
+              - "arn:aws:lambda:*:*:function:ac-auto-review"
+
+            "Condition":
+              "Null":
+                "lambda:Layer": "true"
+
+
+
+          -
+            "Sid": "LambdaList"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:ListFunctions"
+
+            "Resource": "*"
+
+          -
+            "Sid": "LogsReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+              - "logs:GetLogEvents"
+              - "logs:FilterLogEvents"
+              - "logs:StartLiveTail"
+              - "logs:ListTagsForResource"
+              - "logs:StartQuery"
+              - "logs:GetQueryResults"
+              - "logs:StopQuery"
+
+            "Resource": "*"
+
+          -
+            "Sid": "SecretsManagerListOnly"
+            "Effect": "Allow"
+            "Action":
+              - "secretsmanager:ListSecrets"
+
+            "Resource": "*"
+  CodeEditorParticipantPolicyCore4:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (core-4): CloudWatch Omni domain,
+        space, grants and telemetry queries, Observability Admin dataset
+        integration, AgentCore Evaluations, PassRole for the three roles the
+        AgentCore stack pre-creates (Module 5), EFS (tag-fenced), and AWS
+        Marketplace Subscribe (four Anthropic product IDs) and ViewSubscriptions.
+        Own managed policy because core and core-2 are at the 6144-character
+        quota; see static/cfn/POLICY_NOTES.md.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "OmniDomainSpaceReadUpdate"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:GetDomain"
+              - "cloudwatch:UpdateDomain"
+              - "cloudwatch:GetSpace"
+              - "cloudwatch:UpdateSpace"
+              - "cloudwatch:TagResource"
+
+            "Resource":
+              - "arn:aws:cloudwatch:*:*:domain/*"
+              - "arn:aws:cloudwatch:*:*:space/*"
+
+
+          -
+            "Sid": "OmniGrantsDashboardsDatasetRead"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:GetAccessGrant"
+              - "cloudwatch:DeleteAccessGrant"
+              - "cloudwatch:GetDataset"
+              - "cloudwatch:GetOmniDashboard"
+              - "cloudwatch:DeleteOmniDashboard"
+
+            "Resource":
+              - "arn:aws:cloudwatch:*:*:access-grant/*"
+              - "arn:aws:cloudwatch:*:*:space/*"
+              - "arn:aws:cloudwatch:*:*:dataset/*"
+              - "arn:aws:cloudwatch:*:*:omni-dashboard/*"
+
+
+          -
+            "Sid": "OmniReadNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:ListDomains"
+              - "cloudwatch:ListSpaces"
+              - "cloudwatch:ListAccessGrants"
+              - "cloudwatch:ListTelemetryFields"
+              - "cloudwatch:ListTelemetryQuerySessions"
+              - "cloudwatch:ListOmniDashboards"
+              - "cloudwatch:GetTelemetryQueryResults"
+              - "cloudwatch:GetRecords"
+              - "cloudwatch:GetContextGraph"
+              - "observabilityadmin:ListDatasetIntegrations"
+              - "xray:GetTraceSegmentDestination"
+              - "xray:GetIndexingRules"
+              - "logs:DescribeResourcePolicies"
+              - "logs:DescribeIndexPolicies"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "OmniWriteNoResourceTypesInServiceReference"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:CreateOneTimeDeepLinkCode"
+              - "cloudwatch:CreateAccessGrant"
+              - "cloudwatch:CreateOmniDashboard"
+              - "cloudwatch:StartTelemetryQuerySession"
+              - "cloudwatch:StartTelemetryQuery"
+              - "cloudwatch:StopTelemetryQuery"
+              - "cloudwatch:StopTelemetryQuerySession"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "OmniDatasetIntegrationRead"
+            "Effect": "Allow"
+            "Action":
+              - "observabilityadmin:GetDatasetIntegration"
+
+            "Resource": "arn:aws:observabilityadmin:*:*:dataset-integration/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "OmniPassRoles"
+            "Effect": "Allow"
+            "Action": "iam:PassRole"
+            "Resource":
+              - "arn:aws:iam::*:role/CloudWatchOmniSpaceAccessRole-workshop"
+              - "arn:aws:iam::*:role/CloudWatchOmniDatasetIntegrationRole-workshop"
+              - "arn:aws:iam::*:role/service-role/AgentCoreEvaluationRole-workshop"
+
+            "Condition":
+              "StringEquals":
+                "iam:PassedToService":
+                  - "cloudwatch.amazonaws.com"
+                  - "logs.amazonaws.com"
+                  - "bedrock-agentcore.amazonaws.com"
+
+
+
+
+          -
+            "Sid": "OmniServiceLinkedRole"
+            "Effect": "Allow"
+            "Action": "iam:CreateServiceLinkedRole"
+            "Resource": "arn:aws:iam::*:role/aws-service-role/cloudwatch.amazonaws.com/AWSServiceRoleForCloudWatch_Omni"
+            "Condition":
+              "StringEquals":
+                "iam:AWSServiceName": "cloudwatch.amazonaws.com"
+
+
+
+          -
+            "Sid": "ACEvaluations"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:CreateOnlineEvaluationConfig"
+              - "bedrock-agentcore:GetOnlineEvaluationConfig"
+              - "bedrock-agentcore:UpdateOnlineEvaluationConfig"
+              - "bedrock-agentcore:DeleteOnlineEvaluationConfig"
+              - "bedrock-agentcore:CreateEvaluator"
+              - "bedrock-agentcore:GetEvaluator"
+              - "bedrock-agentcore:UpdateEvaluator"
+              - "bedrock-agentcore:DeleteEvaluator"
+              - "bedrock-agentcore:Evaluate"
+              - "bedrock-agentcore:CreateDataset"
+              - "bedrock-agentcore:GetDataset"
+              - "bedrock-agentcore:UpdateDataset"
+              - "bedrock-agentcore:DeleteDataset"
+              - "bedrock-agentcore:CreateDatasetVersion"
+              - "bedrock-agentcore:AddDatasetExamples"
+              - "bedrock-agentcore:ListDatasetExamples"
+              - "bedrock-agentcore:ListDatasetVersions"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:online-evaluation-config/*"
+              - "arn:aws:bedrock-agentcore:*:*:evaluator/*"
+              - "arn:aws:bedrock-agentcore:*:*:dataset/*"
+
+
+          -
+            "Sid": "ACEvaluationsListNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:ListOnlineEvaluationConfigs"
+              - "bedrock-agentcore:ListEvaluators"
+              - "bedrock-agentcore:ListDatasets"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EFSFileSystemAndAccessPointScoped"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:CreateFileSystem"
+              - "elasticfilesystem:CreateMountTarget"
+              - "elasticfilesystem:CreateAccessPoint"
+
+            "Resource":
+              - "arn:aws:elasticfilesystem:*:*:file-system/*"
+              - "arn:aws:elasticfilesystem:*:*:access-point/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EFSTagOnCreateOnly"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:TagResource"
+
+            "Resource":
+              - "arn:aws:elasticfilesystem:*:*:file-system/*"
+              - "arn:aws:elasticfilesystem:*:*:access-point/*"
+
+            "Condition":
+              "StringEquals":
+                "elasticfilesystem:CreateAction":
+                  - "CreateFileSystem"
+                  - "CreateAccessPoint"
+
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EFSDeleteWorkshopTaggedOnly"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:DeleteFileSystem"
+              - "elasticfilesystem:DeleteMountTarget"
+              - "elasticfilesystem:DeleteAccessPoint"
+
+            "Resource":
+              - "arn:aws:elasticfilesystem:*:*:file-system/*"
+              - "arn:aws:elasticfilesystem:*:*:access-point/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "MarketplaceSubscribeWorkshopAnthropicModelsOnly"
+            "Effect": "Allow"
+            "Action":
+              - "aws-marketplace:Subscribe"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+              "ForAnyValue:StringEquals":
+                "aws-marketplace:ProductId":
+                  - "prod-ffvjxvh4ltq64"
+                  - "prod-xdkflymybwmvi"
+                  - "prod-jhuafngbly644"
+                  - "prod-5ukwuglpt66kg"
+
+
+
+
+          -
+            "Sid": "MarketplaceViewSubscriptionsNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "aws-marketplace:ViewSubscriptions"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+  # GENERATED FROM static/cfn/workshop-iam-policy-core-5.json -- DO NOT EDIT BY HAND.
+  # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
+  # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
+  # IAM-counted size 3473/6144 bytes (IAM managed-policy limit).
+  CodeEditorParticipantPolicyCore5:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (core-5): AgentCore Identity (workload
+        identities, OAuth2 credential providers, the token vault's lazy create),
+        AgentCore Policy Engine management, SSM parameters, EventBridge, Secrets
+        Manager, CDK role tagging and EFS describe. Seventh managed policy: IAM
+        counts policy size on a normalized document, which put core over the
+        6144-character quota in event 10; see static/cfn/POLICY_NOTES.md.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "ACIdentityScoped"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:CreateWorkloadIdentity"
+              - "bedrock-agentcore:CreateOauth2CredentialProvider"
+              - "bedrock-agentcore:GetWorkloadAccessToken"
+              - "bedrock-agentcore:GetResourceOauth2Token"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+              - "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACIdentityRead"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:GetWorkloadIdentity"
+              - "bedrock-agentcore:ListWorkloadIdentities"
+              - "bedrock-agentcore:GetOauth2CredentialProvider"
+              - "bedrock-agentcore:ListOauth2CredentialProviders"
+              - "bedrock-agentcore:GetTokenVault"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "SSMRead"
+            "Effect": "Allow"
+            "Action":
+              - "ssm:GetParameter"
+              - "ssm:GetParametersByPath"
+
+            "Resource":
+              - "arn:aws:ssm:*:*:parameter/workshop/*"
+              - "arn:aws:ssm:*:*:parameter/FAST-stack/*"
+              - "arn:aws:ssm:*:*:parameter/agentcore-gateway/*"
+              - "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "SSMWriteWorkshopPathsAndBootstrapVersionOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ssm:PutParameter"
+              - "ssm:DeleteParameter"
+
+            "Resource":
+              - "arn:aws:ssm:*:*:parameter/workshop/*"
+              - "arn:aws:ssm:*:*:parameter/FAST-stack/*"
+              - "arn:aws:ssm:*:*:parameter/agentcore-gateway/*"
+              - "arn:aws:ssm:*:*:parameter/cdk-bootstrap/hnb659fds/version"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EB"
+            "Effect": "Allow"
+            "Action":
+              - "events:PutRule"
+              - "events:DeleteRule"
+              - "events:DescribeRule"
+              - "events:EnableRule"
+              - "events:DisableRule"
+              - "events:PutTargets"
+              - "events:RemoveTargets"
+              - "events:ListTargetsByRule"
+              - "events:ListTagsForResource"
+              - "events:TagResource"
+
+            "Resource":
+              - "arn:aws:events:*:*:rule/workshop-*"
+              - "arn:aws:events:*:*:rule/ac-*"
+              - "arn:aws:events:*:*:rule/agentcore-*"
+
+
+          -
+            "Sid": "EBList"
+            "Effect": "Allow"
+            "Action":
+              - "events:ListRules"
+
+            "Resource": "*"
+
+          -
+            "Sid": "SM"
+            "Effect": "Allow"
+            "Action":
+              - "secretsmanager:DescribeSecret"
+              - "secretsmanager:GetSecretValue"
+
+            "Resource":
+              - "arn:aws:secretsmanager:*:*:secret:workshop*"
+              - "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+
+
+          -
+            "Sid": "SMIdentityWrite"
+            "Effect": "Allow"
+            "Action":
+              - "secretsmanager:CreateSecret"
+              - "secretsmanager:DeleteSecret"
+              - "secretsmanager:PutSecretValue"
+              - "secretsmanager:TagResource"
+
+            "Resource":
+              - "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+
+
+          -
+            "Sid": "ACPolicyManage"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:DeletePolicyEngine"
+              - "bedrock-agentcore:CreatePolicy"
+              - "bedrock-agentcore:UpdatePolicy"
+              - "bedrock-agentcore:DeletePolicy"
+              - "bedrock-agentcore:AuthorizeAction"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*"
+
+
+          -
+            "Sid": "IAMCdkRoleTagsBootstrapKeysOnly"
+            "Effect": "Allow"
+            "Action":
+              - "iam:TagRole"
+              - "iam:UntagRole"
+
+            "Resource": "arn:aws:iam::*:role/cdk-hnb659fds-*"
+            "Condition":
+              "ForAllValues:StringLike":
+                "aws:TagKeys":
+                  - "Workshop"
+                  - "aws-cdk:bootstrap-role"
+                  - "aws:cloudformation:*"
+
+
+
+
+          -
+            "Sid": "EFSDescribeNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:DescribeFileSystems"
+              - "elasticfilesystem:DescribeMountTargets"
+              - "elasticfilesystem:DescribeAccessPoints"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
   CodeEditorInstanceBootstrapRole:
     Type: AWS::IAM::Role
     Metadata:
@@ -3415,25 +3976,36 @@ Resources:
         rules_to_suppress:
           - id: W11
             reason: >
-              The four attached participant policies still contain some
-              Resource:"*" statements, and they are unavoidable rather than
-              lazy. They fall into two groups. (1) Account-level actions that
-              take no resource at all — bedrock:ListFoundationModels,
-              ecs:ListClusters, secretsmanager:ListSecrets,
-              logs:DescribeLogGroups. IAM has no ARN to name for these; a
-              resource-scoped statement would simply never match. (2) Create*
-              actions whose resource does not exist yet and whose identifier is
-              service-generated, so the template cannot pre-declare it —
-              elasticfilesystem:CreateFileSystem (fs-*), aps:CreateWorkspace
-              (ws-<uuid>), cognito-idp:CreateUserPool (<region>_<id>),
-              bedrock-agentcore:CreateGateway / CreatePolicyEngine. Every
-              statement whose resource IS name-deterministic is scoped: S3 to
-              workshop-*/fast-*/cdk-*, Lambda to workshop-*/ac-*/agentcore-*,
-              log groups to /aws/lambda/workshop-* and friends, Secrets Manager
-              to workshop* and bedrock-agentcore-identity*, CloudFormation to
-              the five workshop stack name patterns, IAM PassRole/CreateRole to
-              role/workshop-* and role/cdk-hnb659fds-*.
+              The seven attached participant policies (Network, Infra, Core,
+              Core2, Core3, Core4 and Core5) still contain Resource:"*"
+              statements, every one of them for an action the service
+              authorizes without a resource type, so a resource-scoped
+              statement would never match. They are all List/Describe/Get
+              reads or account-level operations: for example
+              bedrock:ListFoundationModels, ecs:ListClusters,
+              secretsmanager:ListSecrets, logs:DescribeLogGroups,
+              iam:ListPolicies, cloudformation:ListStacks, lambda:ListFunctions,
+              ec2:Describe* and elasticloadbalancing:Describe*, the
+              CloudWatch/X-Ray metric and trace reads, cloudwatch:PutMetricData,
+              the CloudWatch Omni List* and the Omni write actions that have no
+              resource type in the service reference
+              (CreateOneTimeDeepLinkCode, CreateAccessGrant, telemetry
+              queries), the AgentCore Get*/List* reads, s3:ListAllMyBuckets,
+              sts:GetCallerIdentity, ecr:GetAuthorizationToken and
+              aws-marketplace:Subscribe/ViewSubscriptions (Subscribe is fenced
+              to the four Anthropic product IDs by condition). Every action
+              whose resource IS name-deterministic is scoped: S3 to
+              workshop-*/fast-*/cdk-hnb659fds-assets-*, Lambda to
+              workshop-*/ac-*/agentcore-*, log groups to /aws/lambda/workshop-*
+              and friends, Secrets Manager to workshop* and
+              bedrock-agentcore-identity*, EFS to file-system/* and
+              access-point/* ARNs, CloudFormation to the stack name patterns
+              (FAST-stack, FAST-stack-*, CDKToolkit, workshop-*), iam:PassRole
+              to role/workshop-* plus the three named Omni and Evaluations
+              roles, and CreateRole to role/cdk-hnb659fds-* only, under the
+              workshop permissions boundary (IAMCdkRolesBounded).
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -3450,9 +4022,10 @@ Resources:
         # see the CodeEditorSSMDoc content above), so EVERY CLI command and
         # notebook cell a participant runs executes as THIS role. The scoped
         # workshop-iam-policy-*.json documents attached via contentspec.yaml
-        # were therefore decorative for the whole workshop. The same five
-        # documents are now attached here, which makes the least-privilege
-        # story the one that is actually enforced at participant time.
+        # were therefore decorative for the whole workshop. The same seven
+        # documents (Network, Infra, Core, Core2, Core3, Core4, Core5) are now attached
+        # here, which makes the least-privilege story the one that is actually
+        # enforced at participant time.
         #
         # The permission set was derived from evidence, not guesswork: 4117
         # CloudTrail records across two complete workshop runs, reduced to 80
@@ -3464,13 +4037,15 @@ Resources:
         #
         # The three AWS managed policies below stay: they cover the agent and
         # telemetry actions the instance itself needs (ssm:UpdateInstance-
-        # Information, ec2:DescribeTags for the CloudWatch agent, and Q).
+        # Information, ec2:DescribeTags for the CloudWatch agent) and the IAM-based
+        # access Kiro CLI uses (AmazonQDeveloperAccess; the Amazon Q Developer IDE
+        # extension itself is end-of-support and is no longer installed).
         #
         # PRODUCTION NOTE: iam:PassRole on cdk-hnb659fds-cfn-exec-role remains
         # an escalation path, because CDK bootstraps that role with
         # AdministratorAccess by default. To close it, bootstrap with
         # `npx cdk bootstrap --cloudformation-execution-policies <arns>` using
-        # the five managed-policy ARNs this stack creates, so the CFN execution
+        # the seven managed-policy ARNs this stack creates, so the CFN execution
         # role is no broader than the participant. The stack does not export
         # them (Outputs are URL and IdePassword only) — read them with
         # `aws cloudformation describe-stack-resources --stack-name code-editor
@@ -3480,6 +4055,8 @@ Resources:
         - !Ref CodeEditorParticipantPolicyCore
         - !Ref CodeEditorParticipantPolicyCore2
         - !Ref CodeEditorParticipantPolicyCore3
+        - !Ref CodeEditorParticipantPolicyCore4
+        - !Ref CodeEditorParticipantPolicyCore5
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
         - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonQDeveloperAccess
@@ -3520,6 +4097,35 @@ Resources:
                     Resource: !Sub 'arn:${AWS::Partition}:s3:::${WorkshopAssetsBucket}'
                   - !Ref 'AWS::NoValue'
           - !Ref 'AWS::NoValue'
+        # The one participant statement the seven shared JSON files cannot carry.
+        # AgentCore authorizes bedrock-agentcore:CreateTokenVault on every
+        # CreateOauth2CredentialProvider call, whether or not the default vault
+        # already exists (event 9, 2026-11-08; the service's own 403 names the
+        # action). IAM Access Analyzer, which the Workshop Studio build runs over
+        # every contentspec `iamPolicies` file and whose INVALID_ACTION it treats
+        # as an error, does not know the action, and the only spelling that
+        # passes that gate is the write wildcard bedrock-agentcore:Create*.
+        # Templates are not gated and IAM accepts the string (the agentcore
+        # stack's TokenVaultInit role names it the same way), so the exact
+        # action lives here, on the one role that runs the notebooks and CLI
+        # pages. Region-fenced and account-pinned like every other statement.
+        # The WSParticipantRole does not get it: no page or notebook creates a
+        # credential provider from the console. See static/cfn/POLICY_NOTES.md.
+        - PolicyName: TokenVaultLazyCreate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ACTokenVaultLazyCreateExactAction
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateTokenVault
+                Resource: !Sub 'arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:token-vault/default'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion:
+                      - us-west-2
+                      - us-east-1
+                      - eu-west-1
 
   CodeEditorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -3738,6 +4344,7 @@ Resources:
   CodeEditorHealthCheckLambdaRole:
     Type: AWS::IAM::Role
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -4026,6 +4633,27 @@ Resources:
       ServiceTimeout: 610
       InstanceId: !Ref CodeEditorInstance
       DocumentName: !Ref CodeEditorSSMDoc
+
+  # Module 5: admit the IDE instance role to the CloudWatch Omni space that
+  # workshop-agentcore-stack created. Every terminal command and notebook cell
+  # runs as this role (it mints the deep link and runs the Omni CLI steps), and
+  # Omni admits only principals with a grant - CloudFormation created the space,
+  # so no identity was admitted automatically. The console identity,
+  # WSParticipantRole, gets its grant in the agentcore stack.
+  OmniCodeEditorSpaceAdminGrant:
+    Type: AWS::CloudWatch::AccessGrant
+    Properties:
+      Name: code-editor-space-admin
+      DomainId: !ImportValue ac-OmniDomainId
+      SpaceId: !ImportValue ac-OmniSpaceId
+      Permission: SPACE_ADMIN
+      Principal:
+        PrincipalType: IAM_ROLE
+        PrincipalId: !GetAtt CodeEditorInstanceBootstrapRole.Arn
+      Tags:
+        - Key: Workshop
+          Value: AgentCore-Platform
+
 
 Outputs:
   URL:

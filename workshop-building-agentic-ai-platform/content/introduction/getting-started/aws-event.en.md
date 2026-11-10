@@ -1,5 +1,5 @@
 ---
-title: "At an AWS Event"
+title: "At an AWS event"
 weight: 12
 ---
 
@@ -129,7 +129,7 @@ Your workshop environment comes with infrastructure already deployed:
 | **workshop-llm-gateway-stack** | LiteLLM Proxy on ECS Fargate — virtual keys, budgets, Bedrock Guardrails, spend tracking, Bedrock model access | Module 2, Module 4 |
 | **workshop-registry-stack** | MCP Gateway & Registry — Registry UI, Auth Server, Keycloak, MCP Gateway, demo MCP servers, Cognito User Pool (shared identity for all stacks) | Module 3a, Module 4 |
 | **workshop-tools-gateway-stack** | AgentCore Gateway (MCP path) — Sync Lambda, Request/Response interceptors, demo tool Lambdas | Module 3a, Module 4 |
-| **workshop-agentcore-stack** | AgentCore Registry & Gateway (AWS-native path) — persona IAM roles, interceptor Lambdas, EventBridge auto-review rule, WorkloadIdentity | Module 3b, Module 4 |
+| **workshop-agentcore-stack** | AgentCore Gateway (AWS-native path) plus the supporting resources for the AWS Agent Registry — persona IAM roles, interceptor Lambdas, EventBridge auto-review rule, WorkloadIdentity. The Registry itself does not exist yet: you create it in Module 3b step 3 | Module 3b, Module 4 |
 | **code-editor** | Browser-based VS Code IDE on EC2 — pre-installed AWS CLI, Python, Docker, Strands Agents, workshop source code | All modules |
 
 ::alert[You do not need to deploy any of these resources. They are all provisioned automatically when the workshop environment starts. Each module walks you through exploring and configuring the pre-deployed infrastructure.]{type="info"}

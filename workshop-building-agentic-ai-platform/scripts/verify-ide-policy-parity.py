@@ -3,7 +3,7 @@
 
 The same five documents are consumed in two places:
 
-  1. static/cfn/workshop-iam-policy-{network,infra,core,core-2,core-3}.json
+  1. static/cfn/workshop-iam-policy-{network,infra,core,core-2,core-3,core-4,core-5}.json
      -- attached to WSParticipantRole by contentspec.yaml.
   2. static/cfn/code-editor.yaml
      -- embedded as AWS::IAM::ManagedPolicy resources and attached to
@@ -23,6 +23,7 @@ is the constraint that forced these into five files in the first place.
 """
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -32,6 +33,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 TEMPLATE = REPO / "static/cfn/code-editor.yaml"
 MANAGED_POLICY_MAX = 6144
+# Keep a margin under the quota: IAM's count has already exceeded our estimate once.
+MANAGED_POLICY_BUDGET = 6050
 
 # CFN logical id -> source file slug
 POLICIES = OrderedDict([
@@ -40,6 +43,8 @@ POLICIES = OrderedDict([
     ("CodeEditorParticipantPolicyCore", "core"),
     ("CodeEditorParticipantPolicyCore2", "core-2"),
     ("CodeEditorParticipantPolicyCore3", "core-3"),
+    ("CodeEditorParticipantPolicyCore4", "core-4"),
+    ("CodeEditorParticipantPolicyCore5", "core-5"),
 ])
 
 
@@ -48,6 +53,19 @@ def source_path(slug):
 
 
 def minified_len(doc):
+    """Size as IAM counts it against the 6,144-character managed-policy quota.
+
+    IAM does not measure the bytes you send. Event 10 (2026-11-08) rejected a
+    policy that json.dumps minified to 6,132 characters with
+    "LimitExceeded: Cannot exceed quota for PolicySize: 6144". IAM measures a
+    normalized document in which a single-string Action/NotAction/Resource/
+    NotResource is an array, so count that form (6,164 for the same file).
+    """
+    doc = copy.deepcopy(doc)
+    for stmt in doc.get("Statement", []):
+        for key in ("Action", "NotAction", "Resource", "NotResource"):
+            if key in stmt and isinstance(stmt[key], str):
+                stmt[key] = [stmt[key]]
     return len(json.dumps(doc, separators=(",", ":")))
 
 
@@ -119,7 +137,7 @@ def main():
 
         size = minified_len(doc)
         status = "ok"
-        if size > MANAGED_POLICY_MAX:
+        if size > MANAGED_POLICY_BUDGET:
             oversize.append((slug, size))
             status = "OVERSIZE"
 
@@ -139,9 +157,9 @@ def main():
                 drift.append(logical_id)
                 status = "DRIFT"
 
-        # Keep the "Minified size N/6144" comment honest too.
+        # Keep the "IAM-counted size N/6144" comment honest too.
         updated = re.sub(
-            r"(# Minified size )\d+(/6144 bytes \(IAM managed-policy limit\).\n  "
+            r"(# IAM-counted size )\d+(/6144 bytes \(IAM managed-policy limit\).\n  "
             + logical_id + r":)",
             lambda m: m.group(1) + str(size) + m.group(2),
             updated,
@@ -160,8 +178,9 @@ def main():
         return 1
     if oversize:
         for slug, size in oversize:
-            print(f"\nERROR: workshop-iam-policy-{slug}.json is {size} chars minified, "
-                  f"over the {MANAGED_POLICY_MAX}-char IAM managed-policy quota. Move "
+            print(f"\nERROR: workshop-iam-policy-{slug}.json is {size} chars as IAM counts it, "
+                  f"over the {MANAGED_POLICY_BUDGET}-char budget we keep under the "
+                  f"{MANAGED_POLICY_MAX}-char IAM managed-policy quota. Move "
                   f"statements into a new file and add it to contentspec.yaml "
                   f"iamPolicies and to POLICIES in this script.", file=sys.stderr)
         return 1

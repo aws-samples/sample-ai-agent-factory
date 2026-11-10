@@ -21,7 +21,7 @@ Deploy an enterprise LLM Gateway using **LiteLLM Proxy** that provides governed,
 |-----------|-------------|
 | **Unified API** | OpenAI-compatible endpoint — existing code and Strands Agents work by changing the base URL |
 | **Virtual Keys** | Per-team/per-key budgets, rate limiting, and spend tracking — no provider keys exposed |
-| **17 Bedrock model aliases** | Route to Claude, Nova, Llama, Mistral, and DeepSeek through one gateway — and add more from a 55-alias reference catalog |
+| **13 Bedrock model aliases** | Route to Claude, Nova, Mistral, and DeepSeek through one gateway — and add more from a 24-alias reference catalog |
 | **Bedrock Guardrails** | Native integration with Amazon Bedrock Guardrails for content safety and PII detection |
 | **Cost Tracking** | Per-key, per-team, per-model spend attribution with `/spend/logs` API |
 | **Caching** | Identical requests return cached responses — reduces cost and latency |
@@ -63,9 +63,9 @@ Strands Agents / Applications
 │   Amazon Bedrock            │
 │   + Bedrock Guardrails      │
 │                             │
-│   Claude · Nova · Llama     │
-│   Mistral · DeepSeek        │
-│   + 55 more via config      │
+│  Claude · Nova · Mistral    │
+│   DeepSeek                  │
+│   + 24-alias reference menu │
 └─────────────────────────────┘
 ```
 
@@ -84,8 +84,8 @@ LiteLLM was chosen over other gateways because:
 
 1. [Architecture Overview](step-1/) — Understand what you're deploying and why
 2. [Explore the LLM Gateway](step-2/) — Verify the pre-deployed stack and capture outputs
-3. [Virtual Keys & Teams](step-3/) — Set up teams, budgets, and virtual keys
-4. [Test Model Access](step-4/) — Chat completions, multi-model routing, and Strands Agent demo
+3. [Virtual keys and teams](step-3/) — Set up teams, budgets, and virtual keys
+4. [Test model access](step-4/) — Chat completions, multi-model routing, and Strands Agent demo
 5. [Enterprise Guardrails](step-5/) — Create a Bedrock Guardrail and wire it into the gateway
 6. [Spend Tracking & Admin](step-6/) — Review costs, explore the LiteLLM Admin UI
 7. [Cleanup](step-7/) — Tear down all AWS resources

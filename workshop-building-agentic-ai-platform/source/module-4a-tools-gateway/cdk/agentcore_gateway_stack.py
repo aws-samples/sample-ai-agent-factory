@@ -159,8 +159,9 @@ class AgentCoreGatewayStack(Stack):
         ))
 
         # ─── Demo Tool Lambda (search-knowledge-base) ───
-        # Simple MCP-compatible Lambda for workshop demos.
-        # Replaced by a real Bedrock KB integration in Module 5.
+        # Simple MCP-compatible Lambda for workshop demos: it answers from a small
+        # canned corpus so the Gateway has a tool to discover and call. No later
+        # module swaps it for a real knowledge base; it stays a demo tool.
         demo_fn = _lambda.Function(
             self, "DemoToolLambda",
             function_name="workshop-search-knowledge-base",

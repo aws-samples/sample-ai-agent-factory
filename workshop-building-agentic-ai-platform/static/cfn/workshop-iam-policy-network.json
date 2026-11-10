@@ -6,20 +6,45 @@
       "Effect": "Allow",
       "Action": [
         "ec2:CreateVpc",
-        "ec2:ModifyVpcAttribute",
         "ec2:CreateSubnet",
         "ec2:CreateInternetGateway",
-        "ec2:AttachInternetGateway",
-        "ec2:DetachInternetGateway",
         "ec2:CreateNatGateway",
         "ec2:AllocateAddress",
-        "ec2:ReleaseAddress",
         "ec2:CreateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateNetworkInterface"
+      ],
+      "Resource": [
+        "arn:aws:ec2:*:*:vpc/*",
+        "arn:aws:ec2:*:*:subnet/*",
+        "arn:aws:ec2:*:*:internet-gateway/*",
+        "arn:aws:ec2:*:*:natgateway/*",
+        "arn:aws:ec2:*:*:elastic-ip/*",
+        "arn:aws:ec2:*:*:route-table/*",
+        "arn:aws:ec2:*:*:security-group/*",
+        "arn:aws:ec2:*:*:network-interface/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EC2VPCModifyWorkshopTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ModifyVpcAttribute",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:ReleaseAddress",
         "ec2:CreateRoute",
         "ec2:AssociateRouteTable",
         "ec2:DisassociateRouteTable",
-        "ec2:CreateSecurityGroup",
-        "ec2:CreateNetworkInterface",
         "ec2:DeleteNetworkInterface"
       ],
       "Resource": [
@@ -34,6 +59,7 @@
       ],
       "Condition": {
         "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
           "aws:RequestedRegion": [
             "us-west-2",
             "us-east-1",
@@ -190,51 +216,6 @@
       "Condition": {
         "StringEquals": {
           "aws:ResourceTag/Workshop": "AgentCore-Platform"
-        }
-      }
-    },
-    {
-      "Sid": "EFSDescribeNoResourceLevel",
-      "Effect": "Allow",
-      "Action": [
-        "elasticfilesystem:DescribeFileSystems",
-        "elasticfilesystem:DescribeMountTargets",
-        "elasticfilesystem:DescribeAccessPoints"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "EFSFileSystemAndAccessPointScoped",
-      "Effect": "Allow",
-      "Action": [
-        "elasticfilesystem:CreateFileSystem",
-        "elasticfilesystem:DeleteFileSystem",
-        "elasticfilesystem:CreateMountTarget",
-        "elasticfilesystem:DeleteMountTarget",
-        "elasticfilesystem:CreateAccessPoint",
-        "elasticfilesystem:DeleteAccessPoint",
-        "elasticfilesystem:TagResource"
-      ],
-      "Resource": [
-        "arn:aws:elasticfilesystem:*:*:file-system/*",
-        "arn:aws:elasticfilesystem:*:*:access-point/*"
-      ],
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
         }
       }
     },

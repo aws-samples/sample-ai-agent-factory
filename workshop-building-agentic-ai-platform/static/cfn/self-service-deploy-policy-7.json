@@ -34,7 +34,6 @@
         "bedrock:GetInferenceProfile",
         "bedrock:PutUseCaseForModelAccess",
         "bedrock:GetUseCaseForModelAccess",
-        "bedrock:PutFoundationModelEntitlement",
         "bedrock:ListGuardrails"
       ],
       "Resource": "*",
@@ -54,17 +53,34 @@
       "Action": [
         "bedrock:CreateGuardrail",
         "bedrock:ApplyGuardrail",
-        "bedrock:UpdateGuardrail",
-        "bedrock:DeleteGuardrail",
         "bedrock:GetGuardrail",
         "bedrock:CreateGuardrailVersion",
-        "bedrock:ListTagsForResource",
+        "bedrock:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:guardrail/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "BedrockGuardrailsUpdateDeleteTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:UpdateGuardrail",
+        "bedrock:DeleteGuardrail",
         "bedrock:TagResource",
         "bedrock:UntagResource"
       ],
       "Resource": "arn:aws:bedrock:*:*:guardrail/*",
       "Condition": {
         "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
           "aws:RequestedRegion": [
             "us-west-2",
             "us-east-1",
@@ -103,13 +119,31 @@
       "Sid": "ACGatewayCreate",
       "Effect": "Allow",
       "Action": "bedrock-agentcore:CreateGateway",
-      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
+      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ACPolicyEngineCreate",
       "Effect": "Allow",
       "Action": "bedrock-agentcore:CreatePolicyEngine",
-      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*"
+      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ACGatewayManage",
@@ -122,11 +156,12 @@
         "bedrock-agentcore:GetGatewayTarget",
         "bedrock-agentcore:ListGatewayTargets",
         "bedrock-agentcore:DeleteGatewayTarget",
-        "bedrock-agentcore:SynchronizeGatewayTargets",
-        "bedrock-agentcore:PutResourcePolicy",
-        "bedrock-agentcore:ManageResourceScopedPolicy"
+        "bedrock-agentcore:SynchronizeGatewayTargets"
       ],
-      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*",
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:gateway/tools-gateway-*",
+        "arn:aws:bedrock-agentcore:*:*:gateway/ac-tools-gateway-*"
+      ],
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
@@ -144,11 +179,11 @@
         "bedrock-agentcore:CreateWorkloadIdentity",
         "bedrock-agentcore:GetWorkloadIdentity",
         "bedrock-agentcore:UpdateWorkloadIdentity",
-        "bedrock-agentcore:DeleteWorkloadIdentity",
-        "bedrock-agentcore:GetWorkloadAccessToken"
+        "bedrock-agentcore:DeleteWorkloadIdentity"
       ],
       "Resource": [
-        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default",
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default/workload-identity/*"
       ],
       "Condition": {
         "StringEquals": {
@@ -164,7 +199,8 @@
       "Sid": "ACTokenVaultManage",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:Create*",
+        "bedrock-agentcore:CreateTokenVault",
+        "bedrock-agentcore:CreateOauth2CredentialProvider",
         "bedrock-agentcore:GetOauth2CredentialProvider",
         "bedrock-agentcore:DeleteOauth2CredentialProvider",
         "bedrock-agentcore:GetResourceOauth2Token"
@@ -193,7 +229,7 @@
         "bedrock-agentcore:UpdatePolicy",
         "bedrock-agentcore:DeletePolicy"
       ],
-      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*",
+      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
@@ -212,13 +248,30 @@
         "bedrock-agentcore:ListTagsForResource",
         "bedrock-agentcore:UntagResource"
       ],
-      "Resource": "arn:aws:bedrock-agentcore:*:*:*",
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:gateway/*",
+        "arn:aws:bedrock-agentcore:*:*:policy-engine/*",
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/*"
+      ],
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
             "us-west-2",
             "us-east-1",
             "eu-west-1"
+          ],
+          "aws:ResourceAccount": "${aws:PrincipalAccount}"
+        },
+        "ForAllValues:StringLike": {
+          "aws:TagKeys": [
+            "Workshop",
+            "Environment",
+            "Module",
+            "Component",
+            "Name",
+            "Service",
+            "Role",
+            "aws:*"
           ]
         }
       }

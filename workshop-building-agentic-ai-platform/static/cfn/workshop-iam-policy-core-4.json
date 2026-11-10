@@ -1,0 +1,295 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OmniDomainSpaceReadUpdate",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetDomain",
+        "cloudwatch:UpdateDomain",
+        "cloudwatch:GetSpace",
+        "cloudwatch:UpdateSpace",
+        "cloudwatch:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:cloudwatch:*:*:domain/*",
+        "arn:aws:cloudwatch:*:*:space/*"
+      ]
+    },
+    {
+      "Sid": "OmniGrantsDashboardsDatasetRead",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetAccessGrant",
+        "cloudwatch:DeleteAccessGrant",
+        "cloudwatch:GetDataset",
+        "cloudwatch:GetOmniDashboard",
+        "cloudwatch:DeleteOmniDashboard"
+      ],
+      "Resource": [
+        "arn:aws:cloudwatch:*:*:access-grant/*",
+        "arn:aws:cloudwatch:*:*:space/*",
+        "arn:aws:cloudwatch:*:*:dataset/*",
+        "arn:aws:cloudwatch:*:*:omni-dashboard/*"
+      ]
+    },
+    {
+      "Sid": "OmniReadNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:ListDomains",
+        "cloudwatch:ListSpaces",
+        "cloudwatch:ListAccessGrants",
+        "cloudwatch:ListTelemetryFields",
+        "cloudwatch:ListTelemetryQuerySessions",
+        "cloudwatch:ListOmniDashboards",
+        "cloudwatch:GetTelemetryQueryResults",
+        "cloudwatch:GetRecords",
+        "cloudwatch:GetContextGraph",
+        "observabilityadmin:ListDatasetIntegrations",
+        "xray:GetTraceSegmentDestination",
+        "xray:GetIndexingRules",
+        "logs:DescribeResourcePolicies",
+        "logs:DescribeIndexPolicies"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OmniWriteNoResourceTypesInServiceReference",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:CreateOneTimeDeepLinkCode",
+        "cloudwatch:CreateAccessGrant",
+        "cloudwatch:CreateOmniDashboard",
+        "cloudwatch:StartTelemetryQuerySession",
+        "cloudwatch:StartTelemetryQuery",
+        "cloudwatch:StopTelemetryQuery",
+        "cloudwatch:StopTelemetryQuerySession"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OmniDatasetIntegrationRead",
+      "Effect": "Allow",
+      "Action": [
+        "observabilityadmin:GetDatasetIntegration"
+      ],
+      "Resource": "arn:aws:observabilityadmin:*:*:dataset-integration/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OmniPassRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::*:role/CloudWatchOmniSpaceAccessRole-workshop",
+        "arn:aws:iam::*:role/CloudWatchOmniDatasetIntegrationRole-workshop",
+        "arn:aws:iam::*:role/service-role/AgentCoreEvaluationRole-workshop"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "cloudwatch.amazonaws.com",
+            "logs.amazonaws.com",
+            "bedrock-agentcore.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OmniServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/cloudwatch.amazonaws.com/AWSServiceRoleForCloudWatch_Omni",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "cloudwatch.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ACEvaluations",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateOnlineEvaluationConfig",
+        "bedrock-agentcore:GetOnlineEvaluationConfig",
+        "bedrock-agentcore:UpdateOnlineEvaluationConfig",
+        "bedrock-agentcore:DeleteOnlineEvaluationConfig",
+        "bedrock-agentcore:CreateEvaluator",
+        "bedrock-agentcore:GetEvaluator",
+        "bedrock-agentcore:UpdateEvaluator",
+        "bedrock-agentcore:DeleteEvaluator",
+        "bedrock-agentcore:Evaluate",
+        "bedrock-agentcore:CreateDataset",
+        "bedrock-agentcore:GetDataset",
+        "bedrock-agentcore:UpdateDataset",
+        "bedrock-agentcore:DeleteDataset",
+        "bedrock-agentcore:CreateDatasetVersion",
+        "bedrock-agentcore:AddDatasetExamples",
+        "bedrock-agentcore:ListDatasetExamples",
+        "bedrock-agentcore:ListDatasetVersions"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:online-evaluation-config/*",
+        "arn:aws:bedrock-agentcore:*:*:evaluator/*",
+        "arn:aws:bedrock-agentcore:*:*:dataset/*"
+      ]
+    },
+    {
+      "Sid": "ACEvaluationsListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListOnlineEvaluationConfigs",
+        "bedrock-agentcore:ListEvaluators",
+        "bedrock-agentcore:ListDatasets"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EFSFileSystemAndAccessPointScoped",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:CreateFileSystem",
+        "elasticfilesystem:CreateMountTarget",
+        "elasticfilesystem:CreateAccessPoint"
+      ],
+      "Resource": [
+        "arn:aws:elasticfilesystem:*:*:file-system/*",
+        "arn:aws:elasticfilesystem:*:*:access-point/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EFSTagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:elasticfilesystem:*:*:file-system/*",
+        "arn:aws:elasticfilesystem:*:*:access-point/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "elasticfilesystem:CreateAction": [
+            "CreateFileSystem",
+            "CreateAccessPoint"
+          ],
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EFSDeleteWorkshopTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:DeleteFileSystem",
+        "elasticfilesystem:DeleteMountTarget",
+        "elasticfilesystem:DeleteAccessPoint"
+      ],
+      "Resource": [
+        "arn:aws:elasticfilesystem:*:*:file-system/*",
+        "arn:aws:elasticfilesystem:*:*:access-point/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "MarketplaceSubscribeWorkshopAnthropicModelsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "aws-marketplace:Subscribe"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        },
+        "ForAnyValue:StringEquals": {
+          "aws-marketplace:ProductId": [
+            "prod-ffvjxvh4ltq64",
+            "prod-xdkflymybwmvi",
+            "prod-jhuafngbly644",
+            "prod-5ukwuglpt66kg"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "MarketplaceViewSubscriptionsNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "aws-marketplace:ViewSubscriptions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    }
+  ]
+}

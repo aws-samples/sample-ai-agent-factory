@@ -1,5 +1,5 @@
 ---
-title: "Register MCP Servers"
+title: "Register MCP servers"
 weight: 43
 ---
 

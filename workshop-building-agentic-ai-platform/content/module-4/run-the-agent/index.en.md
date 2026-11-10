@@ -1,5 +1,5 @@
 ---
-title: "Run the Agent"
+title: "Run the agent"
 weight: 76
 ---
 
@@ -116,7 +116,11 @@ echo "LLM Gateway spend before: $SPEND_BEFORE"
 
 # The session ID must be at least 33 characters. The entrypoint reads the prompt
 # and the session ID from the JSON body, so both are sent in the payload too.
+# The prompt carries a one-off marker: the LLM Gateway caches identical requests
+# (Module 2 turned caching on), and a cache hit adds no spend, which would make a
+# repeat run of this block report a false FAIL.
 SESSION_ID="smoke-$(openssl rand -hex 16)-session"
+PROMPT="Search for flights from SFO to TYO on 2026-09-15 (request $(openssl rand -hex 3))"
 ENCODED_ARN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$RUNTIME_ARN")
 
 HTTP=$(curl -s -o /tmp/smoke-response.txt -w '%{http_code}' -X POST \
@@ -124,11 +128,11 @@ HTTP=$(curl -s -o /tmp/smoke-response.txt -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: $SESSION_ID" \
-  -d "{\"prompt\": \"Search for flights from SFO to TYO on 2026-09-15\", \"runtimeSessionId\": \"$SESSION_ID\"}")
+  -d "{\"prompt\": \"$PROMPT\", \"runtimeSessionId\": \"$SESSION_ID\"}")
 echo "Runtime invocation: HTTP $HTTP"
 
 # Match both prefixes: `gw_` on the Module 3a path, `gateway_` on the Module 3b path.
-echo "Gateway tools the agent loaded:"
+echo "Gateway tools the agent called for this prompt:"
 grep -oE '"name": *"(gw|gateway)_tg-[A-Za-z0-9_-]+"' /tmp/smoke-response.txt | sort -u
 
 sleep 8
@@ -153,7 +157,7 @@ aws cognito-idp admin-delete-user --user-pool-id $USER_POOL_ID \
   --username "$SMOKE_USER" --region $REGION && echo "Removed the throwaway user."
 :::
 
-Expected output: `HTTP 200`, the seven `tg-workshop-*` tool names (prefixed `gw_` or `gateway_` depending on the path you took), and a `PASS:` line showing the spend increased.
+Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent actually called for this flight search, typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it invoked.
 
 ::alert[`HTTP 403` with `Claim 'client_id' value mismatch with configuration.` means an IdToken was used instead of an AccessToken. `Failed to start MCP client` in the response body means `/FAST-stack/gateway_url` points at a Gateway that no longer exists — re-run the SSM step on the *Connect the Gateway* page.]{type="info"}
 
@@ -163,11 +167,11 @@ If the agent does not respond, returns an error, or hangs, work through the chec
 
 | Symptom | Likely Cause | How to Verify |
 |---------|--------------|---------------|
-| Agent replies with "Model access denied" or Marketplace error | Bedrock Marketplace subscription gate — Claude Sonnet was not primed in this account | Return to the **Prime Anthropic model access** section in [Architecture and Prerequisites](../architecture/) and complete the priming steps for both Sonnet 4.5 and 4.6. |
+| Agent replies with "Model access denied" or Marketplace error | Bedrock Marketplace subscription gate — Claude Sonnet was not primed in this account | Return to the **Prime Anthropic model access** section in [Architecture and prerequisites](../architecture/) and complete the priming steps for Claude Sonnet 4.6. |
 | Agent replies but never calls any tool | Tools Gateway not wired — `GATEWAY_URL` SSM parameter points at FAST's built-in gateway instead of Module 3a's | `aws ssm get-parameter --name /FAST-stack/gateway_url --query Parameter.Value --output text` — confirm it matches `https://<your-gateway-id>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp`. Re-run the SSM re-apply step on the `connect-gateway-mcp` or `connect-gateway-agentcore` page. |
 | Agent calls a tool and gets `401 Unauthorized` | OAuth2 credential provider is missing or the agent IAM policy does not include the wildcarded OAuth2 secret ARN | `aws bedrock-agentcore-control list-oauth2-credential-providers --region $REGION` — confirm the provider exists. Then re-run the Python IAM-widening patch from the `connect-gateway-*` page. |
 | Agent calls a tool and gets `AccessDeniedException` on `bedrock-agentcore:AuthorizeAction` | Gateway role missing `AuthorizeAction` on the policy engine (only affects the AgentCore path) | Redeploy the AgentCore stack — `workshop-agentcore-stack` now grants `AuthorizeAction` alongside `GetPolicyEngine`. |
-| Agent response spins indefinitely | AgentCore Runtime invocation failed silently | Open CloudWatch Logs for `/aws/bedrock-agentcore/runtimes/FAST_stack_FASTAgent-*-DEFAULT` and look for the first stack trace. Stream the latest log group with `aws logs tail /aws/bedrock-agentcore/runtimes/FAST_stack_FASTAgent-DEFAULT --follow`. |
+| Agent response spins indefinitely | AgentCore Runtime invocation failed silently | Open CloudWatch Logs for `/aws/bedrock-agentcore/runtimes/FAST_stack_FASTAgent-*-DEFAULT` and look for the first stack trace. The `*` is the runtime ID, so `aws logs tail` needs the resolved name: `RUNTIME_LOG_GROUP=$(aws logs describe-log-groups --region $REGION --log-group-name-prefix /aws/bedrock-agentcore/runtimes/FAST_stack_FASTAgent --query 'logGroups[0].logGroupName' --output text)` then `aws logs tail "$RUNTIME_LOG_GROUP" --region $REGION --follow`. |
 
 If none of the above resolves the issue, capture the log stream above and the output of the command below when raising the issue. `get-agent-runtime` takes the runtime **ID**, not the ARN, so the ID is sliced off the end of the ARN held in SSM:
 
@@ -204,6 +208,6 @@ This is the complete lifecycle: platform governance → agent development → pr
 >
 > **How to run it:** open the notebook from the path below, then execute every cell top-to-bottom (click the cell and press `Shift+Enter`, or use the *Run All* button).
 >
-> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
+> **Kernel:** when VS Code prompts, pick **`Python 3 (workshop-fast)`** from the kernel picker. If you see `ModuleNotFoundError`, the wrong kernel is selected — switch it from the kernel name in the top-right.
 >
 > Navigate to `source/module-4b-fast/notebooks/` and open **`05-run-the-agent.ipynb`**.

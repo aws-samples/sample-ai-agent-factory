@@ -13,56 +13,80 @@ Parameters:
     Default: mcp-gateway
     Description: Name prefix for all resources (must match network/data/compute stacks)
 
-  # Container Image Repositories (ECR URIs constructed dynamically using AWS::AccountId and AWS::Region)
+  # Container images. Every task definition below pins its image directly
+  # (mcpgateway/<service>:v1.0.16 from Docker Hub, plus the public ECR ADOT
+  # collector). The *ImageRepo / *ImageTag parameters are NOT referenced by any
+  # resource: they are kept so the parent workshop-registry-stack.yaml can keep
+  # passing them, and setting one has no effect on what the services run.
   RegistryImageRepo:
     Type: String
     Default: 'mcp-gateway-registry'
-    Description: ECR repository name for Registry service
+    Description: >-
+      Unused image repository for Registry: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   RegistryImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for Registry service
+    Description: >-
+      Unused image tag for Registry: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   AuthServerImageRepo:
     Type: String
     Default: 'mcp-gateway-auth-server'
-    Description: ECR repository name for Auth Server
+    Description: >-
+      Unused image repository for AuthServer: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   AuthServerImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for Auth Server
+    Description: >-
+      Unused image tag for AuthServer: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   CurrentTimeImageRepo:
     Type: String
     Default: 'mcp-gateway-currenttime'
-    Description: ECR repository name for CurrentTime MCP server
+    Description: >-
+      Unused image repository for CurrentTime: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   CurrentTimeImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for CurrentTime MCP server
+    Description: >-
+      Unused image tag for CurrentTime: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   McpgwImageRepo:
     Type: String
     Default: 'mcp-gateway-mcpgw'
-    Description: ECR repository name for MCPGW MCP server
+    Description: >-
+      Unused image repository for Mcpgw: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   McpgwImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for MCPGW MCP server
+    Description: >-
+      Unused image tag for Mcpgw: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   RealServerFakeToolsImageRepo:
     Type: String
     Default: 'mcp-gateway-realserverfaketools'
-    Description: ECR repository name for RealServerFakeTools MCP server
+    Description: >-
+      Unused image repository for RealServerFakeTools: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   RealServerFakeToolsImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for RealServerFakeTools MCP server
+    Description: >-
+      Unused image tag for RealServerFakeTools: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   ServiceCpu:
     Type: String
@@ -195,13 +219,14 @@ Parameters:
     Default: ''
     Description: Email address for CloudWatch alarm notifications (leave empty to disable SNS)
 
-  # Observability Configuration (Amazon Managed Service for Prometheus + ADOT + Grafana + Metrics Service)
+  # Observability Configuration (metrics-service with ADOT collector sidecar + Amazon Managed
+  # Service for Prometheus + Grafana)
   EnableObservability:
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: >
-      Enable full observability stack (Grafana OSS, metrics-service, ADOT).
+      Enable the observability services (Grafana OSS, metrics-service with its ADOT collector sidecar).
       When enabled, deploys Grafana with dashboards and metrics collection.
       REQUIRES observability-stack to be deployed first for Prometheus exports.
 
@@ -223,25 +248,31 @@ Parameters:
   GrafanaImageRepo:
     Type: String
     Default: 'mcp-gateway-grafana'
-    Description: ECR repository name for Grafana (with dashboards baked in)
+    Description: >-
+      Unused image repository for Grafana: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   GrafanaImageTag:
     Type: String
     Default: 'v1.0.16'
     Description: >-
-      Image tag for Grafana (currently unused — the task definition pins
-      mcpgateway/grafana:v1.0.16 directly; kept for template compatibility).
+      Unused image tag for Grafana: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   # Metrics Service Configuration
   MetricsServiceImageRepo:
     Type: String
     Default: 'mcp-gateway-metrics-service'
-    Description: ECR repository name for metrics-service
+    Description: >-
+      Unused image repository for MetricsService: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   MetricsServiceImageTag:
     Type: String
     Default: 'latest'
-    Description: Image tag for metrics-service
+    Description: >-
+      Unused image tag for MetricsService: the task definition pins its
+      mcpgateway image tag v1.0.16 directly; kept only for template compatibility.
 
   MetricsApiKey:
     Type: String
@@ -514,7 +545,7 @@ Resources:
             StartPeriod: 60
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-registry
+          Value: !Sub ${EnvironmentName}-auth-server
 
 
   #============================================================================
@@ -1223,18 +1254,48 @@ Resources:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: !Ref TargetCpuUtilization
 
+  # Customer-managed key for the alarm topic. The alarms below publish to the topic
+  # whenever an AlarmEmail is supplied, and CloudWatch can only publish to an encrypted
+  # topic when the key policy grants cloudwatch.amazonaws.com — the AWS-managed aws/sns
+  # key's policy does not, so alarm notifications would never be delivered. Created only
+  # together with the topic (the workshop passes no AlarmEmail, so neither exists there).
+  AlarmTopicKey:
+    Type: AWS::KMS::Key
+    Condition: CreateSnsTopicCondition
+    Properties:
+      Description: !Sub ${EnvironmentName} alarm topic key (CloudWatch alarm publishing)
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountKeyAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: CloudWatchAlarmsPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alarms-key
+
   # CloudWatch Alarm SNS Topic
   AlarmSnsTopic:
     Type: AWS::SNS::Topic
     Condition: CreateSnsTopicCondition
     Properties:
       TopicName: !Sub ${EnvironmentName}-alarms
-      # Server-side encryption with the AWS-managed SNS key (zero cost).
-      # NOTE: the aws/sns managed key's policy does not grant
-      # cloudwatch.amazonaws.com — if you wire CloudWatch alarm actions to
-      # this topic in production, use a customer-managed CMK whose key policy
-      # allows the CloudWatch service principal.
-      KmsMasterKeyId: alias/aws/sns
+      # Encrypted with the customer-managed key above so the alarm actions wired
+      # below can actually publish (see AlarmTopicKey).
+      KmsMasterKeyId: !Ref AlarmTopicKey
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-alarms
@@ -1469,7 +1530,8 @@ Resources:
           Value: !Sub '${EnvironmentName}-adot-collector'
 
   #============================================================================
-  # Grafana OSS (Uses public image grafana/grafana, no custom ECR build)
+  # Grafana OSS (custom mcpgateway/grafana image with dashboards and datasources
+  # pre-loaded -- see GrafanaImageRepo / GrafanaImageTag)
   # Provides dashboards for MCP Analytics and AWS Infrastructure monitoring
   #============================================================================
 
@@ -1477,6 +1539,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: EnableObservabilityCondition
     Properties:
+      PermissionsBoundary: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/workshop-permissions-boundary'
       RoleName: !Sub '${EnvironmentName}-grafana-task-role-${AWS::Region}'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'

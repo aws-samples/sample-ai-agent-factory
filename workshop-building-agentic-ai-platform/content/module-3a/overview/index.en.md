@@ -1,5 +1,5 @@
 ---
-title: "Registry Overview"
+title: "Registry overview"
 weight: 42
 ---
 

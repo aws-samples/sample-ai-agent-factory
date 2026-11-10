@@ -1,5 +1,5 @@
 ---
-title: "Register an A2A Agent"
+title: "Register an A2A agent"
 weight: 44
 ---
 

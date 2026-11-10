@@ -1,5 +1,5 @@
 ---
-title: "Virtual Keys & Teams"
+title: "Virtual keys and teams"
 weight: 33
 ---
 
@@ -67,12 +67,12 @@ python3 scripts/setup_keys.py --stack-name workshop-llm-gateway-stack
 
 This script will:
 1. Read the proxy URL and admin key from CloudFormation / Secrets Manager
-2. Register 17 of the most commonly used Bedrock models in LiteLLM's database (Claude, Nova, Llama, Mistral, and DeepSeek) — `reference/litellm-config.yaml` lists 55 aliases you could add, but the script registers this curated subset with friendly aliases
+2. Register 13 of the most commonly used Bedrock models in LiteLLM's database (Claude, Nova, Mistral, and DeepSeek) — `reference/litellm-config.yaml` lists 24 aliases you could add, but the script registers this curated subset with friendly aliases
 3. Create two teams: `platform-team` ($10 budget) and `workload-team` ($5 budget)
 4. Create virtual keys for each team
 5. Test a chat completion with the virtual key
 
-On success, the script prints a summary showing the proxy URL and the two keys it created (masked — the full values go to a `0600` file you source in the next step):
+On success, the script prints a summary showing the proxy URL and the two keys it created (the key values themselves are never printed — the script shows only their length, and the full values go to a `0600` file you source in the next step):
 
 :::code{language=text showCopyAction=false showLineNumbers=false}
 =======================================================
@@ -87,16 +87,16 @@ On success, the script prints a summary showing the proxy URL and the two keys i
 [2/6] Checking proxy health...
   Proxy is healthy!
 
-[3/6] Registering 17 Bedrock models...
-  Registered 17/17 models successfully.
+[3/6] Registering 13 Bedrock models...
+  Registered 13/13 models successfully.
 
 [4/6] Creating workshop teams...
   Created team 'platform-team' (id=xxxxxxxx-xxxx..., budget=$10.0)
   Created team 'workload-team' (id=xxxxxxxx-xxxx..., budget=$5.0)
 
 [5/6] Creating virtual keys...
-  Created key 'workshop-admin-key' = sk-xxxxxxxx... (budget=$10.0) → Cognito 'admins'
-  Created key 'workshop-dev-key'   = sk-xxxxxxxx... (budget=$5.0) → Cognito 'developers'
+  Created key 'workshop-admin-key' (value not printed — 25 chars) (budget=$10.0) → Cognito 'admins'
+  Created key 'workshop-dev-key' (value not printed — 25 chars) (budget=$5.0) → Cognito 'developers'
 
 [6/6] Testing chat completion with virtual key...
   Model response: Hello there, how are you?
@@ -117,8 +117,8 @@ On success, the script prints a summary showing the proxy URL and the two keys i
     source /workshop/.llm-gateway-env
 
     LLM_GATEWAY_URL        https://xxxxxxxxxx.execute-api.us-west-2.amazonaws.com
-    LLM_GATEWAY_API_KEY    sk-xxxx...xxxx   # = workshop-dev-key
-    LLM_GATEWAY_ADMIN_KEY  sk-xxxx...xxxx   # administrative key
+    LLM_GATEWAY_API_KEY    (value not printed — 25 chars)   # = workshop-dev-key
+    LLM_GATEWAY_ADMIN_KEY  (value not printed — 35 chars)   # administrative key
 
   /workshop/.llm-gateway-env is mode 0600 and holds the full values.
 
@@ -174,17 +174,17 @@ fi
 
 ## 3.3 Verify key restrictions
 
-The `workshop-dev-key` was created with an **allowlist** of `claude-sonnet`, `claude-haiku`, and `nova-2-lite` — `llama3.3-70b` was deliberately excluded even though the gateway has it registered. Call `llama3.3-70b` with the dev key first and confirm the gateway rejects it:
+The `workshop-dev-key` was created with an **allowlist** of `claude-sonnet`, `claude-haiku`, and `nova-2-lite` — `nova-pro` was deliberately excluded even though the gateway has it registered. Call `nova-pro` with the dev key first and confirm the gateway rejects it:
 
-You should **expect an `HTTP 403` response with `"type": "key_model_access_denied"`** in the body — the dev key is not allowed to call llama3.3-70b, so the gateway returns an access-denied error instead of a model response:
+You should **expect an `HTTP 401` response with `"type": "key_model_access_denied"`** in the body — the dev key is not allowed to call nova-pro, so the gateway returns an access-denied error instead of a model response:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-# Negative test — llama3.3-70b is registered on the gateway but NOT on
-# the dev key's allowlist. Expect HTTP 403 with "key_model_access_denied".
+# Negative test — nova-pro is registered on the gateway but NOT on
+# the dev key's allowlist. Expect HTTP 401 with "key_model_access_denied".
 curl -s -w "\nHTTP %{http_code}\n" "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
-  -d '{"model": "llama3.3-70b", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 10}'
+  -d '{"model": "nova-pro", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 10}'
 :::
 
 Now confirm the same key works for a model it *is* allowed to call:
@@ -219,12 +219,12 @@ You'll see fields like `spend`, `max_budget`, `models`, and `team_id`.
 
 A centralized platform needs a **unified identity** across all its components. The MCP Gateway & Registry stack (pre-deployed in your workshop environment) created a **Cognito User Pool** as part of its data layer. The setup script automatically detects this pool and links each virtual key to a Cognito group via key metadata, so LLM spend can be correlated with Cognito identities.
 
-::alert[The Cognito User Pool is created by the registry stack's data layer (`data-stack.yaml`), not a separate `platform-identity` stack. It is shared across all modules — Module 2 (LLM Gateway), Module 3a (MCP Registry + Tools Gateway), Module 3b (AgentCore Registry), and Module 4 (Agent Builder) all reference the same pool.]{type="info"}
+::alert[The Cognito User Pool is created by the registry stack's data layer (`data-stack.yaml`), not a separate `platform-identity` stack. It is shared across all modules — Module 2 (LLM Gateway), Module 3a (MCP Registry + Tools Gateway), Module 3b (AWS Agent Registry), and Module 4 (Agent Builder) all reference the same pool.]{type="info"}
 
 ```
 Cognito User Pool (created by registry data-stack)
   │
-  ├── Group: mcp-registry-admin → LiteLLM team: platform-team  → workshop-admin-key
+  ├── Group: admins             → LiteLLM team: platform-team  → workshop-admin-key
   └── Group: developers         → LiteLLM team: workload-team  → workshop-dev-key
 ```
 
@@ -264,7 +264,7 @@ This means the platform can answer: **"The LLM call that cost $0.50 was made by 
 Open **`step-3-virtual-keys.ipynb`**. This notebook performs the same operations as the `setup_keys.py` script but breaks them into individual cells so you can inspect results at each stage:
 
 1. **Load state** — Reads the gateway URL and admin key from `.state.json` (saved by the Step 2 notebook).
-2. **Register Bedrock models** — Registers 9 models covering the Anthropic Claude, Amazon Nova, and DeepSeek families — a smaller set than the 17 `setup_keys.py` registers, because the notebook keeps the cell readable. Each model gets a friendly alias (e.g., `claude-sonnet`) mapped to its full Bedrock model ID.
+2. **Register Bedrock models** — Registers 8 models covering the Anthropic Claude, Amazon Nova, and DeepSeek families — a smaller set than the 13 `setup_keys.py` registers, because the notebook keeps the cell readable. Each model gets a friendly alias (e.g., `claude-sonnet`) mapped to its full Bedrock model ID.
 3. **Create teams** — Creates `platform-team` ($10 budget) and `workload-team` ($5 budget) with scoped model access. Pay attention to how team budgets provide an outer spending boundary.
 4. **Create virtual keys** — Issues `workshop-admin-key` and `workshop-dev-key`, each scoped to a team. Notice how the key budget and team budget work together for layered cost control.
 5. **Test chat completion** — Sends a request through the gateway using the new virtual key to verify end-to-end connectivity.

@@ -70,6 +70,36 @@ export AWS_REGION="$REGION"
 
 # Derive S3 bucket name from the current directory name and region
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# The identity that will open CloudWatch Omni from the AWS console (Module 5).
+# Workshop Studio resolves {{.ParticipantRoleArn}} to WSParticipantRole; on the
+# self-paced path there is no such role, and Omni rejects a grant for a principal
+# that does not exist, so the grant goes to the identity running this deploy:
+# an IAM user as itself, an assumed role as its role ARN (read back through
+# iam get-role so a path such as aws-reserved/sso.amazonaws.com/ is kept).
+# Anything else (root, or a role this identity may not read) creates no console
+# grant; Module 5 step 1 then adds one by hand. Override with
+# OMNI_CONSOLE_PRINCIPAL_ARN (and OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE|IAM_USER).
+CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
+OMNI_CONSOLE_PRINCIPAL_ARN="${OMNI_CONSOLE_PRINCIPAL_ARN:-}"
+OMNI_CONSOLE_PRINCIPAL_TYPE="${OMNI_CONSOLE_PRINCIPAL_TYPE:-IAM_ROLE}"
+if [[ -z "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
+  case "$CALLER_ARN" in
+    arn:*:iam::*:user/*)
+      OMNI_CONSOLE_PRINCIPAL_ARN="$CALLER_ARN"; OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_USER ;;
+    arn:*:sts::*:assumed-role/*/*)
+      CALLER_ROLE_NAME="${CALLER_ARN#*:assumed-role/}"; CALLER_ROLE_NAME="${CALLER_ROLE_NAME%%/*}"
+      OMNI_CONSOLE_PRINCIPAL_ARN=$(aws iam get-role --role-name "$CALLER_ROLE_NAME" \
+        --query Role.Arn --output text 2>/dev/null || true)
+      OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE ;;
+  esac
+fi
+if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
+  echo "CloudWatch Omni console grant will go to: $OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_TYPE)"
+else
+  echo "CloudWatch Omni: could not resolve a console identity from $CALLER_ARN - no console"
+  echo "                 grant will be created (Module 5 step 1 shows how to add one by hand)."
+fi
 DIR_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
 # S3 caps a bucket name at 63 characters, and the directory name is the one part
 # of this that a participant does not choose: the public repository's own
@@ -280,6 +310,7 @@ if [[ "$OPERATION" == "deploy" ]]; then
       PARAM_VALUE="${PARAM_VALUE//\{\{.AssetsBucketPrefix\}\}/assets/}"
       PARAM_VALUE="${PARAM_VALUE//\{\{.TeamId\}\}/${TEAM_ID:-d30035ed-7bef-405a-8741-6144faa15e17}}"
       PARAM_VALUE="${PARAM_VALUE//\{\{.TeamIndex\}\}/0}"
+      PARAM_VALUE="${PARAM_VALUE//\{\{.ParticipantRoleArn\}\}/$OMNI_CONSOLE_PRINCIPAL_ARN}"
 
       # Skip if unresolvable magic variables remain
       if [[ "$PARAM_VALUE" == *'{{.'*'}}'* ]]; then
@@ -288,6 +319,12 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
       PARAM_OVERRIDES+=("${PARAM_NAME}=${PARAM_VALUE}")
     done
+
+    # workshop-agentcore-stack: the console grant's principal type must match the
+    # ARN resolved above (an IAM user on the self-paced path is not a role).
+    if [[ "$STACK_NAME" == "workshop-agentcore-stack" && -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
+      PARAM_OVERRIDES+=("OmniConsolePrincipalType=${OMNI_CONSOLE_PRINCIPAL_TYPE}")
+    fi
 
     # code-editor: if the account has NO default VPC (deleted as a security
     # baseline in many enterprise landing zones), the instance/SG cannot fall

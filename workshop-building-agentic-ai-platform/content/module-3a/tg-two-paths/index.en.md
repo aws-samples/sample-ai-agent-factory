@@ -1,5 +1,5 @@
 ---
-title: "Tools Gateway: Two Paths to Tools"
+title: "Tools Gateway: two paths to tools"
 weight: 48
 ---
 
