@@ -28,7 +28,7 @@ The deploy wrapper checks for `aws` and `yq` up front and exits with an install 
 
 ### Region
 
-Deploy into any of the **validated regions** below. These three regions apply to the self-service path only: the self-service deploy policies fence every call to them, and the workshop has been built and tested against the Amazon Bedrock model and Amazon Bedrock AgentCore availability in each. Workshop Studio events are different — `contentspec.yaml` lists `us-west-2` as the only deployable region, so an AWS-run event is always in Oregon. Other regions are not supported — the Amazon Bedrock AWS Agent Registry control plane is not yet generally available everywhere (it returns an internal error in regions such as `eu-central-1` and `ap-southeast-1`), which breaks Modules 3b and 4.
+Deploy into any of the **validated regions** below. The same three regions apply to both paths: the self-service deploy policies fence every call to them, `contentspec.yaml` lists them as the deployable regions for Workshop Studio events (`us-west-2` is the default), and the workshop has been built and tested against the Amazon Bedrock model and Amazon Bedrock AgentCore availability in each.
 
 | Region | Location |
 |---|---|

@@ -77,7 +77,7 @@ Current minified sizes (headroom in parentheses):
 |------|-------|----------|
 | `workshop-iam-policy-core.json`       | 4,458 | 1686 |
 | `workshop-iam-policy-core-2.json`     | 5,668 | 476 |
-| `workshop-iam-policy-core-3.json`     | 5,933 | 211 |
+| `workshop-iam-policy-core-3.json`     | 6,010 | 134 |
 | `workshop-iam-policy-infra.json`      | 5,761 | 383 |
 | `workshop-iam-policy-network.json`    | 5,690 | 454 |
 | `workshop-iam-policy-core-4.json`     | 5,605 | 539 |
@@ -447,7 +447,10 @@ a role to Lambda: `CreateFunction` is gone and the one `update-function-configur
 content runs changes `--environment` only), so the function cannot be re-pointed at another
 role at all. Second, the five functions run under `workshop-*`/`ac-*` roles that carry
 `workshop-permissions-boundary`, so code that reaches one of them gains nothing a participant
-does not already have. Accepted as the documented residual of a grant the content needs.
+does not already have. Accepted as the documented residual of a grant the content needs. Since 2026-11-10 the
+statement also carries the `aws:RequestedRegion` fence the other statements use (Holmes scan `48f9df48`: the
+five function ARNs have `*` in the region segment, so without the fence the write was valid in every Region);
+core-3 is now at 6,010 characters by IAM's count, the tightest file.
 `DeleteFunction`, `RemovePermission` and `GetPolicy` left at the same time; see the
 `lambda:AddPermission` section for why nothing a participant runs needs them any more.
 

@@ -59,7 +59,7 @@ The first line should report `aws-cli/2.39` or newer, the second prints the pre-
 
 ## Steps
 
-1. [Verify your domain and space](step-1/): Confirm the pre-provisioned domain, space, Dataset integration and access grants (self-paced accounts create them here)
+1. [Verify your domain and space](step-1/): Confirm the pre-provisioned domain, space, Dataset integration and access grants (in your own account the self-service deploy script's stacks created them)
 2. [Sign in to your space](step-2/): Open the space from the CloudWatch console, or with a one-time deep link from the terminal
 3. [Platform signals](step-3/): LLM Gateway logs, interceptor audit logs and Gateway spans in one query (Tracks 2 and 3)
 4. [Agent traces and sessions](step-4/): Read a FAST agent run end to end (Tracks 1 and 3)

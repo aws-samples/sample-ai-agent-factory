@@ -86,9 +86,9 @@ works identically.
   which breaks Modules 3b and 4.)
 - **Permissions** — attach the scoped deploy policies (explicit actions only, each regional
   statement restricted to the validated regions) in
-  [`static/cfn/self-service-deploy-policy-{1..4}.json`](static/cfn/) — split across four files to
+  [`static/cfn/self-service-deploy-policy-{1..8}.json`](static/cfn/) — split across eight files to
   stay under IAM's per-policy size limit. (`AdministratorAccess` also works if you'd rather not
-  manage four policies.) We recommend a **dedicated account** you can tear down when finished.
+  manage eight policies.) We recommend a **dedicated account** you can tear down when finished.
 
 > ⚠️ **Cost notice.** Provisioning creates real, billable AWS resources (Amazon DocumentDB,
 > Aurora PostgreSQL, ECS Fargate, NAT Gateways, Application Load Balancers, CloudFront, Lambda,
@@ -148,7 +148,7 @@ The five stacks deploy in `contentspec.yaml` order — **LLM Gateway → MCP Reg
 → AgentCore → Code Editor** — and tear down in reverse (with a GuardDuty VPC-endpoint pre-cleanup
 that otherwise blocks VPC deletion).
 
-### Delete Everything
+### Delete everything
 
 ```bash
 # When finished, tear everything down to stop charges
@@ -187,7 +187,7 @@ workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agen
 │   │   ├── workshop-iam-policy-core.json     # ParticipantRole policy (bedrock, agentcore, secrets)
 │   │   ├── workshop-iam-policy-infra.json    # ParticipantRole policy (ECS, EFS, ELB, etc.)
 │   │   ├── workshop-iam-policy-network.json  # ParticipantRole policy (VPC/EC2 networking)
-│   │   ├── self-service-deploy-policy-{1..4}.json  # Scoped deploy policies, restricted to validated regions (self-hosted)
+│   │   ├── self-service-deploy-policy-{1..8}.json  # Scoped deploy policies, restricted to validated regions (self-hosted)
 │   │   └── self-service-scp.json  # Optional OU-level region-fence SCP (self-hosted hardening)
 │   └── img/                       # Workshop images
 ├── scripts/

@@ -3425,6 +3425,13 @@ Resources:
               - "arn:aws:lambda:*:*:function:ac-auto-review"
 
             "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
               "Null":
                 "lambda:Layer": "true"
 
