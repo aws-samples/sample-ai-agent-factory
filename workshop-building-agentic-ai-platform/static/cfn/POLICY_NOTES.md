@@ -752,6 +752,20 @@ in `deploy-cfn.sh` or the content issues those six calls directly. `AttachVolume
 and `TerminateInstances` stay in `-policy-1.json`: they cannot run code under the instance role.
 `-policy-1.json` dropped to 5,702 characters, `-policy-8.json` is at 2,753.
 
+## `self-service-deploy-policy-8.json`: the account-level statements are CloudFormation-only (2026-11-10)
+
+Holmes scan `f1a5fb55` flagged two things in `-policy-8.json`: `logs:PutResourcePolicy`/`DeleteResourcePolicy`
+on `*` (no resource type exists, so the grant covered every Logs resource policy in the account), and the
+API Gateway v2 child-resource and `TagResource`/`UntagResource` statements, which cannot carry the Workshop
+tag fence (children are not taggable) and so let a deployer tag any API and then edit it. The deployer never
+issues any of these calls directly — `deploy-cfn.sh` and the scripts contain no `apigatewayv2`, `logs
+put-resource-policy` or `xray update-*` call; the only callers are the CloudFormation handlers for
+`AWS::ApiGatewayV2::*`, `AWS::Logs::ResourcePolicy` and `AWS::XRay::TransactionSearchConfig` in the
+LLM Gateway and AgentCore stacks, which run under the deployer's credentials (no service role). So the four
+statements now carry `ForAnyValue:StringEquals aws:CalledVia = cloudformation.amazonaws.com`, the same fence
+`Ec2IdeInstanceMutationOnlyThroughCloudFormation` uses: stack create/update/delete keeps working, the same
+calls from a terminal are denied. `-policy-8.json` is at 3,009 characters.
+
 ## `aps:DeleteRuleGroupsNamespace`: name-scoped, deliberately not tag-scoped
 
 Every other APS statement carries `aws:ResourceTag/Workshop`. The delete does not,

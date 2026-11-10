@@ -81,7 +81,8 @@ works identically.
   `eu-west-1`. The workshop has been built and tested against the Bedrock model and AgentCore
   availability in these regions; the deploy adapts model IDs and resources to your region
   automatically and a preflight check confirms the required capabilities before any stack is
-  created. Model access must be granted per region. (Other regions are not supported — the
+  created. Serverless Amazon Bedrock models are enabled on first invocation; Anthropic models need a
+  one-time use case submission per account (Module 2 step 2 walks through it). (Other regions are not supported — the
   Amazon Bedrock AgentCore Registry control plane is not yet generally available everywhere,
   which breaks Modules 3b and 4.)
 - **Permissions** — attach the scoped deploy policies (explicit actions only, each regional
