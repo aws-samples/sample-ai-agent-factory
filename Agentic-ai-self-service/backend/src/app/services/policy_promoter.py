@@ -51,6 +51,7 @@ from app.services.policy_lifecycle import (
     PolicyStateUnreadable,
     delete_policy_confirmed,
     policy_child_row,
+    policy_definition,
     reconcile_policy_definition,
     refuse_incompatible_coresidency,
     refuse_shared_parent_engine,
@@ -209,7 +210,7 @@ def _ensure_policies_active(
         # Reconcile-in-place with no supplied statement: re-drive the policy's
         # OWN live definition (fetched via get_policy) so a regressed
         # UPDATE_FAILED policy re-validates without needing the original Cedar.
-        _defn = {"cedar": {"statement": stmt}}
+        _defn = policy_definition(stmt)
         try:
             if cur:
                 _pid = cur.get("policyId") or cur.get("id")

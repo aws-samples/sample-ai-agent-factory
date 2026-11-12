@@ -26,6 +26,43 @@ All notable changes to this project are documented here. The format follows
   `mcp` moves only through a reviewed lock update with the generated-agent import and
   multi-provider merge tests (see the note in `agentcore-deps-constraints.txt`).
 
+### Added — Gateway guardrails: Bedrock Guardrails evaluated by Policy in AgentCore (`policyConfig.guardrails.profile`)
+
+- A policy node can set a *Gateway guardrails profile* (`off` default | `standard` | `strict`).
+  The policy step then writes, next to its `allow_permitted_tools` permit, one
+  `forbid(principal, action == AgentCore::Action::"<Target>___<tool>", resource == <gateway ARN>)
+  when guardrails { BedrockGuardrails::<Type>([...], [context.input.<field>, ...])
+  .maxConfidenceScore().greaterThan(decimal("<t>")) };` per permitted tool and guardrail type over
+  the tool's REQUIRED string arguments (optional string arguments ride along). Policy in AgentCore
+  calls Bedrock `InvokeGuardrailChecks` on every `tools/call` and denies the call before the tool
+  runs. `standard`: `PromptAttack` (`PROMPT_INJECTION`, `JAILBREAK`) above 0.4; tools it cannot
+  screen are reported in `policy_result.gateway_guardrails.unscreened_tools`. `strict`: adds
+  `ContentFilter` (all five categories) above 0.2 and refuses the deploy when any permitted tool
+  cannot be screened. `backend/src/app/services/gateway_guardrails.py`.
+- Guardrail statements are Dogwood, not plain Cedar, and go out as `definition.policy.statement`;
+  `policy_lifecycle.policy_definition` picks the member from the text so every writer (policy step,
+  promoter, reconciler) agrees, and `live_statement` reads either member back.
+- The Gateway role gains exactly `bedrock:InvokeGuardrailChecks` on `Resource: "*"` (the API is
+  resourceless) and only when a profile is set; the gateway step derives the flag from the same
+  `policy_config` the policy step reads.
+- Region gate, fail-closed before any side effect: `GATEWAY_GUARDRAILS_SUPPORTED_REGIONS`
+  (`region_capabilities`) = N. Virginia, Ohio, Oregon, London, Stockholm, Sydney, Tokyo. Refused at
+  the request model for an explicit `targetRegion` (422), at the live route for the resolved home
+  Region (400), inside the deployer before any client exists, and in the policy step. "Amazon
+  Bedrock Guardrails in AgentCore Policy" is listed in `unsupported_features` where absent
+  (Ireland, Frankfurt, Paris among the release Regions). Also refused: an unknown profile value, a
+  profile on a disabled policy engine, `strict` with a served-only tool source (managed Web
+  Search/Web Answer, connectors, external MCP servers) or a custom tool without a required string
+  argument, and any profile other than `off` in the CloudFormation export.
+- UI: *Gateway guardrails profile* select on the policy node (General tab), disabled with the
+  Region reason where AWS lacks it; Region twins in `awsRegion.ts`.
+- Tests: `backend/tests/test_gateway_guardrails.py` (Region contract, profile parsing, schema to
+  data paths, statement goldens, SDK-model-validated `CreatePolicy` definitions, planner, schema
+  reader, policy step integration, role policy, deployer ordering, admission gates, export refusal)
+  with twelve mutation fixtures that each break the suite; frontend twins and modal tests. Not in
+  this change: output screening (`suppressOutput` needs an unvalidated JSONPath into MCP
+  `content[*].text`), JSONPath screening of served-only targets, CloudFormation export parity.
+
 ### Added — AWS-managed Web Answer as a Gateway tool (`web_answer`, US East (N. Virginia))
 
 - A second managed connector beside Web Search: `web_answer` on a canvas becomes an

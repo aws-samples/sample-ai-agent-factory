@@ -79,12 +79,17 @@ def test_full_release_regions_enable_both_optional_services() -> None:
         assert profile.managed_web_search is True
         assert profile.aws_agent_registry is True
     # Web Answer (2026-11) is documented in N. Virginia only, so it is the one optional
-    # tool a "full" Region other than us-east-1 still names as unsupported.
+    # tool Ohio and Oregon still name as unsupported; Ireland also lacks Bedrock
+    # Guardrails in AgentCore Policy (documented in a different Region subset).
     assert capabilities.region_feature_profile("us-east-1").unsupported_features == ()
-    for region in ("us-east-2", "us-west-2", "eu-west-1"):
+    for region in ("us-east-2", "us-west-2"):
         assert capabilities.region_feature_profile(region).unsupported_features == (
             "Amazon Bedrock AgentCore Web Answer",
         )
+    assert capabilities.region_feature_profile("eu-west-1").unsupported_features == (
+        "Amazon Bedrock AgentCore Web Answer",
+        "Amazon Bedrock Guardrails in AgentCore Policy",
+    )
 
 
 def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
@@ -95,10 +100,16 @@ def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
         assert profile.release_supported is True
         assert profile.managed_web_search is False
         assert profile.aws_agent_registry is True
-        assert profile.unsupported_features == (
-            "Amazon Bedrock AgentCore Web Search",
-            "Amazon Bedrock AgentCore Web Answer",
-        )
+    # London has guardrails in policies; Frankfurt does not.
+    assert capabilities.region_feature_profile("eu-west-2").unsupported_features == (
+        "Amazon Bedrock AgentCore Web Search",
+        "Amazon Bedrock AgentCore Web Answer",
+    )
+    assert capabilities.region_feature_profile("eu-central-1").unsupported_features == (
+        "Amazon Bedrock AgentCore Web Search",
+        "Amazon Bedrock AgentCore Web Answer",
+        "Amazon Bedrock Guardrails in AgentCore Policy",
+    )
 
     paris = capabilities.region_feature_profile("eu-west-3")
     assert entries["eu-west-3"]["profile"] == "reduced"
@@ -108,6 +119,7 @@ def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
     assert paris.unsupported_features == (
         "Amazon Bedrock AgentCore Web Search",
         "Amazon Bedrock AgentCore Web Answer",
+        "Amazon Bedrock Guardrails in AgentCore Policy",
         "AWS Agent Registry federation",
     )
 

@@ -239,14 +239,17 @@ describe('regional feature availability', () => {
     expect(screen.getAllByRole('button', { name: 'Use Template' }).length).toBeGreaterThan(0);
   });
 
-  it('keeps every template selectable under the full Ireland profile and names only Web Answer', () => {
+  it('keeps every template selectable under the full Ireland profile and names Web Answer and Gateway guardrails', () => {
     vi.stubEnv('VITE_AWS_REGION', 'eu-west-1');
     render(<TemplateGallery {...baseProps} isOpen onClose={vi.fn()} />);
 
-    // Ireland has Web Search and Registry federation; the one optional tool it lacks is
-    // Web Answer (N. Virginia only), and no gallery template implies it.
+    // Ireland has Web Search and Registry federation; it lacks Web Answer (N. Virginia
+    // only) and Bedrock Guardrails in AgentCore Policy. No gallery template implies either,
+    // so the banner informs and nothing is disabled.
     const banner = screen.getByRole('status');
-    expect(banner).toHaveTextContent('Amazon Bedrock AgentCore Web Answer are not available from AWS here');
+    expect(banner).toHaveTextContent(
+      'Amazon Bedrock AgentCore Web Answer and Amazon Bedrock Guardrails in AgentCore Policy are not available from AWS here',
+    );
     expect(banner).not.toHaveTextContent('Web Search');
     expect(screen.queryByRole('button', { name: 'Unavailable in this Region' })).toBeNull();
     screen.getAllByRole('button', { name: 'Use Template' }).forEach((button) => {

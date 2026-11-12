@@ -398,6 +398,16 @@ export type ExtractionStrategy = 'semantic' | 'summary' | 'episodic' | 'user_pre
 // Policy Configuration (Cedar-based)
 // ============================================================================
 
+/**
+ * Bedrock Guardrails evaluated by Policy in AgentCore at the Gateway, on every tool call's
+ * string arguments, before the tool runs. `off` changes nothing. `standard` denies a call
+ * whose arguments score PROMPT_INJECTION/JAILBREAK above 0.4 and reports tools it cannot
+ * screen. `strict` adds the five content-filter categories above 0.2 and refuses a deploy
+ * with a tool it cannot screen. Region-gated (see awsRegion.ts); twin of
+ * backend/.../gateway_guardrails.py GATEWAY_GUARDRAILS_PROFILES.
+ */
+export type GatewayGuardrailsProfile = 'off' | 'standard' | 'strict';
+
 export interface PolicyConfiguration {
   name: string;
   enabled: boolean;
@@ -406,6 +416,8 @@ export interface PolicyConfiguration {
   enableNlAuthoring: boolean;
   strictValidation: boolean;
   enableAuditLog: boolean;
+  /** Absent means `off`: existing saved canvases deploy exactly as before. */
+  guardrails?: { profile: GatewayGuardrailsProfile };
 }
 
 export interface PolicyRule {

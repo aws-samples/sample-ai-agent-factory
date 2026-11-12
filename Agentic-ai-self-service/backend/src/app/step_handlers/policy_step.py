@@ -20,11 +20,17 @@ from app.services import step_clients
 from app.services.aws_errors import is_error
 from app.services.aws_pagination import list_all
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.gateway_guardrails import (
+    GatewayGuardrailPlan,
+    gateway_guardrails_requested,
+    plan_gateway_guardrails_for_step,
+)
 from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
 from app.services.gateway_update import preserving_gateway_update
 from app.services.policy_lifecycle import (
     delete_policy_confirmed,
     policy_child_row,
+    policy_definition,
     reconcile_managed_policy_set,
     reconcile_policy_definition,
     refuse_incompatible_coresidency,
@@ -96,11 +102,14 @@ def _create_policy_when_engine_ready(client, engine_id, name, description, state
             # This skips the analysis FINDINGS (overly-permissive/restrictive
             # warnings), NOT enforcement: AgentCore is default-deny, so a permit
             # over the allowed tools still denies everything else by omission.
+            # Guardrail policies ("when guardrails {…}") have the same validation
+            # finding ("Overly Restrictive": a forbid gated only by a guardrail looks
+            # unconditional to the analyzer), so the mode serves them too.
             return client.create_policy(
                 policyEngineId=engine_id,
                 name=name,
                 description=description,
-                definition={"cedar": {"statement": statement}},
+                definition=policy_definition(statement),
                 validationMode="IGNORE_ALL_FINDINGS",
             )
         except Exception as e:  # noqa: BLE001
@@ -443,6 +452,7 @@ def handler(event: dict, context) -> dict:
                         forbidden.add(q)
 
         policies = list(explicit)
+        guardrail_plan = GatewayGuardrailPlan.off()
         if qualified_tools:
             # ENFORCEMENT MODEL (validated against the live engine's analysis):
             # AgentCore is DEFAULT-DENY, so a tool is denied simply by NOT being
@@ -478,6 +488,28 @@ def handler(event: dict, context) -> dict:
                         "statement": f"permit(principal is {principal_type}, {action_head}, {res});",
                     },
                 )
+                # Gateway guardrails: one `forbid … when guardrails {…}` per permitted tool and
+                # guardrail type, carved out of the permit above (a lone forbid grants nothing,
+                # so only permitted tools get one). Off by default; Region-gated; `strict` fails
+                # closed on a tool it cannot screen. Created, recorded, awaited and promoted
+                # like every other policy below — policy_definition() sends them as Dogwood.
+                guardrail_plan = plan_gateway_guardrails_for_step(
+                    policy_config,
+                    region=region,
+                    gateway_arn=gateway_arn,
+                    gateway_id=gateway_id,
+                    permitted_tools=permitted,
+                    agentcore_ctrl=agentcore_ctrl,
+                )
+                policies.extend(guardrail_plan.policies)
+                if guardrail_plan.profile != "off":
+                    logger.warning(
+                        "Gateway guardrails (%s): %d policies over %d tools; unscreened: %s",
+                        guardrail_plan.profile,
+                        len(guardrail_plan.policies),
+                        len(guardrail_plan.screened_tools),
+                        sorted(guardrail_plan.unscreened_tools) or "none",
+                    )
             elif forbidden:
                 # Everything is forbidden -> there is nothing to permit. In
                 # ENFORCE that means an empty tool plane; fail loudly rather than
@@ -489,6 +521,11 @@ def handler(event: dict, context) -> dict:
                 )
         else:
             # No manifest readable — fall back to the rules translator (best effort).
+            if gateway_guardrails_requested(policy_config):
+                raise RuntimeError(
+                    "Gateway guardrails were requested but the gateway exposes no readable tools, so no "
+                    "guardrail policy can name an action. Refusing to deploy unscreened."
+                )
             policies = explicit + _rules_to_cedar_policies(rules, gateway_arn, principal_type, [])
 
         created_policy_ids = []
@@ -1014,6 +1051,9 @@ def handler(event: dict, context) -> dict:
                     for _n, _p in _desired_by_name.items()
                 ],
                 "mode": mode,
+                # Gateway guardrails receipt: profile, the policy names written, the tools they
+                # screen and the tools they could not (with the reason). `off` -> empty lists.
+                "gateway_guardrails": guardrail_plan.as_result(),
                 # Bug 170: when ENFORCE was requested but couldn't validate, the
                 # engine is attached in LOG_ONLY and we report the downgrade so the
                 # UI/caller can show "policy auditing only" instead of silently

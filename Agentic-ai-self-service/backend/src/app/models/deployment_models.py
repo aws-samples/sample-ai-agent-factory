@@ -1131,6 +1131,47 @@ class DeployRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_gateway_guardrails(self) -> "DeployRequest":
+        """Refuse a Gateway guardrails profile this platform cannot honour, before any side effect.
+
+        Four refusals, each with its exact reason: an unknown profile value; a profile on a
+        disabled policy engine (it would be silently dropped); an explicit ``targetRegion`` where
+        AWS does not offer guardrails in policies (the live route re-checks the resolved home
+        Region); and ``strict`` with a tool source the policy step is certain it cannot screen.
+        """
+
+        if (self.deployment_mode or "runtime") == "harness" or self.policy_config is None:
+            return self
+        from ..services.gateway_guardrails import (
+            gateway_guardrails_profile,
+            require_policy_engine_for_guardrails,
+            strict_profile_admission_blockers,
+        )
+        from ..services.region_capabilities import require_gateway_guardrails_region
+
+        profile = gateway_guardrails_profile(self.policy_config)
+        if profile == "off":
+            return self
+        require_policy_engine_for_guardrails(self.policy_config)
+        if self.target_region:
+            require_gateway_guardrails_region(self.target_region)
+        if profile == "strict":
+            blockers = strict_profile_admission_blockers(
+                template_id=self.template_id,
+                gateway_tools=self.gateway_tools,
+                custom_tools=self.custom_tools,
+                connectors=self.connectors,
+                external_mcp_servers=self.external_mcp_servers,
+            )
+            if blockers:
+                raise ValueError(
+                    "Gateway guardrails profile 'strict' requires every permitted tool to be screened, "
+                    f"and this canvas has tools that cannot be: {'; '.join(blockers)}. Use profile "
+                    "'standard' (screens what it can and reports the rest) or remove those tools."
+                )
+        return self
+
+    @model_validator(mode="after")
     def _check_codegen_component_composition(self) -> "DeployRequest":
         """Refuse combinations that code generation cannot faithfully compose.
 
