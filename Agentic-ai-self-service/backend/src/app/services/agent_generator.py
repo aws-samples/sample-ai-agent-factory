@@ -95,12 +95,15 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
   targets and a broken agent):
   * BUILT-IN tools — set `isCustom: false` and use EXACTLY one of these toolIds:
       - `web_search`          (AWS-managed Web Search with source citations)
+      - `web_answer`          (AWS-managed Web Answer: one call returns a synthesized,
+                               cited answer; US East (N. Virginia) only)
       - `wikipedia_search`   (encyclopedia lookup)
       - `weather_api`        (real-time weather + geocoding via Open-Meteo)
       - `web_page_fetcher`   (fetch a URL's text)
     Do NOT invent a built-in toolId. If the user asks for weather, use
-    `weather_api`. If they ask to search the web, use `web_search`. The deployer
-    routes that ID to the managed AgentCore Gateway connector, not Lambda scraping.
+    `weather_api`. If they ask to search the web, use `web_search`; if they ask for a
+    direct researched answer with citations, use `web_answer`. The deployer
+    routes those IDs to the managed AgentCore Gateway connectors, not Lambda scraping.
   * CUSTOM tools — only when the need maps to NONE of the built-ins. Set
     `isCustom: true`, pick a unique snake_case `toolId`, and ALSO include:
       "inputSchema": {"type":"object","properties":{...},"required":[...]}
@@ -252,6 +255,7 @@ _SUBMIT_TOOL = {
 # inputSchema so the deploy can generate their Lambda. (Bug 138.)
 _BUILTIN_TOOL_IDS = {
     "web_search",
+    "web_answer",
     "wikipedia_search",
     "weather_api",
     "web_page_fetcher",

@@ -89,6 +89,14 @@ from app.services.downloadable_artifact import build_artifact_zip
 from app.services.export_guardrails import GuardrailExportError, GuardrailExportPlan, prepare_guardrail_export
 from app.services.gateway_deployer import _default_lambda_tool_schema
 from app.services.litellm_gateway_deployer import resolve_gateway_provider, resolve_mcp_url
+from app.services.managed_web_answer import (
+    MANAGED_WEB_ANSWER_CONNECTOR_ID,
+    MANAGED_WEB_ANSWER_DESCRIPTION,
+    MANAGED_WEB_ANSWER_TARGET_NAME,
+    MANAGED_WEB_ANSWER_TOOL_IDS,
+    MANAGED_WEB_ANSWER_TOOL_NAME,
+    managed_web_answer_requested,
+)
 from app.services.managed_web_search import (
     MANAGED_WEB_SEARCH_CONNECTOR_ID,
     MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
@@ -99,7 +107,7 @@ from app.services.managed_web_search import (
     managed_web_search_requested,
 )
 from app.services.mcp_gateway_protocol import MCP_SUPPORTED_VERSIONS
-from app.services.region_capabilities import SUPPORTED_SINGLE_REGION_RELEASES
+from app.services.region_capabilities import SUPPORTED_SINGLE_REGION_RELEASES, WEB_ANSWER_SUPPORTED_REGIONS
 from app.services.region_models import current_region, is_inference_profile_id, repoint_regional_prefix
 from app.services.runtime_artifact import (
     BASE_BUNDLE_KEY,
@@ -5076,6 +5084,7 @@ class CfnTemplateGenerator:
         gateway_tools = request.gateway_tools or []
         custom_tools = request.custom_tools or []
         has_managed_web_search = managed_web_search_requested(template_id, gateway_tools)
+        has_web_answer = managed_web_answer_requested(template_id, gateway_tools)
         memory_config = request.memory_config
         policy_config = request.policy_config
         mcp_server_config = request.mcp_server_config
@@ -5316,10 +5325,14 @@ class CfnTemplateGenerator:
                 )
         elif has_gateway:
             self._add_cognito(template, deployment_name)
-            self._add_gateway_role(template, has_managed_web_search=has_managed_web_search)
+            self._add_gateway_role(
+                template, has_managed_web_search=has_managed_web_search, has_web_answer=has_web_answer
+            )
             self._add_gateway(template, deployment_name)
             if has_managed_web_search:
                 self._add_managed_web_search_target(template)
+            if has_web_answer:
+                self._add_web_answer_target(template)
 
             # Add predefined tool targets
             tool_ids = self._resolve_gateway_tools(template_id, gateway_tools, custom_tools)
@@ -7294,7 +7307,9 @@ class CfnTemplateGenerator:
     # Gateway IAM Role
     # ------------------------------------------------------------------
 
-    def _add_gateway_role(self, template: dict, *, has_managed_web_search: bool = False) -> None:
+    def _add_gateway_role(
+        self, template: dict, *, has_managed_web_search: bool = False, has_web_answer: bool = False
+    ) -> None:
         template["Resources"]["GatewayRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -7509,6 +7524,18 @@ class CfnTemplateGenerator:
                     "Resource": {"Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"},
                 }
             )
+        if has_web_answer:
+            statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+                "Statement"
+            ]
+            statements.append(
+                {
+                    "Sid": "ManagedWebAnswer",
+                    "Effect": "Allow",
+                    "Action": ["bedrock-agentcore:InvokeWebAnswer"],
+                    "Resource": {"Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-answer.v1"},
+                }
+            )
 
     # ------------------------------------------------------------------
     # Gateway (native CFN)
@@ -7621,7 +7648,11 @@ class CfnTemplateGenerator:
         # rely on that coupling staying correct, refuse the mix here so the export
         # matches the live deployer, which also fails closed on it.
         _known = (
-            _DYNAMIC_TOOL_IDS | _CUSTOMER_SUPPORT_TOOL_IDS | _LEGACY_CUSTOMER_TOOL_IDS | MANAGED_WEB_SEARCH_TOOL_IDS
+            _DYNAMIC_TOOL_IDS
+            | _CUSTOMER_SUPPORT_TOOL_IDS
+            | _LEGACY_CUSTOMER_TOOL_IDS
+            | MANAGED_WEB_SEARCH_TOOL_IDS
+            | MANAGED_WEB_ANSWER_TOOL_IDS
         )
         _unknown = [t for t in tool_ids if t not in _known]
         if _unknown:
@@ -7641,8 +7672,13 @@ class CfnTemplateGenerator:
             )
 
         # Managed search IDs become the connector target above, never a
-        # Lambda schema. The legacy DuckDuckGo ID migrates here too.
-        return [tool_id for tool_id in tool_ids if tool_id not in MANAGED_WEB_SEARCH_TOOL_IDS]
+        # Lambda schema. The legacy DuckDuckGo ID migrates here too. The Web Answer
+        # id is the second managed connector and follows the same rule.
+        return [
+            tool_id
+            for tool_id in tool_ids
+            if tool_id not in MANAGED_WEB_SEARCH_TOOL_IDS and tool_id not in MANAGED_WEB_ANSWER_TOOL_IDS
+        ]
 
     def _add_tool_lambdas_and_targets(self, template: dict, deployment_name: str, tool_ids: list[str]) -> None:
         """Add Lambda functions and Gateway targets for the specified tools."""
@@ -7725,6 +7761,51 @@ class CfnTemplateGenerator:
                 "ConnectorId": MANAGED_WEB_SEARCH_CONNECTOR_ID,
                 "ConnectorVersion": MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
                 "ToolName": MANAGED_WEB_SEARCH_TOOL_NAME,
+            },
+        }
+
+    def _add_web_answer_target(self, template: dict) -> None:
+        """Add the AWS-managed Web Answer connector target as a NATIVE GatewayTarget.
+
+        Web Search needs ``Custom::ManagedWebSearchTarget`` only because it pins a
+        connector ``Version``, which the native resource does not expose. Web Answer is
+        documented on the connector's current default version, so the native
+        ``AWS::BedrockAgentCore::GatewayTarget`` connector surface is exactly what the live
+        deployer sends (``managed_web_answer_target_params``), minus the version field
+        neither side sets.
+        """
+        template.setdefault("Rules", {})["WebAnswerRegion"] = {
+            "Assertions": [
+                {
+                    "Assert": {
+                        "Fn::Contains": [
+                            sorted(WEB_ANSWER_SUPPORTED_REGIONS),
+                            {"Ref": "AWS::Region"},
+                        ]
+                    },
+                    "AssertDescription": (
+                        "AgentCore Web Answer is available only in "
+                        + ", ".join(sorted(WEB_ANSWER_SUPPORTED_REGIONS))
+                        + "."
+                    ),
+                }
+            ]
+        }
+        template["Resources"]["WebAnswerTarget"] = {
+            "Type": "AWS::BedrockAgentCore::GatewayTarget",
+            "Properties": {
+                "GatewayIdentifier": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayIdentifier"]},
+                "Name": MANAGED_WEB_ANSWER_TARGET_NAME,
+                "Description": MANAGED_WEB_ANSWER_DESCRIPTION,
+                "TargetConfiguration": {
+                    "Mcp": {
+                        "Connector": {
+                            "Source": {"ConnectorId": MANAGED_WEB_ANSWER_CONNECTOR_ID},
+                            "Configurations": [{"Name": MANAGED_WEB_ANSWER_TOOL_NAME, "ParameterValues": {}}],
+                        }
+                    }
+                },
+                "CredentialProviderConfigurations": [{"CredentialProviderType": "GATEWAY_IAM_ROLE"}],
             },
         }
 
@@ -8939,6 +9020,11 @@ def handler(event, context):
                 enabled = connector.get("Enabled") or [MANAGED_WEB_SEARCH_TOOL_NAME]
                 if MANAGED_WEB_SEARCH_TOOL_NAME in enabled:
                     actions.append(f"{target}___{MANAGED_WEB_SEARCH_TOOL_NAME}")
+                continue
+            if source.get("ConnectorId") == MANAGED_WEB_ANSWER_CONNECTOR_ID:
+                enabled = connector.get("Enabled") or [MANAGED_WEB_ANSWER_TOOL_NAME]
+                if MANAGED_WEB_ANSWER_TOOL_NAME in enabled:
+                    actions.append(f"{target}___{MANAGED_WEB_ANSWER_TOOL_NAME}")
                 continue
             schemas = mcp.get("Lambda", {}).get("ToolSchema", {}).get("InlinePayload", [])
             if not schemas:

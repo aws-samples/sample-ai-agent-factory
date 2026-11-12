@@ -151,7 +151,7 @@ describe('ComponentPalette prompt library access', () => {
 
 
 describe('ComponentPalette regional feature availability', () => {
-  it('disables only managed Web Search in a reduced Region and explains why', () => {
+  it('disables both managed web tools in a reduced Region and explains why', () => {
     vi.stubEnv('VITE_AWS_REGION', 'eu-west-3');
     const onAddComponent = vi.fn();
     render(<ComponentPalette onAddComponent={onAddComponent} />);
@@ -159,12 +159,40 @@ describe('ComponentPalette regional feature availability', () => {
     const webSearch = screen.getByRole('button', {
       name: 'Add Amazon Web Search to canvas',
     });
+    const webAnswer = screen.getByRole('button', {
+      name: 'Add Amazon Web Answer to canvas',
+    });
     expect(webSearch).toBeDisabled();
+    expect(webAnswer).toBeDisabled();
     expect(webSearch.parentElement).toHaveAttribute('draggable', 'false');
-    expect(screen.getByRole('note')).toHaveTextContent('Europe (Paris)');
+    expect(webAnswer.parentElement).toHaveAttribute('draggable', 'false');
+    const notes = screen.getAllByRole('note');
+    expect(notes).toHaveLength(2);
+    notes.forEach((note) => expect(note).toHaveTextContent('Europe (Paris)'));
     expect(screen.getByRole('button', { name: 'Add Weather API to canvas' })).toBeEnabled();
 
     fireEvent.click(webSearch);
+    fireEvent.click(webAnswer);
     expect(onAddComponent).not.toHaveBeenCalled();
+  });
+
+  it('disables only Web Answer in a full Region that lacks it', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'eu-west-1');
+    const onAddComponent = vi.fn();
+    render(<ComponentPalette onAddComponent={onAddComponent} />);
+
+    expect(screen.getByRole('button', { name: 'Add Amazon Web Search to canvas' })).toBeEnabled();
+    const webAnswer = screen.getByRole('button', { name: 'Add Amazon Web Answer to canvas' });
+    expect(webAnswer).toBeDisabled();
+    expect(screen.getByRole('note')).toHaveTextContent('Web Answer is not available in Europe (Ireland)');
+  });
+
+  it('enables every managed web tool in N. Virginia', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'us-east-1');
+    render(<ComponentPalette onAddComponent={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Add Amazon Web Search to canvas' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Add Amazon Web Answer to canvas' })).toBeEnabled();
+    expect(screen.queryByRole('note')).toBeNull();
   });
 });

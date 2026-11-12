@@ -107,6 +107,14 @@ export const PALETTE_ITEMS: PaletteItem[] = [
   },
   {
     type: 'tool',
+    label: 'Amazon Web Answer',
+    description: 'Managed AgentCore Gateway tool: one call returns a synthesized, cited answer (US East N. Virginia only)',
+    customIcon: '💡',
+    category: 'tools',
+    toolId: 'web_answer',
+  },
+  {
+    type: 'tool',
     label: 'Web Page Fetcher',
     description: 'Fetch and extract content from web pages by URL',
     customIcon: '📄',

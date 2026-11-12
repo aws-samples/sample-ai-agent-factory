@@ -471,6 +471,7 @@ export type A2ACommunicationPattern =
 export type ToolId =
   | 'web_search'
   | 'duckduckgo_search' // legacy saved-canvas alias; backend migrates to managed Web Search
+  | 'web_answer' // AWS-managed Web Answer connector (us-east-1 only); never a Lambda tool
   | 'web_page_fetcher'
   | 'wikipedia_search'
   | 'weather_api'

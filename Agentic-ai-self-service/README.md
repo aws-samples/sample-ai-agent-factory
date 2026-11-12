@@ -33,7 +33,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **AI generation** — Describe a tool or a whole agent in natural language; Claude on Bedrock generates a deployable Lambda tool or a validated canvas spec.
 - **Multi-target gateways** — One gateway can carry multiple targets of different families at once (Lambda tools, external MCP servers from a curated catalog or a custom endpoint, OpenAPI specs, Smithy models), each with the right outbound auth.
 - **Target-family-safe Gateway readiness** — Static OpenAPI and Smithy targets publish their supplied schemas and are admitted only after exact `READY`/`ACTIVE` read-back; they are never sent to `SynchronizeGatewayTargets`, which AgentCore reserves for dynamic MCP-server discovery. Their Cedar actions are derived fail-closed from OpenAPI `operationId` or Smithy service-operation names (strict JSON/YAML, with bounded expected-owner reads for staged S3 schemas), so ENFORCE policy creation cannot race an empty manifest. Non-OBO deployments additionally prove the served `tools/list` plane; OBO deployments defer that proof to the mandatory first authenticated workforce-user tool call. An OBO gateway refuses combinations whose action names are available only through authenticated discovery, instead of creating partial Cedar; deploy those targets on a separate gateway. Inline Lambda and managed connector targets remain on their family-specific no-sync paths.
-- **Dynamic Gateway tool pipeline** — Managed search deploys as a pinned AWS connector target; selected Wikipedia, weather, fetch, and demo tools deploy behind scoped Lambda targets. Agents discover both through the MCP Gateway with Cognito OAuth2.
+- **Dynamic Gateway tool pipeline** — Managed search deploys as a pinned AWS connector target and Web Answer (US East (N. Virginia) only) as a second managed connector that returns one synthesized, cited answer per call; selected Wikipedia, weather, fetch, and demo tools deploy behind scoped Lambda targets. Agents discover both through the MCP Gateway with Cognito OAuth2.
 - **Bring your own LiteLLM** — Point an agent at a LiteLLM MCP proxy *instead of* AgentCore Gateway, or carry it *inside* one as an MCP target, and/or make a LiteLLM proxy the authoritative agent catalog. All opt-in and additive; the AgentCore Gateway and the built-in registry remain the defaults. See [Bring your own LiteLLM](#bring-your-own-litellm).
 - **13 model providers & multi-agent patterns** — Bedrock (default), OpenAI, Anthropic, Gemini, Mistral, Ollama, Groq, DeepSeek, Together, LiteLLM, SageMaker, Writer, LlamaAPI; Graph / Swarm / Workflow orchestration via Strands Agents SDK.
 - **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies. Customer-owned AWS resources require an explicit `AgentCoreFlowsAccess=allow` opt-in before the platform can grant a Knowledge Base role access.
@@ -130,12 +130,20 @@ To also export OTLP traces from every platform Lambda and deployed agent to a ba
 
 Set `AWS_REGION` to one of the seven selected release Regions; every other value is refused by `deploy.sh`, by the CDK app at synth, and by the deploy API. Production supports exactly one independently deployed AgentCore **Runtime** home Region from this set; Managed Harness and A2A are excluded from production even where AWS exposes them.
 
-| Profile | Regions | Managed Web Search | AWS Agent Registry | Built-in DynamoDB registry | Runtime platform V2 (opt-in) |
-|---|---|---:|---:|---:|---:|
-| Full | `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1` | Yes | Yes | Yes | Yes |
-| Reduced | `eu-central-1` | No | Yes | Yes | Yes |
-| Reduced | `eu-west-2` | No | Yes | Yes | No |
-| Reduced | `eu-west-3` | No | No | Yes | No |
+| Profile | Regions | Managed Web Search | Web Answer | AWS Agent Registry | Built-in DynamoDB registry | Runtime platform V2 (opt-in) |
+|---|---|---:|---:|---:|---:|---:|
+| Full | `us-east-1` | Yes | Yes | Yes | Yes | Yes |
+| Full | `us-east-2`, `us-west-2`, `eu-west-1` | Yes | No | Yes | Yes | Yes |
+| Reduced | `eu-central-1` | No | No | Yes | Yes | Yes |
+| Reduced | `eu-west-2` | No | No | Yes | Yes | No |
+| Reduced | `eu-west-3` | No | No | No | Yes | No |
+
+Web Answer (AWS-managed, one tool call returns a synthesized answer with citations) is
+documented in US East (N. Virginia) only. Add it to a canvas as the `web_answer` tool; the
+palette disables it elsewhere with the Region reason, a deploy that requests it outside
+`us-east-1` is refused synchronously (HTTP 400 on the live route, 422 for an explicit
+`targetRegion`) before any resource exists, and the CloudFormation export emits the same
+connector target with a Region rule. Target-level domain include/exclude lists are a follow-up.
 
 Runtime platform V2 is how AgentCore starts a runtime (snapshot-restored sessions with
 elastic memory), not a workflow feature: every runtime defaults to V1, and a runtime node can

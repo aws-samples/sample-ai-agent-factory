@@ -96,6 +96,14 @@ export const RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS = [
   "us-west-2",
 ] as const;
 
+/**
+ * Regions where AgentCore Web Answer (synthesized, cited answers over the managed web
+ * index) is documented: US East (N. Virginia) only (developer guide, "Add a Connector
+ * target with Web Answer", and the 2026-11 launch note, read 2026-11-12). Twin of
+ * WEB_ANSWER_SUPPORTED_REGIONS in backend/.../region_capabilities.py.
+ */
+export const WEB_ANSWER_SUPPORTED_REGIONS = ["us-east-1"] as const;
+
 const REGION_DISPLAY_NAMES: Record<string, string> = {
   "eu-central-1": "Europe (Frankfurt)",
   "eu-north-1": "Europe (Stockholm)",
@@ -115,6 +123,7 @@ const MANAGED_WEB_SEARCH_TOOL_IDS = new Set([
   "web_search",
   "duckduckgo_search",
 ]);
+const MANAGED_WEB_ANSWER_TOOL_IDS = new Set(["web_answer"]);
 
 export interface RegionFeatureProfile {
   region: string;
@@ -124,6 +133,8 @@ export interface RegionFeatureProfile {
   awsAgentRegistry: boolean;
   /** V2 is how a runtime is started, not a workflow feature: never in unsupportedFeatures. */
   runtimePlatformV2: boolean;
+  /** Web Answer IS a workflow feature (a Gateway tool), so it is listed where absent. */
+  webAnswer: boolean;
   unsupportedFeatures: string[];
 }
 
@@ -158,6 +169,7 @@ export function getRegionFeatureProfile(
     RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
     region,
   );
+  const webAnswer = includesRegion(WEB_ANSWER_SUPPORTED_REGIONS, region);
   return {
     region,
     displayName: getRegionDisplayName(region),
@@ -168,11 +180,25 @@ export function getRegionFeatureProfile(
     managedWebSearch,
     awsAgentRegistry,
     runtimePlatformV2,
+    webAnswer,
     unsupportedFeatures: [
       ...(!managedWebSearch ? ["Amazon Bedrock AgentCore Web Search"] : []),
+      ...(!webAnswer ? ["Amazon Bedrock AgentCore Web Answer"] : []),
       ...(!awsAgentRegistry ? ["AWS Agent Registry federation"] : []),
     ],
   };
+}
+
+/**
+ * Why Web Answer cannot be used here, or null when it can. Mirrors the backend's
+ * feature_unavailable_message("web_answer", region).
+ */
+export function webAnswerUnavailableReason(
+  region = getDeploymentRegion(),
+): string | null {
+  if (includesRegion(WEB_ANSWER_SUPPORTED_REGIONS, region)) return null;
+  const alternatives = formatReleaseAlternatives(WEB_ANSWER_SUPPORTED_REGIONS);
+  return `Amazon Bedrock AgentCore Web Answer is not available in ${getRegionDisplayName(region)} (${region}). Remove the Web Answer tool from this workflow (managed Web Search remains available where its own Region list allows), or deploy it in one of these supported release Regions: ${alternatives}.`;
 }
 
 /**
@@ -222,9 +248,10 @@ export function paletteToolUnavailableReason(
   toolId: string | undefined,
   region = getDeploymentRegion(),
 ): string | null {
-  return toolId && MANAGED_WEB_SEARCH_TOOL_IDS.has(toolId)
-    ? managedWebSearchUnavailableReason(region)
-    : null;
+  if (!toolId) return null;
+  if (MANAGED_WEB_SEARCH_TOOL_IDS.has(toolId)) return managedWebSearchUnavailableReason(region);
+  if (MANAGED_WEB_ANSWER_TOOL_IDS.has(toolId)) return webAnswerUnavailableReason(region);
+  return null;
 }
 
 /**

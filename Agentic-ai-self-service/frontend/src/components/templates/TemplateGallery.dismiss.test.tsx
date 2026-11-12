@@ -239,14 +239,26 @@ describe('regional feature availability', () => {
     expect(screen.getAllByRole('button', { name: 'Use Template' }).length).toBeGreaterThan(0);
   });
 
-  it('keeps every template selectable under the full Ireland profile', () => {
+  it('keeps every template selectable under the full Ireland profile and names only Web Answer', () => {
     vi.stubEnv('VITE_AWS_REGION', 'eu-west-1');
     render(<TemplateGallery {...baseProps} isOpen onClose={vi.fn()} />);
 
-    expect(screen.queryByRole('status')).toBeNull();
+    // Ireland has Web Search and Registry federation; the one optional tool it lacks is
+    // Web Answer (N. Virginia only), and no gallery template implies it.
+    const banner = screen.getByRole('status');
+    expect(banner).toHaveTextContent('Amazon Bedrock AgentCore Web Answer are not available from AWS here');
+    expect(banner).not.toHaveTextContent('Web Search');
     expect(screen.queryByRole('button', { name: 'Unavailable in this Region' })).toBeNull();
     screen.getAllByRole('button', { name: 'Use Template' }).forEach((button) => {
       expect(button).toBeEnabled();
     });
+  });
+
+  it('shows no regional banner in N. Virginia, where every optional service exists', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'us-east-1');
+    render(<TemplateGallery {...baseProps} isOpen onClose={vi.fn()} />);
+
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Unavailable in this Region' })).toBeNull();
   });
 });
