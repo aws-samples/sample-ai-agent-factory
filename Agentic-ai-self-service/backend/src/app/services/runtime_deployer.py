@@ -781,8 +781,17 @@ def create_agent_runtime(
     region: str | None = None,
     resource_tags: dict | None = None,
     instrument_observability: bool = False,
+    platform_version: str | None = None,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
+
+    ``platform_version`` (``"V1"`` | ``"V2"`` | ``None``) is forwarded verbatim as
+    ``platformVersion``; ``None`` sends nothing so the service default (V1) applies and the
+    request stays byte-identical to what this platform sent before the field existed.
+    Region availability of V2 is admitted upstream (``require_runtime_platform_version_region``);
+    this wrapper only carries the decision. The same value is forwarded on the conflict-
+    recovery ``update_agent_runtime`` path, which AWS documents as the way to move an
+    existing runtime between platform versions.
 
     ``resource_tags`` (P0-B governance) are merged onto the runtime itself. Before this they
     reached only ``create_runtime_iam_role`` -- the runtime's EXEC ROLE -- which is the one
@@ -830,6 +839,8 @@ def create_agent_runtime(
         # raises here rather than being rejected by AgentCore partway through the deploy.
         "tags": governed_tags(region, resource_tags),
     }
+    if platform_version is not None:
+        create_params["platformVersion"] = platform_version
 
     if env_vars:
         create_params["environmentVariables"] = env_vars
@@ -982,6 +993,10 @@ def create_agent_runtime(
                     }
                     if env_vars:
                         update_params["environmentVariables"] = env_vars
+                    # Omitting platformVersion on update keeps the runtime's current version;
+                    # sending it moves the adopted runtime to the requested one (AWS docs).
+                    if platform_version is not None:
+                        update_params["platformVersion"] = platform_version
                     # UpdateAgentRuntime REPLACES the runtime's configuration: an authorizer
                     # left out of the update is removed, not kept. Measured live (2026-09-28):
                     # a redeploy of the customJWTAuthorizer MCP server runtime came back with

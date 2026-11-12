@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — opt-in AgentCore Runtime platform version V2
+
+- `RuntimeConfig.platformVersion` (`"V1"` | `"V2"`, default absent = service default V1) is
+  forwarded verbatim as `platformVersion` on `CreateAgentRuntime`, and on the conflict-recovery
+  `UpdateAgentRuntime` path, by `runtime_deployer.create_agent_runtime`. An unset value sends
+  no key at all, so every existing caller's request to AWS is byte-identical to before.
+- V2 is documented in ten Regions (`RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS`, read from the
+  AgentCore developer guide on 2026-11-12). Of the seven release Regions, London and Paris are
+  V1-only. A V2 request there is refused before any side effect: at the shared request model
+  for an explicit `targetRegion` (422) and at the live route for the resolved home Region (400,
+  the same code as the Web Search gate), with one message naming the Region, the V1 default and
+  only the *selected* V2 alternatives. `RegionFeatureProfile.runtime_platform_v2` reports the
+  availability without adding V2 to the customer-facing `unsupported_features` list.
+- The CloudFormation export mirrors the live route: `AWS::BedrockAgentCore::Runtime.PlatformVersion`
+  is present iff the request set it. `DeploymentState.runtime_platform_version` records the
+  requested value at admission; `GetAgentRuntime` remains the ground truth.
+- UI: a *Runtime Platform Version* control on the runtime node (V2 disabled with the Region
+  reason where unavailable) and a Platform cell in the deploy summary.
+- Tests: `backend/tests/test_runtime_platform_version.py` (Region contract, request model,
+  live-route gate ordering, wrapper create/update forwarding, export parity) plus six mutation
+  fixtures that each make the suite fail (`tools/mutation_check_platform_version.sh` in the
+  evidence workspace); frontend twins in `awsRegion.test.ts`.
+
 ### Fixed — a Gateway fed by connected canvas tools no longer carries a blank Lambda target
 
 - A freshly dropped Gateway node seeded its configuration with a default Lambda target whose

@@ -23,7 +23,7 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state) |
+| `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state). `config.platformVersion` (`"V1"` \| `"V2"`, default absent = V1) selects the AgentCore Runtime platform version; `"V2"` is refused with 400 (422 for an explicit `targetRegion`) where AWS does not document it (London, Paris) |
 | `GET` | `/api/deploy/{deployment_id}` | Get the caller-owned deployment status; includes derived public `runtime_name` and excludes internal authority/credential leaves |
 | `GET` | `/api/deployments` | List caller-owned deployments with the same public shape and derived `runtime_name` used by production-slot chat |
 | `POST` | `/api/test-runtime` | Test a deployed agent with a prompt (supports session_id for conversation context) |

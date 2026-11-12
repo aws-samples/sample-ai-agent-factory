@@ -130,11 +130,19 @@ To also export OTLP traces from every platform Lambda and deployed agent to a ba
 
 Set `AWS_REGION` to one of the seven selected release Regions; every other value is refused by `deploy.sh`, by the CDK app at synth, and by the deploy API. Production supports exactly one independently deployed AgentCore **Runtime** home Region from this set; Managed Harness and A2A are excluded from production even where AWS exposes them.
 
-| Profile | Regions | Managed Web Search | AWS Agent Registry | Built-in DynamoDB registry |
-|---|---|---:|---:|---:|
-| Full | `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1` | Yes | Yes | Yes |
-| Reduced | `eu-central-1`, `eu-west-2` | No | Yes | Yes |
-| Reduced | `eu-west-3` | No | No | Yes |
+| Profile | Regions | Managed Web Search | AWS Agent Registry | Built-in DynamoDB registry | Runtime platform V2 (opt-in) |
+|---|---|---:|---:|---:|---:|
+| Full | `us-east-1`, `us-east-2`, `us-west-2`, `eu-west-1` | Yes | Yes | Yes | Yes |
+| Reduced | `eu-central-1` | No | Yes | Yes | Yes |
+| Reduced | `eu-west-2` | No | Yes | Yes | No |
+| Reduced | `eu-west-3` | No | No | Yes | No |
+
+Runtime platform V2 is how AgentCore starts a runtime (snapshot-restored sessions with
+elastic memory), not a workflow feature: every runtime defaults to V1, and a runtime node can
+opt into V2 with `platformVersion: "V2"` (UI: *Runtime Platform Version*). A V2 request for
+London or Paris is refused synchronously (HTTP 400 on the live route, 422 for an explicit
+`targetRegion`) before any deployment row or AWS resource exists; the CloudFormation export
+mirrors the same value as `AWS::BedrockAgentCore::Runtime.PlatformVersion`.
 
 US West (N. California), `us-west-1`, is explicitly excluded. Milan, Spain, Stockholm, and every unlisted Region are also outside this certification set. In a reduced Region, the UI and API disable unavailable features, exports fail closed if a saved workflow requests one, and the platform omits the corresponding IAM permissions. Region selection still drives Bedrock inference profiles, Lambda resources, `VITE_AWS_REGION`, generated code, account-global naming, and WAF placement automatically.
 

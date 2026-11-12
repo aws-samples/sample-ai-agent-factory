@@ -259,6 +259,11 @@ class DeploymentState(BaseModel):
     # default to HTTP; new deployments persist the validated protocol before
     # any asynchronous work begins.
     runtime_protocol: Literal["HTTP", "MCP", "A2A"] = "HTTP"
+    # The AgentCore Runtime platform version this deployment asked for (``None`` = the
+    # service default, V1). Recorded at admission so callers and evidence can tell a V2
+    # runtime from a V1 one without a control-plane read; ``GetAgentRuntime`` stays the
+    # ground truth for what actually runs.
+    runtime_platform_version: Literal["V1", "V2"] | None = None
     gateway_url: str | None = None
     gateway_result: dict | None = None  # Full gateway deployment result for cleanup
     policy_result: dict | None = None  # Policy engine result for cleanup
@@ -448,6 +453,13 @@ class RuntimeConfig(BaseModel):
     deployment_type: str = Field(alias="deploymentType", default="S3_CODE_DEPLOY")
     python_runtime: str = Field(alias="pythonRuntime", default="PYTHON_3_13")
     protocol: Literal["HTTP", "MCP", "A2A"] = Field(default="HTTP")
+    # AgentCore Runtime platform version. ``None`` sends nothing and the service applies
+    # its own default (V1). ``"V2"`` opts the runtime into snapshot-restored starts and
+    # elastic memory; it is documented in ten Regions only, so a V2 request is refused at
+    # admission for any other Region (``require_runtime_platform_version_region``) rather
+    # than failing minutes later inside the state machine. Mirrored on the CloudFormation
+    # export as ``AWS::BedrockAgentCore::Runtime.PlatformVersion`` so both routes agree.
+    platform_version: Literal["V1", "V2"] | None = Field(alias="platformVersion", default=None)
     idle_timeout: int = Field(alias="idleTimeout", ge=60, le=28800, default=900)
     max_lifetime: int = Field(alias="maxLifetime", ge=60, le=28800, default=28800)
     enable_otel: bool = Field(alias="enableOtel", default=False)
@@ -1083,6 +1095,23 @@ class DeployRequest(BaseModel):
             requested_region = self.target_region
             if requested_region:
                 require_managed_web_search_region(requested_region)
+        return self
+
+    @model_validator(mode="after")
+    def _check_runtime_platform_version_region(self) -> "DeployRequest":
+        """Refuse Runtime platform V2 for an explicit Region that does not offer it.
+
+        Same shape as the Web Search check above: the shared model only knows an
+        EXPLICIT ``targetRegion``; the live deploy route resolves an omitted value to
+        the platform's home Region and re-checks there before any side effect.
+        """
+
+        if (self.deployment_mode or "runtime") == "harness":
+            return self
+        if self.config.platform_version == "V2" and self.target_region:
+            from ..services.region_capabilities import require_runtime_platform_version_region
+
+            require_runtime_platform_version_region(self.config.platform_version, self.target_region)
         return self
 
     @model_validator(mode="after")

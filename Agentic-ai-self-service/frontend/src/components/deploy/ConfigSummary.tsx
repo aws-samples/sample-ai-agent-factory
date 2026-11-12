@@ -59,6 +59,10 @@ export function ConfigSummary({
               <div className="text-xs font-medium text-gray-700">{config.pythonRuntime.replace('PYTHON_', 'Python ')}</div>
             </div>
             <div className="bg-gray-50 rounded-lg p-2.5">
+              <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Platform</div>
+              <div className="text-xs font-medium text-gray-700">{config.platformVersion ?? 'V1'}</div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-2.5">
               <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Memory</div>
               <div className="text-xs font-medium text-gray-700">{connectedTools.includes('memory') ? 'Enabled' : 'Disabled'}</div>
             </div>

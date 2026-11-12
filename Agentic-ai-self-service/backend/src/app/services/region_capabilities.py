@@ -47,6 +47,26 @@ AWS_AGENT_REGISTRY_SUPPORTED_REGIONS = frozenset(
     }
 )
 
+#: Regions where AgentCore Runtime platform version ``V2`` (snapshot-restored microVMs
+#: with elastic memory) is documented. Source: "Platform versions > Supported Regions" in
+#: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-how-it-works.html
+#: (read 2026-11-12). V1 is the service default everywhere; V2 is an explicit opt-in on
+#: ``RuntimeConfig.platform_version`` and is refused before any AWS side effect elsewhere.
+RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-south-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "eu-central-1",
+        "eu-north-1",
+        "eu-west-1",
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+    }
+)
+
 _REGION_NAMES = {
     "eu-central-1": "Europe (Frankfurt)",
     "eu-north-1": "Europe (Stockholm)",
@@ -70,6 +90,10 @@ class RegionFeatureProfile:
     release_supported: bool
     managed_web_search: bool
     aws_agent_registry: bool
+    #: Runtime platform ``V2`` is an opt-in on how a runtime is *started*, not a product
+    #: feature a workflow can request, so it is reported here for the UI's platform-version
+    #: control but deliberately kept out of ``unsupported_features``.
+    runtime_platform_v2: bool = False
 
     @property
     def unsupported_features(self) -> tuple[str, ...]:
@@ -130,7 +154,29 @@ def region_feature_profile(region: str) -> RegionFeatureProfile:
         release_supported=region in SUPPORTED_SINGLE_REGION_RELEASES,
         managed_web_search=region in MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
         aws_agent_registry=region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
+        runtime_platform_v2=region in RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
     )
+
+
+def runtime_platform_v2_region_supported(region: str) -> bool:
+    """Whether AWS documents AgentCore Runtime platform version V2 in ``region``."""
+
+    return region in RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS
+
+
+def require_runtime_platform_version_region(platform_version: str | None, region: str) -> None:
+    """Fail before an AWS side effect when the requested platform version is unavailable.
+
+    ``None`` and ``"V1"`` are available everywhere AgentCore Runtime is; only ``"V2"``
+    is Region-gated. Any other value is a contract error, not a Region question.
+    """
+
+    if platform_version is None or platform_version == "V1":
+        return
+    if platform_version != "V2":
+        raise ValueError(f"Unknown AgentCore Runtime platform version: {platform_version!r} (expected 'V1' or 'V2')")
+    if not runtime_platform_v2_region_supported(region):
+        raise ValueError(feature_unavailable_message("runtime_platform_v2", region))
 
 
 def managed_web_search_region_supported(region: str) -> bool:
@@ -167,5 +213,12 @@ def feature_unavailable_message(feature: str, region: str) -> str:
             f"AWS Agent Registry federation is not available in {where}. "
             "The built-in DynamoDB agent registry remains available; federation is "
             f"available in these supported release Regions: {alternatives}."
+        )
+    if feature == "runtime_platform_v2":
+        alternatives = _format_release_alternatives(RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS)
+        return (
+            f"AgentCore Runtime platform version V2 is not available in {where}. "
+            "Deploy this runtime on platform version V1 (the default) here, or choose one of "
+            f"these supported release Regions for V2: {alternatives}."
         )
     raise ValueError(f"Unknown regional feature: {feature}")

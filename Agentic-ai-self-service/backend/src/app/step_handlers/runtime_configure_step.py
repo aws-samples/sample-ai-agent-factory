@@ -398,6 +398,7 @@ def handler(event: dict, context) -> dict:
             instrument_observability=bool(event.get("production_gate_required")),
             python_runtime=config.python_runtime or "PYTHON_3_13",
             protocol=server_protocol,
+            platform_version=config.platform_version,
             env_vars=env_vars if env_vars else None,
             authorizer_config=authorizer_config,
             request_header_config=request_header_config,

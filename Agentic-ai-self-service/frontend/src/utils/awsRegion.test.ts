@@ -15,6 +15,7 @@ import {
   AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
   DEFAULT_AWS_REGION,
   MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
+  RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
   SUPPORTED_SINGLE_REGION_RELEASES,
   awsAgentRegistryUnavailableReason,
   getDeploymentRegion,
@@ -24,6 +25,7 @@ import {
   managedWebSearchUnavailableReason,
   releaseRegionUnavailableReason,
   paletteToolUnavailableReason,
+  runtimePlatformV2UnavailableReason,
   templateUnavailableReason,
 } from './awsRegion';
 
@@ -148,7 +150,47 @@ describe('regional feature profiles', () => {
       'us-east-2',
       'us-west-2',
     ]);
+    expect([...RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS]).toEqual([
+      'ap-northeast-1',
+      'ap-south-1',
+      'ap-southeast-1',
+      'ap-southeast-2',
+      'eu-central-1',
+      'eu-north-1',
+      'eu-west-1',
+      'us-east-1',
+      'us-east-2',
+      'us-west-2',
+    ]);
   });
+
+  it.each(['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1'])(
+    '%s offers Runtime platform V2 without listing it as a product feature',
+    (region) => {
+      expect(getRegionFeatureProfile(region).runtimePlatformV2).toBe(true);
+      expect(runtimePlatformV2UnavailableReason(region)).toBeNull();
+      expect(getRegionFeatureProfile(region).unsupportedFeatures).not.toContain(
+        expect.stringContaining('platform version'),
+      );
+    },
+  );
+
+  it.each(['eu-west-2', 'eu-west-3', 'us-west-1'])(
+    '%s stays V1-only and names only selected V2 alternatives',
+    (region) => {
+      expect(getRegionFeatureProfile(region).runtimePlatformV2).toBe(false);
+      const reason = runtimePlatformV2UnavailableReason(region);
+      expect(reason).toContain(`(${region})`);
+      expect(reason).toContain('platform version V1 (the default)');
+      const alternatives = reason!.split('supported release Regions for V2:')[1];
+      for (const selected of ['eu-central-1', 'eu-west-1', 'us-east-1', 'us-east-2', 'us-west-2']) {
+        expect(alternatives).toContain(selected);
+      }
+      for (const unselected of ['eu-north-1', 'ap-south-1', 'ap-southeast-1']) {
+        expect(alternatives).not.toContain(unselected);
+      }
+    },
+  );
 
   it('blocks only dedicated managed-search templates and tools where unavailable', () => {
     expect(templateUnavailableReason('web-search-agent', 'eu-central-1')).toMatch(/Frankfurt/);
