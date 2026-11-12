@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import workflows_router
+from app.routers.config import router as config_router
 from app.routers.flows import router as flows_router
 from app.routers.git_sync import router as git_sync_router
 from app.routers.observability import router as observability_router
@@ -112,6 +113,9 @@ app.include_router(provider_credentials_router)
 # because it reads/writes workflow storage. Router carries its own /api prefix.
 app.include_router(workspaces_router)
 app.include_router(git_sync_router)  # Gap 3D GitOps - /api/workflows/{id}/git-sync + /git-token
+# Phase 0 item 5 — feature flags. /api/config/features tells the signed-in UI which flagged
+# surfaces to show; a flagged-off backend route answers the same 404 as a nonexistent one.
+app.include_router(config_router)
 
 
 @app.get("/health")

@@ -98,7 +98,7 @@ When you run `./scripts/deploy.sh`, this is the sequence of operations:
      → DynamoDB tables (workflows + deployments)
      → S3 bucket (frontend assets + dependency bundles + code artifacts)
      → CloudFront distribution (SPA routing + API origin)
-     → SSM parameters (CORS origins, region, table name, OTEL config when enabled)
+     → SSM parameters (CORS origins, region, table name, OTEL config when enabled, feature flags)
      → IAM roles (least-privilege per function)
      → CloudWatch log groups (Lambda + Step Functions)
 
@@ -956,6 +956,7 @@ Policy --> Runtime, Gateway
 |   |   |   +-- git_sync.py               # GitOps: store PAT + pull workflow spec
 |   |   +-- services/
 |   |   |   +-- config.py                 # AppConfig -- SSM Parameter Store / env var loader
+|   |   |   +-- feature_flags.py          # Platform feature flags (SSM JSON, fail closed, require_feature -> 404)
 |   |   |   +-- auth.py                   # JWT sub + assert_owner tenant guard + is_registry_admin (Cognito-group RBAC)
 |   |   |   +-- agent_versions_store.py   # Versions + RuntimeSlots store (DDB)
 |   |   |   +-- registry_store.py         # Agent registry store (status/approval, DDB)

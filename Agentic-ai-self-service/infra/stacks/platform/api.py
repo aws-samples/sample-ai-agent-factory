@@ -126,6 +126,17 @@ def build_api_gateway(
         authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
+    # --- Platform configuration (feature flags) ---
+    # GET only: the UI reads /api/config/features (and the flag canary) after sign-in;
+    # flags are written through SSM by operators, never through the API.
+    api.add_routes(
+        path="/api/config/{proxy+}",
+        methods=[apigwv2.HttpMethod.GET],
+        integration=workflow_integration,
+        authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
+    )
+
     # --- Deployment routes ---
     api.add_routes(
         path="/api/deploy",

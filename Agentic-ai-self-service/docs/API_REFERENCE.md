@@ -150,6 +150,15 @@ the IAM roles and parameters in the account where the customer deploys it.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/observability/platform-defaults` | Returns `{enabled, endpoint, sample_rate}` so the UI can render the Observability node read-only when platform OTEL is configured. Never returns the secret ARN. |
+
+### Platform configuration (feature flags)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/config/features` | Every feature flag this build knows with its resolved value: `{features: {name: bool}, source: "ssm"\|"env"\|"missing"\|"invalid"\|"error", parameter, ignored: [keys the backend did not honour], ttlSeconds, refreshedAt, descriptions}`. A flag is on only for literal JSON `true` under a known name in the SSM parameter `/agentcore-workflow/{env}/platform-features`; a missing parameter, an SSM error, a non-JSON value, an unknown key or a non-boolean value all mean off. Requires `agent:read` (every builder). Cached per Lambda container for `ttlSeconds` (60). |
+| `GET` | `/api/config/features/canary` | Self-test behind the `platformFlagsCanary` flag: returns the same `404 {"detail": "Not Found"}` as a nonexistent route while the flag is off (to every caller, before the scope check), `200 {"canary": "enabled", "flag": "platformFlagsCanary"}` once it is on. Flip it to prove an environment's flag plumbing end to end; it gates no product feature. |
+
+Operators flip a flag with `aws ssm put-parameter --name /agentcore-workflow/<env>/platform-features --type String --overwrite --value '{"platformFlagsCanary": true}'`; it lands within the TTL, no redeploy. Flagged-off backend routes are declared with `Depends(require_feature("<flag>"))` placed before `require_scopes`, and the UI hides the surface with `useFeatureFlags()` / `<FeatureGate>`; the backend 404 is the control, the UI is a courtesy.
 | `POST` | `/api/observability/credentials` | Stores OTLP auth credentials in Secrets Manager and returns the secret ARN. |
 
 ### Versioning & Slots
@@ -360,3 +369,4 @@ Application configuration is stored under `/agentcore-workflow/{env}/` in SSM Pa
 | `/agentcore-workflow/{env}/otel/auth-secret-arn` | Secrets Manager ARN for the OTLP auth header |
 | `/agentcore-workflow/{env}/otel/sample-rate` | Trace sampling ratio |
 | `/agentcore-workflow/{env}/otel/service-name-prefix` | `service.name` prefix |
+| `/agentcore-workflow/{env}/platform-features` | Feature flags: a JSON object of booleans, created as `{}` (every flag off) by the stack and then operator-managed with `aws ssm put-parameter --overwrite`. Only literal `true` under a flag name the deployed build knows turns a flag on; see *Platform configuration (feature flags)* above. |
