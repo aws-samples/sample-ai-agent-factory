@@ -10161,6 +10161,12 @@ def handler(event, context):
                 "Tags": {"ManagedBy": "CloudFormation", "Stack": {"Ref": "AWS::StackName"}},
             },
         }
+        # Parity with the live route: the same ``platformVersion`` the deploy pipeline
+        # sends to CreateAgentRuntime, or nothing at all so CloudFormation applies the
+        # service default (V1). The registry schema types ``PlatformVersion`` as a free
+        # string, so the value is still validated by ``RuntimeConfig`` upstream.
+        if config.platform_version is not None:
+            runtime_resource["Properties"]["PlatformVersion"] = config.platform_version
         if depends:
             runtime_resource["DependsOn"] = depends
         template["Resources"]["AgentCoreRuntime"] = runtime_resource

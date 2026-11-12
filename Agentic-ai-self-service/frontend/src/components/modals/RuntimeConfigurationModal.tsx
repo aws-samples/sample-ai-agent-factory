@@ -21,6 +21,7 @@ import {
   createDefaultRuntimeConfig,
   PROVIDER_OPTIONS,
 } from '../../utils/runtimeConfig';
+import { runtimePlatformV2UnavailableReason } from '../../utils/awsRegion';
 import { authFetch } from '../../auth/authFetch';
 import { apiErrorFromResponse, getErrorMessage } from '../../services/api/client';
 import type { PromptSelection } from './PromptLibraryModal';
@@ -112,6 +113,12 @@ export function RuntimeConfigurationModal({
   }, [isOpen]);
 
   const isMcpToolServer = config.protocol === 'MCP';
+  // Platform V2 is Region-gated by AWS; the backend refuses it before any side effect, and
+  // this control tells the user the same thing before they ever press Deploy.
+  const platformV2UnavailableReason = useMemo(
+    () => runtimePlatformV2UnavailableReason(),
+    [],
+  );
   const defaultModel = useMemo(
     () => createDefaultRuntimeConfig().model as ModelConfiguration,
     [],
@@ -127,6 +134,9 @@ export function RuntimeConfigurationModal({
   const validationErrors = useMemo(() => {
     const errors: ValidationError[] = [];
     if (!config.name.trim()) errors.push({ field: 'name', message: 'Name is required' });
+    if (config.platformVersion === 'V2' && platformV2UnavailableReason) {
+      errors.push({ field: 'platformVersion', message: platformV2UnavailableReason });
+    }
     if (!isMcpToolServer) {
       if (!systemPrompt.trim()) {
         errors.push({ field: 'systemPrompt', message: 'System prompt is required' });
@@ -142,7 +152,7 @@ export function RuntimeConfigurationModal({
       }
     }
     return errors;
-  }, [config.name, config.providerApiKeyRef, isMcpToolServer, model.modelId, providerInfo, systemPrompt]);
+  }, [config.name, config.platformVersion, config.providerApiKeyRef, isMcpToolServer, model.modelId, platformV2UnavailableReason, providerInfo, systemPrompt]);
 
   const updateConfig = useCallback(function updateConfig<K extends keyof RuntimeConfiguration>(
     key: K,
@@ -443,6 +453,30 @@ export function RuntimeConfigurationModal({
                 isMcpToolServer
                   ? 'The selected MCP tool-server template fixes this protocol.'
                   : 'MCP is available through the dedicated MCP runtime templates, which generate a real MCP server.'
+              }
+            />
+            <SelectField
+              id="platformVersion"
+              label="Runtime Platform Version"
+              value={config.platformVersion ?? 'V1'}
+              onChange={(value) =>
+                updateConfig(
+                  'platformVersion',
+                  value === 'V2' ? 'V2' : undefined,
+                )
+              }
+              options={[
+                { value: 'V1', label: 'V1 - Service default' },
+                {
+                  value: 'V2',
+                  label: 'V2 - Snapshot cold starts, elastic memory',
+                  disabled: platformV2UnavailableReason !== null,
+                },
+              ]}
+              error={getFieldError('platformVersion')}
+              helpText={
+                platformV2UnavailableReason ??
+                'V2 restores each new session from a prepared snapshot (about 2 s P75 cold start regardless of image size) and reclaims idle memory. Creating or updating a V2 runtime takes several minutes while the snapshot is prepared.'
               }
             />
           </FormSection>
@@ -756,7 +790,7 @@ export function RuntimeConfigurationModal({
       );
     }
     return allTabs;
-  }, [config, validationErrors, availableModels, tokenCount, provider, providerInfo, model.modelId, model.temperature, model.topP, systemPrompt, multiAgentPattern, multiAgentAgents, platformOtelEnabled, platformPolicy.status, providerApiKey, savingProviderCredential, providerCredentialError, onOpenPromptLibrary, updateConfig, updateModel, handleProviderChange, handleStoreProviderCredential, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError, isMcpToolServer]);
+  }, [config, validationErrors, availableModels, tokenCount, provider, providerInfo, model.modelId, model.temperature, model.topP, systemPrompt, multiAgentPattern, multiAgentAgents, platformOtelEnabled, platformPolicy.status, providerApiKey, savingProviderCredential, providerCredentialError, onOpenPromptLibrary, updateConfig, updateModel, handleProviderChange, handleStoreProviderCredential, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError, isMcpToolServer, platformV2UnavailableReason]);
 
   return (
     <ConfigurationModal

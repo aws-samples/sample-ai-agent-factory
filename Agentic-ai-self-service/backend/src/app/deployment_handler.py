@@ -1392,6 +1392,28 @@ def _reject_unsupported_managed_web_search_region(request: DeployRequest) -> Non
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _reject_unsupported_runtime_platform_version_region(request: DeployRequest) -> None:
+    """Reject Runtime platform V2 outside its effective live-deployment Region.
+
+    The shared ``DeployRequest`` model refuses an EXPLICIT unsupported ``targetRegion``;
+    this resolves the omitted value to the platform's home Region for the live route
+    only, before any deployment/version row or AWS resource exists. A V2 runtime that
+    fails to create would otherwise surface minutes later as a state-machine error with
+    cleanup obligations instead of this synchronous refusal.
+    """
+    if (request.deployment_mode or "runtime") == "harness":
+        return
+    if request.config.platform_version != "V2":
+        return
+    from app.services.region_capabilities import require_runtime_platform_version_region
+
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_runtime_platform_version_region(request.config.platform_version, effective_region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _reject_missing_provider_credential(request: DeployRequest) -> None:
     """Reject a live runtime whose first model call would be unauthenticated."""
     if (
@@ -1810,6 +1832,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
     _reject_unsupported_release_region(request)
     _reject_unsupported_managed_web_search_region(request)
+    _reject_unsupported_runtime_platform_version_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)
 
@@ -2150,6 +2173,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # product MCP explorer know how to talk to this runtime rather than trusting a
         # browser claim. Legacy rows default to HTTP (see DeploymentState.runtime_protocol).
         runtime_protocol=request.config.protocol,
+        runtime_platform_version=request.config.platform_version,
     )
 
     store = _get_state_store()

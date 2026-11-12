@@ -79,6 +79,12 @@ PUBLIC_STATE_FIELDS = frozenset(
         # Server-authored protocol determines which safe invocation surface the
         # caller must use (HTTP chat, MCP tools, or A2A).
         "runtime_protocol",
+        # The AgentCore Runtime platform version the caller asked for (``V1``/``V2``, or
+        # null for the service default). Their own request value echoed back -- no account,
+        # ARN or platform component -- and it answers a question they have, because V2
+        # changes what they observe: create/update take minutes while the snapshot is
+        # prepared, and cold starts differ. ``GetAgentRuntime`` stays the ground truth.
+        "runtime_platform_version",
         "gateway_url",
         "gateway_result",
         "policy_result",

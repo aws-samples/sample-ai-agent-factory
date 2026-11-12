@@ -3,7 +3,7 @@
  * Aligned with AWS Bedrock AgentCore primitives.
  */
 
-import type { AgentServerProtocol, PythonRuntime, DeploymentType } from './workflow';
+import type { AgentServerProtocol, PythonRuntime, DeploymentType, RuntimePlatformVersion } from './workflow';
 
 // ============================================================================
 // Runtime Configuration
@@ -22,6 +22,8 @@ export interface RuntimeConfiguration {
   deploymentType: DeploymentType;
   pythonRuntime: PythonRuntime;
   protocol: AgentServerProtocol;
+  /** AgentCore Runtime platform version; omitted = service default (V1). */
+  platformVersion?: RuntimePlatformVersion;
   idleTimeout: number;
   maxLifetime: number;
   vpcConfig?: VPCConfiguration;

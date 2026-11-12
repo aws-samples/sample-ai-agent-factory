@@ -78,6 +78,24 @@ export const AWS_AGENT_REGISTRY_SUPPORTED_REGIONS = [
   "us-west-2",
 ] as const;
 
+/**
+ * Regions where AgentCore Runtime platform version V2 is documented
+ * (runtime-how-it-works.html, "Platform versions > Supported Regions", read 2026-11-12).
+ * Twin of RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS in backend/.../region_capabilities.py.
+ */
+export const RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS = [
+  "ap-northeast-1",
+  "ap-south-1",
+  "ap-southeast-1",
+  "ap-southeast-2",
+  "eu-central-1",
+  "eu-north-1",
+  "eu-west-1",
+  "us-east-1",
+  "us-east-2",
+  "us-west-2",
+] as const;
+
 const REGION_DISPLAY_NAMES: Record<string, string> = {
   "eu-central-1": "Europe (Frankfurt)",
   "eu-north-1": "Europe (Stockholm)",
@@ -104,6 +122,8 @@ export interface RegionFeatureProfile {
   releaseSupported: boolean;
   managedWebSearch: boolean;
   awsAgentRegistry: boolean;
+  /** V2 is how a runtime is started, not a workflow feature: never in unsupportedFeatures. */
+  runtimePlatformV2: boolean;
   unsupportedFeatures: string[];
 }
 
@@ -134,6 +154,10 @@ export function getRegionFeatureProfile(
     AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
     region,
   );
+  const runtimePlatformV2 = includesRegion(
+    RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
+    region,
+  );
   return {
     region,
     displayName: getRegionDisplayName(region),
@@ -143,11 +167,26 @@ export function getRegionFeatureProfile(
     ),
     managedWebSearch,
     awsAgentRegistry,
+    runtimePlatformV2,
     unsupportedFeatures: [
       ...(!managedWebSearch ? ["Amazon Bedrock AgentCore Web Search"] : []),
       ...(!awsAgentRegistry ? ["AWS Agent Registry federation"] : []),
     ],
   };
+}
+
+/**
+ * Why Runtime platform V2 cannot be selected here, or null when it can. Mirrors the
+ * backend's feature_unavailable_message("runtime_platform_v2", region).
+ */
+export function runtimePlatformV2UnavailableReason(
+  region = getDeploymentRegion(),
+): string | null {
+  if (includesRegion(RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS, region)) return null;
+  const alternatives = formatReleaseAlternatives(
+    RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
+  );
+  return `AgentCore Runtime platform version V2 is not available in ${getRegionDisplayName(region)} (${region}). Deploy this runtime on platform version V1 (the default) here, or choose one of these supported release Regions for V2: ${alternatives}.`;
 }
 
 export function managedWebSearchUnavailableReason(

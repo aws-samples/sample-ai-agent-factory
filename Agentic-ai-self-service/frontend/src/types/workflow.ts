@@ -380,4 +380,11 @@ export type AgentServerProtocol = 'HTTP' | 'MCP' | 'A2A';
 
 export type PythonRuntime = 'PYTHON_3_10' | 'PYTHON_3_11' | 'PYTHON_3_12' | 'PYTHON_3_13';
 
+/**
+ * AgentCore Runtime platform version. Absent means the service default (V1). V2 restores
+ * each new session from a prepared snapshot and reclaims idle memory; it is documented in
+ * ten Regions only, so the backend refuses a V2 request anywhere else before any AWS call.
+ */
+export type RuntimePlatformVersion = 'V1' | 'V2';
+
 export type DeploymentType = 'direct_code_deploy' | 'container';
