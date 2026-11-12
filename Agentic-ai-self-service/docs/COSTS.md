@@ -69,7 +69,7 @@ Estimates assume all agent deployment activity flows through Step Functions (the
 The table above covers **platform infrastructure only**. The following are billed separately by AWS and depend on your agent usage:
 
 - **Amazon Bedrock model inference** — per-token pricing varies by model (e.g., Claude Sonnet, Nova)
-- **Bedrock Guardrails** — production tool calls add one `ApplyGuardrail` input screen before execution and one output screen before model consumption; policy-unit charges vary by configured filters
+- **Bedrock Guardrails** — production tool calls add one `ApplyGuardrail` input screen before execution and one output screen before model consumption; policy-unit charges vary by configured filters. A policy node with a Gateway guardrails profile adds one `InvokeGuardrailChecks` evaluation per Gateway tool call (prompt-attack under `standard`; prompt-attack plus content filters under `strict`), billed to the Gateway role's account
 - **AgentCore Runtime compute** — billed per-second while the runtime is active
 - **AgentCore Gateway invocations** — per-request to the MCP gateway
 - **AgentCore Memory storage** — per-GB for conversation memory

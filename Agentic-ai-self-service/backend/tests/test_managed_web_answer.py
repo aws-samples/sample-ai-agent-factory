@@ -66,17 +66,23 @@ def test_us_east_1_lists_no_unsupported_feature() -> None:
     assert capabilities.region_feature_profile("us-east-1").unsupported_features == ()
 
 
-def test_other_full_regions_now_name_only_web_answer_as_unsupported() -> None:
-    for region in ("us-east-2", "us-west-2", "eu-west-1"):
+def test_other_full_regions_name_web_answer_first_among_their_unsupported_features() -> None:
+    # Ohio and Oregon lack only Web Answer; Ireland also lacks guardrails in policies.
+    for region in ("us-east-2", "us-west-2"):
         assert capabilities.region_feature_profile(region).unsupported_features == (
             "Amazon Bedrock AgentCore Web Answer",
         )
+    assert capabilities.region_feature_profile("eu-west-1").unsupported_features == (
+        "Amazon Bedrock AgentCore Web Answer",
+        "Amazon Bedrock Guardrails in AgentCore Policy",
+    )
 
 
-def test_reduced_regions_list_web_answer_between_search_and_registry() -> None:
+def test_reduced_regions_list_web_answer_between_search_and_guardrails() -> None:
     assert capabilities.region_feature_profile("eu-west-3").unsupported_features == (
         "Amazon Bedrock AgentCore Web Search",
         "Amazon Bedrock AgentCore Web Answer",
+        "Amazon Bedrock Guardrails in AgentCore Policy",
         "AWS Agent Registry federation",
     )
 

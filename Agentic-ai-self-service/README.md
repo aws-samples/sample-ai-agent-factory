@@ -130,13 +130,14 @@ To also export OTLP traces from every platform Lambda and deployed agent to a ba
 
 Set `AWS_REGION` to one of the seven selected release Regions; every other value is refused by `deploy.sh`, by the CDK app at synth, and by the deploy API. Production supports exactly one independently deployed AgentCore **Runtime** home Region from this set; Managed Harness and A2A are excluded from production even where AWS exposes them.
 
-| Profile | Regions | Managed Web Search | Web Answer | AWS Agent Registry | Built-in DynamoDB registry | Runtime platform V2 (opt-in) |
-|---|---|---:|---:|---:|---:|---:|
-| Full | `us-east-1` | Yes | Yes | Yes | Yes | Yes |
-| Full | `us-east-2`, `us-west-2`, `eu-west-1` | Yes | No | Yes | Yes | Yes |
-| Reduced | `eu-central-1` | No | No | Yes | Yes | Yes |
-| Reduced | `eu-west-2` | No | No | Yes | Yes | No |
-| Reduced | `eu-west-3` | No | No | No | Yes | No |
+| Profile | Regions | Managed Web Search | Web Answer | Gateway guardrails | AWS Agent Registry | Built-in DynamoDB registry | Runtime platform V2 (opt-in) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Full | `us-east-1` | Yes | Yes | Yes | Yes | Yes | Yes |
+| Full | `us-east-2`, `us-west-2` | Yes | No | Yes | Yes | Yes | Yes |
+| Full | `eu-west-1` | Yes | No | No | Yes | Yes | Yes |
+| Reduced | `eu-central-1` | No | No | No | Yes | Yes | Yes |
+| Reduced | `eu-west-2` | No | No | Yes | Yes | Yes | No |
+| Reduced | `eu-west-3` | No | No | No | No | Yes | No |
 
 Web Answer (AWS-managed, one tool call returns a synthesized answer with citations) is
 documented in US East (N. Virginia) only. Add it to a canvas as the `web_answer` tool; the
@@ -144,6 +145,23 @@ palette disables it elsewhere with the Region reason, a deploy that requests it 
 `us-east-1` is refused synchronously (HTTP 400 on the live route, 422 for an explicit
 `targetRegion`) before any resource exists, and the CloudFormation export emits the same
 connector target with a Region rule. Target-level domain include/exclude lists are a follow-up.
+
+Gateway guardrails are Amazon Bedrock Guardrails evaluated by Policy in AgentCore at the
+Gateway: a policy node's *Gateway guardrails profile* (`policyConfig.guardrails.profile`:
+`off` | `standard` | `strict`, default `off`) adds, next to the platform's Cedar permit, one
+`forbid … when guardrails {…}` policy per permitted tool and guardrail type over the tool's
+required string arguments, so a prompt-injection or jailbreak payload in a tool argument is
+denied before the tool Lambda, connector or MCP server runs and outside the agent's code.
+`standard` screens for `PROMPT_INJECTION`/`JAILBREAK` above 0.4 and reports tools it cannot
+screen (connector and MCP-server targets, tools without a required string argument);
+`strict` adds the five content-filter categories above 0.2 and refuses a deploy with an
+unscreenable tool. The Gateway role gains exactly `bedrock:InvokeGuardrailChecks`
+(resourceless, so `Resource: "*"`) only when a profile is set. AWS documents guardrails in
+policies in N. Virginia, Ohio, Oregon and London among the release Regions; a profile
+requested elsewhere is refused synchronously (HTTP 400 on the live route, 422 for an explicit
+`targetRegion`) before any resource exists. The CloudFormation export refuses a profile other
+than `off` for now. Output screening (`suppressOutput`) and JSONPath screening of served-only
+targets are follow-ups.
 
 Runtime platform V2 is how AgentCore starts a runtime (snapshot-restored sessions with
 elastic memory), not a workflow feature: every runtime defaults to V1, and a runtime node can

@@ -18,6 +18,8 @@ import {
   RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
   SUPPORTED_SINGLE_REGION_RELEASES,
   WEB_ANSWER_SUPPORTED_REGIONS,
+  GATEWAY_GUARDRAILS_SUPPORTED_REGIONS,
+  gatewayGuardrailsUnavailableReason,
   awsAgentRegistryUnavailableReason,
   getDeploymentRegion,
   getRegionFeatureProfile,
@@ -102,12 +104,19 @@ describe('regional feature profiles', () => {
 
   it('lists Web Answer as unsupported everywhere but N. Virginia, even in full Regions', () => {
     expect(getRegionFeatureProfile('us-east-1')).toMatchObject({ webAnswer: true, unsupportedFeatures: [] });
-    for (const region of ['us-east-2', 'us-west-2', 'eu-west-1']) {
+    for (const region of ['us-east-2', 'us-west-2']) {
       expect(getRegionFeatureProfile(region)).toMatchObject({
         webAnswer: false,
         unsupportedFeatures: ['Amazon Bedrock AgentCore Web Answer'],
       });
     }
+    expect(getRegionFeatureProfile('eu-west-1')).toMatchObject({
+      webAnswer: false,
+      unsupportedFeatures: [
+        'Amazon Bedrock AgentCore Web Answer',
+        'Amazon Bedrock Guardrails in AgentCore Policy',
+      ],
+    });
     expect([...WEB_ANSWER_SUPPORTED_REGIONS]).toEqual(['us-east-1']);
     expect(webAnswerUnavailableReason('us-east-1')).toBeNull();
     const reason = webAnswerUnavailableReason('eu-west-1');
@@ -126,13 +135,47 @@ describe('regional feature profiles', () => {
         releaseSupported: true,
         managedWebSearch: false,
         awsAgentRegistry: true,
-        unsupportedFeatures: [
-          'Amazon Bedrock AgentCore Web Search',
-          'Amazon Bedrock AgentCore Web Answer',
-        ],
       });
     },
   );
+
+  it('gates Gateway guardrails on the documented Region subset (London yes, Frankfurt/Ireland/Paris no)', () => {
+    expect([...GATEWAY_GUARDRAILS_SUPPORTED_REGIONS]).toEqual([
+      'ap-northeast-1',
+      'ap-southeast-2',
+      'eu-north-1',
+      'eu-west-2',
+      'us-east-1',
+      'us-east-2',
+      'us-west-2',
+    ]);
+    expect(getRegionFeatureProfile('eu-west-2')).toMatchObject({
+      gatewayGuardrails: true,
+      unsupportedFeatures: [
+        'Amazon Bedrock AgentCore Web Search',
+        'Amazon Bedrock AgentCore Web Answer',
+      ],
+    });
+    expect(getRegionFeatureProfile('eu-central-1')).toMatchObject({
+      gatewayGuardrails: false,
+      unsupportedFeatures: [
+        'Amazon Bedrock AgentCore Web Search',
+        'Amazon Bedrock AgentCore Web Answer',
+        'Amazon Bedrock Guardrails in AgentCore Policy',
+      ],
+    });
+    for (const region of ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-2']) {
+      expect(gatewayGuardrailsUnavailableReason(region)).toBeNull();
+    }
+    const reason = gatewayGuardrailsUnavailableReason('eu-west-1');
+    expect(reason).toBe(
+      "Amazon Bedrock Guardrails in AgentCore Policy are not available in Europe (Ireland) (eu-west-1). " +
+        "Set the policy node's Gateway guardrails profile to off (Cedar tool authorization still applies), " +
+        'or deploy it in one of these supported release Regions: Europe (London) (eu-west-2), ' +
+        'US East (N. Virginia) (us-east-1), US East (Ohio) (us-east-2), US West (Oregon) (us-west-2).',
+    );
+    expect(gatewayGuardrailsUnavailableReason('eu-central-1')).toMatch(/Europe \(Frankfurt\) \(eu-central-1\)/);
+  });
 
   it('keeps every optional service disabled in Paris', () => {
     expect(getRegionFeatureProfile('eu-west-3')).toMatchObject({
@@ -142,6 +185,7 @@ describe('regional feature profiles', () => {
       unsupportedFeatures: [
         'Amazon Bedrock AgentCore Web Search',
         'Amazon Bedrock AgentCore Web Answer',
+        'Amazon Bedrock Guardrails in AgentCore Policy',
         'AWS Agent Registry federation',
       ],
     });

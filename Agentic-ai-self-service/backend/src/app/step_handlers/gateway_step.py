@@ -27,6 +27,7 @@ from app.services.gateway_deployer import (
     manifest_secret_journal,
     secret_intent_journal,
 )
+from app.services.gateway_guardrails import gateway_guardrails_requested
 from app.services.gateway_name_claim import claim_account, claims_from_env
 from app.services.litellm_gateway_deployer import deploy_litellm_gateway, resolve_gateway_provider
 
@@ -480,6 +481,11 @@ def handler(event: dict, context) -> dict:
         # validate the set against the namespaces this step's role may stamp BEFORE the first
         # create call, so an unstampable key fails the step instead of stranding half a gateway.
         resource_tags = event.get("resource_tags")
+        # The policy step writes the guardrail policies; the Gateway role they run under is
+        # created HERE, so the role grant (bedrock:InvokeGuardrailChecks) is decided from the
+        # same policy_config the policy step will read. A bad profile value fails this step
+        # before any Cognito or IAM side effect rather than the policy step after them.
+        gateway_guardrails = gateway_guardrails_requested(event.get("policy_config") or {})
         artifact_bucket = step_clients.artifacts_bucket_for_event(
             event,
             platform_bucket=_get_env("ARTIFACTS_BUCKET_NAME", ""),
@@ -818,6 +824,7 @@ def handler(event: dict, context) -> dict:
                 gateway_consumers=_gateway_consumers,
                 claim_gateway_name=_claim_gateway_name,
                 resource_tags=resource_tags,
+                gateway_guardrails=gateway_guardrails,
             )
 
         if not gateway_result.get("success"):

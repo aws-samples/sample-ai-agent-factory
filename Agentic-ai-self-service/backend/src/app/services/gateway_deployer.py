@@ -61,6 +61,7 @@ from app.services.naming import (
     scoped_function_name,
     scoped_role_name,
 )
+from app.services.region_capabilities import require_gateway_guardrails_region
 from app.services.resource_ownership import (
     ACCESS_TAG_KEY,
     ACCESS_TAG_VALUE,
@@ -5298,6 +5299,7 @@ def _build_gateway_role_policy(
     gateway_name: str,
     managed_web_search: bool = False,
     managed_web_answer: bool = False,
+    gateway_guardrails: bool = False,
     obo_required: bool = False,
     owner_sub: str = "",
     partition: str = "aws",
@@ -5397,6 +5399,21 @@ def _build_gateway_role_policy(
                 "Resource": f"arn:{partition}:bedrock-agentcore:{region}:aws:tool/web-answer.v1",
             }
         )
+    if gateway_guardrails:
+        # Policy in AgentCore calls Bedrock Guardrails with forward-access-session
+        # credentials derived from THIS role ("Guardrails in policies" > Permissions).
+        # InvokeGuardrailChecks is resourceless — there is no guardrail ARN to scope
+        # against (Bedrock user guide, "Set up permissions" for InvokeGuardrailChecks),
+        # so "*" is the only resource that matches; an ARN here would never match.
+        # Still only the one action, and only when a profile asked for it.
+        statements.append(
+            {
+                "Sid": "PolicyGuardrailChecks",
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeGuardrailChecks"],
+                "Resource": "*",
+            }
+        )
     return {"Version": "2012-10-17", "Statement": statements}
 
 
@@ -5409,6 +5426,7 @@ def _gateway_role_policy_for(
     owner_sub: str,
     obo_required: bool = False,
     managed_web_answer: bool = False,
+    gateway_guardrails: bool = False,
 ) -> dict:
     parts = str(role_arn or "").split(":", 5)
     if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam" or not parts[4]:
@@ -5419,6 +5437,7 @@ def _gateway_role_policy_for(
         gateway_name=gateway_name,
         managed_web_search=managed_web_search,
         managed_web_answer=managed_web_answer,
+        gateway_guardrails=gateway_guardrails,
         obo_required=obo_required,
         owner_sub=owner_sub,
         partition=parts[1],
@@ -6217,6 +6236,7 @@ def deploy_gateway(
     gateway_consumers=None,
     claim_gateway_name=None,
     resource_tags: dict | None = None,
+    gateway_guardrails: bool = False,
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
 
@@ -6232,6 +6252,9 @@ def deploy_gateway(
             See ``_adoption_authorizer``.
         claim_gateway_name: ``(normalized gateway name) -> None``, raising to refuse. Called
             once, before any Cognito or IAM side effect. See services/gateway_name_claim.
+        gateway_guardrails: the policy node asked for a Gateway guardrails profile, so the
+            Gateway role needs ``bedrock:InvokeGuardrailChecks`` (the policy step writes the
+            guardrail policies later). Region-gated here, before any client exists.
 
     Returns:
         Dict with ``success``, ``gateway_url``, ``gateway_id``, ``gateway_name``,
@@ -6272,6 +6295,10 @@ def deploy_gateway(
             # failure carries refused_before_side_effects=True like the Web Search gate.
             require_web_answer_region(region)
             gateway_tools = without_managed_web_answer_tools(gateway_tools)
+        if gateway_guardrails:
+            # Same ordering as the two gates above: Bedrock Guardrails in AgentCore Policy
+            # are documented in a subset of Regions; refuse before any client exists.
+            require_gateway_guardrails_region(region)
 
         # Fail closed on a tool set this deployer cannot faithfully serve, BEFORE any
         # AWS side effect (no client is created yet, so refused_before_side_effects is
@@ -6463,6 +6490,7 @@ def deploy_gateway(
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
                 managed_web_answer=managed_web_answer,
+                gateway_guardrails=gateway_guardrails,
                 owner_sub=owner_sub,
                 obo_required=obo_required,
             )
@@ -6500,6 +6528,7 @@ def deploy_gateway(
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
                 managed_web_answer=managed_web_answer,
+                gateway_guardrails=gateway_guardrails,
                 owner_sub=owner_sub,
                 obo_required=obo_required,
             )

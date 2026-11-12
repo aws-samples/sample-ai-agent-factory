@@ -5126,6 +5126,20 @@ class CfnTemplateGenerator:
             or template_id in ("customer-support-assistant", "customer-support-blueprint")
         )
         has_policy = policy_config is not None
+        # Gateway guardrails are not exported yet: the export's policy provider sends plain
+        # Cedar, knows no tool argument schemas for the data paths, and has no guardrail
+        # role grant. Refused before anything is emitted, with the remedy, rather than
+        # exported as a stack whose policy engine silently has no guardrail.
+        if has_policy:
+            from app.services.gateway_guardrails import gateway_guardrails_profile
+
+            guardrails_profile = gateway_guardrails_profile(policy_config)
+            if guardrails_profile != "off":
+                raise CfnExportUnsupportedError(
+                    f"Gateway guardrails profile {guardrails_profile!r} is not supported in the "
+                    "CloudFormation export yet. Set policyConfig.guardrails.profile to 'off' for the "
+                    "export (Cedar tool authorization is still exported), or deploy live."
+                )
         has_mcp_server = mcp_server_config is not None or template_id == "mcp-server-gateway-target"
         has_evaluation = evaluation_config is not None and evaluation_config.get("enabled", False)
         # The standalone MCP gallery runtime IS a model-free FastMCP tool server: agent.py

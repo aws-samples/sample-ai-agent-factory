@@ -74,6 +74,24 @@ RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS = frozenset(
 #: (both read 2026-11-12): US East (N. Virginia) only. Fail closed everywhere else.
 WEB_ANSWER_SUPPORTED_REGIONS = frozenset({"us-east-1"})
 
+#: Regions where Policy in AgentCore can call Amazon Bedrock Guardrails from a policy
+#: (``when guardrails { BedrockGuardrails::... }``). Source: "Guardrails regional
+#: availability" in
+#: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-guardrails-in-policies.html
+#: (read 2026-11-13). Of the release Regions only N. Virginia, Ohio, Oregon and London
+#: have it; Ireland, Frankfurt and Paris do not. Fail closed everywhere else.
+GATEWAY_GUARDRAILS_SUPPORTED_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-southeast-2",
+        "eu-north-1",
+        "eu-west-2",
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+    }
+)
+
 _REGION_NAMES = {
     "eu-central-1": "Europe (Frankfurt)",
     "eu-north-1": "Europe (Stockholm)",
@@ -104,6 +122,9 @@ class RegionFeatureProfile:
     #: Web Answer is a workflow feature (a Gateway tool a canvas can request), so unlike
     #: ``runtime_platform_v2`` it IS listed in ``unsupported_features`` where absent.
     web_answer: bool = False
+    #: Bedrock Guardrails evaluated by Policy in AgentCore at the Gateway (the policy
+    #: node's *Gateway guardrails* profile). A workflow feature, so listed where absent.
+    gateway_guardrails: bool = False
 
     @property
     def unsupported_features(self) -> tuple[str, ...]:
@@ -112,6 +133,8 @@ class RegionFeatureProfile:
             features.append("Amazon Bedrock AgentCore Web Search")
         if not self.web_answer:
             features.append("Amazon Bedrock AgentCore Web Answer")
+        if not self.gateway_guardrails:
+            features.append("Amazon Bedrock Guardrails in AgentCore Policy")
         if not self.aws_agent_registry:
             features.append("AWS Agent Registry federation")
         return tuple(features)
@@ -168,6 +191,7 @@ def region_feature_profile(region: str) -> RegionFeatureProfile:
         aws_agent_registry=region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
         runtime_platform_v2=region in RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
         web_answer=region in WEB_ANSWER_SUPPORTED_REGIONS,
+        gateway_guardrails=region in GATEWAY_GUARDRAILS_SUPPORTED_REGIONS,
     )
 
 
@@ -175,6 +199,19 @@ def web_answer_region_supported(region: str) -> bool:
     """Whether AWS documents the managed Web Answer connector in ``region``."""
 
     return region in WEB_ANSWER_SUPPORTED_REGIONS
+
+
+def gateway_guardrails_region_supported(region: str) -> bool:
+    """Whether AWS documents Bedrock Guardrails in AgentCore Policy in ``region``."""
+
+    return region in GATEWAY_GUARDRAILS_SUPPORTED_REGIONS
+
+
+def require_gateway_guardrails_region(region: str) -> None:
+    """Fail before an AWS side effect when guardrails in policies are unavailable."""
+
+    if not gateway_guardrails_region_supported(region):
+        raise ValueError(feature_unavailable_message("gateway_guardrails", region))
 
 
 def runtime_platform_v2_region_supported(region: str) -> bool:
@@ -247,5 +284,13 @@ def feature_unavailable_message(feature: str, region: str) -> str:
             "Remove the Web Answer tool from this workflow (managed Web Search remains available "
             "where its own Region list allows), or deploy it in one of these supported release "
             f"Regions: {alternatives}."
+        )
+    if feature == "gateway_guardrails":
+        alternatives = _format_release_alternatives(GATEWAY_GUARDRAILS_SUPPORTED_REGIONS)
+        return (
+            f"Amazon Bedrock Guardrails in AgentCore Policy are not available in {where}. "
+            "Set the policy node's Gateway guardrails profile to off (Cedar tool authorization "
+            "still applies), or deploy it in one of these supported release Regions: "
+            f"{alternatives}."
         )
     raise ValueError(f"Unknown regional feature: {feature}")

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 
 from app.services.deletion_confirmation import wait_until_absent
@@ -32,6 +33,34 @@ logger = logging.getLogger(__name__)
 
 #: Statuses AgentCore reports once a create/update has finished (for better or worse).
 TERMINAL_STATUSES = ("ACTIVE", "CREATE_FAILED", "FAILED", "UPDATE_FAILED")
+
+#: ``CreatePolicy``/``UpdatePolicy`` carry a statement in one of two ``definition`` members.
+#: ``cedar`` takes plain Cedar. ``policy`` takes Dogwood, the Cedar-compatible language Policy
+#: in AgentCore authors guardrail and temporal policies in: a ``when guardrails {…}`` block, a
+#: ``when temporal {…}`` block, the ``suppressOutput`` effect and the ``BedrockGuardrails::``
+#: functions exist only there ("Creating a policy with guardrails", developer guide, read
+#: 2026-11-13). Every writer in this codebase picks the member through ``policy_definition``
+#: so a guardrail statement can never be sent as ``cedar`` and rejected.
+_DOGWOOD_MARKERS = (
+    re.compile(r"\bwhen\s+guardrails\s*\{"),
+    re.compile(r"\bwhen\s+temporal\s*\{"),
+    re.compile(r"\bsuppressOutput\s*\("),
+    re.compile(r"\bBedrockGuardrails::"),
+)
+
+
+def statement_needs_policy_definition(statement) -> bool:
+    """Whether ``statement`` uses a Dogwood form that only ``definition.policy`` accepts."""
+
+    text = str(statement or "")
+    return any(marker.search(text) for marker in _DOGWOOD_MARKERS)
+
+
+def policy_definition(statement) -> dict:
+    """The exact ``definition`` argument for one statement (``cedar`` or ``policy`` member)."""
+
+    member = "policy" if statement_needs_policy_definition(statement) else "cedar"
+    return {member: {"statement": str(statement or "")}}
 
 
 class PolicyStateUnreadable(RuntimeError):
@@ -56,7 +85,14 @@ def cedar_digest(statement) -> str:
 
 
 def live_statement(policy: dict | None) -> str:
-    return str((((policy or {}).get("definition") or {}).get("cedar") or {}).get("statement") or "")
+    """The statement a ``GetPolicy`` response carries, whichever definition member holds it."""
+
+    definition = (policy or {}).get("definition") or {}
+    for member in ("cedar", "policy"):
+        statement = (definition.get(member) or {}).get("statement")
+        if statement:
+            return str(statement)
+    return ""
 
 
 def policy_child_row(
@@ -137,7 +173,7 @@ def reconcile_policy_definition(
         policyEngineId=engine_id,
         policyId=policy_id,
         description={"optionalValue": description or "Reconciled to the desired policy"},
-        definition={"cedar": {"statement": desired_statement}},
+        definition=policy_definition(desired_statement),
         validationMode="IGNORE_ALL_FINDINGS",
     )
     after = read_policy_terminal(ctrl, engine_id, policy_id, attempts=attempts, delay_seconds=delay_seconds)

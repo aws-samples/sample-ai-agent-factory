@@ -1434,6 +1434,29 @@ def _reject_unsupported_runtime_platform_version_region(request: DeployRequest) 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _reject_unsupported_gateway_guardrails_region(request: DeployRequest) -> None:
+    """Reject a Gateway guardrails profile outside its effective live-deployment Region.
+
+    Same contract as the gates above: ``DeployRequest`` refuses an EXPLICIT unsupported
+    ``targetRegion`` (and the unknown-profile, disabled-engine and strict-blocker cases); this
+    resolves an omitted Region to the platform's home Region for the live route only, before any
+    deployment/version row or AWS resource. Ireland, Frankfurt and Paris are release Regions
+    without guardrails in policies, so this is the gate a default-Region deploy there hits.
+    """
+    if (request.deployment_mode or "runtime") == "harness":
+        return
+    from app.services.gateway_guardrails import gateway_guardrails_requested
+    from app.services.region_capabilities import require_gateway_guardrails_region
+
+    if not gateway_guardrails_requested(request.policy_config):
+        return
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_gateway_guardrails_region(effective_region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _reject_missing_provider_credential(request: DeployRequest) -> None:
     """Reject a live runtime whose first model call would be unauthenticated."""
     if (
@@ -1854,6 +1877,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_unsupported_managed_web_search_region(request)
     _reject_unsupported_web_answer_region(request)
     _reject_unsupported_runtime_platform_version_region(request)
+    _reject_unsupported_gateway_guardrails_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)
 

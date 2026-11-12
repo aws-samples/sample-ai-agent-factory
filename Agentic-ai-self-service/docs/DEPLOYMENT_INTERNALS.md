@@ -853,6 +853,12 @@ All Lambda functions include `PYTHONPATH=/var/task/src:/var/task:/var/task/lib` 
 - Managed Web Answer: likewise never implied. Add `web_answer` explicitly in `us-east-1`; it
   becomes an `AmazonWebAnswer` connector target (default connector version, no Lambda) and the
   Gateway role gains `bedrock-agentcore:InvokeWebAnswer` on the service-owned tool ARN.
+- Gateway guardrails: never implied. A policy node with `guardrails.profile` `standard` or
+  `strict` makes the policy step add one `forbid … when guardrails {…}` policy per permitted
+  Lambda tool over its required string arguments (sent as `definition.policy`, the Dogwood
+  member) next to the `allow_permitted_tools` permit, and makes the gateway step grant the
+  Gateway role `bedrock:InvokeGuardrailChecks`. The `policy_result.gateway_guardrails` receipt
+  lists the policy names, screened tools and unscreened tools with reasons.
 - Auth: Cognito OAuth2 (client_credentials grant)
 - Components: Runtime + Gateway + Identity (16 CFN resources)
 

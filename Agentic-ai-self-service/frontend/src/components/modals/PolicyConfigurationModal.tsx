@@ -5,8 +5,9 @@
 
 import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
-import { TextField, FormSection } from './FormFields';
-import type { PolicyConfiguration, PolicyRule } from '../../types/components';
+import { TextField, FormSection, SelectField } from './FormFields';
+import type { GatewayGuardrailsProfile, PolicyConfiguration, PolicyRule } from '../../types/components';
+import { gatewayGuardrailsUnavailableReason } from '../../utils/awsRegion';
 
 // ============================================================================
 // Props Interface
@@ -78,6 +79,14 @@ export function PolicyConfigurationModal({
     setConfig({ ...createDefaultPolicyConfig(), ...initialConfig });
   }
 
+  // Gateway guardrails are Region-gated by AWS; the backend refuses a profile before any
+  // side effect, and this control tells the user the same thing before they press Deploy.
+  const guardrailsUnavailableReason = useMemo(
+    () => gatewayGuardrailsUnavailableReason(),
+    [],
+  );
+  const guardrailsProfile: GatewayGuardrailsProfile = config.guardrails?.profile ?? 'off';
+
   const validationErrors = useMemo(() => {
     const errors: ValidationError[] = [];
     if (!config.name.trim()) {
@@ -86,8 +95,16 @@ export function PolicyConfigurationModal({
     if (config.rules.length === 0) {
       errors.push({ field: 'rules', message: 'At least one policy rule is required' });
     }
+    if (guardrailsProfile !== 'off' && guardrailsUnavailableReason) {
+      errors.push({ field: 'guardrails', message: guardrailsUnavailableReason });
+    }
     return errors;
-  }, [config]);
+  }, [config, guardrailsProfile, guardrailsUnavailableReason]);
+
+  const getFieldError = useCallback(
+    (field: string) => validationErrors.find((e) => e.field === field)?.message,
+    [validationErrors],
+  );
 
   const updateField = useCallback(<K extends keyof PolicyConfiguration>(field: K, value: PolicyConfiguration[K]) => {
     setConfig((prev) => ({ ...prev, [field]: value }));
@@ -162,6 +179,40 @@ export function PolicyConfigurationModal({
                 The default effect when no policy matches
               </p>
             </div>
+          </FormSection>
+          <FormSection
+            title="Gateway Guardrails"
+            description="Amazon Bedrock Guardrails evaluated by Policy in AgentCore on every tool call's string arguments, before the tool runs and outside the agent's code. The agent's own guardrail stays as defense in depth."
+          >
+            <SelectField
+              id="policy-gateway-guardrails"
+              label="Gateway guardrails profile"
+              value={guardrailsProfile}
+              onChange={(value) =>
+                updateField(
+                  'guardrails',
+                  value === 'standard' || value === 'strict' ? { profile: value } : undefined,
+                )
+              }
+              options={[
+                { value: 'off', label: 'Off - Cedar tool authorization only' },
+                {
+                  value: 'standard',
+                  label: 'Standard - deny prompt injection / jailbreak in tool arguments (score > 0.4)',
+                  disabled: guardrailsUnavailableReason !== null,
+                },
+                {
+                  value: 'strict',
+                  label: 'Strict - Standard + harmful content (score > 0.2); every tool must be screenable',
+                  disabled: guardrailsUnavailableReason !== null,
+                },
+              ]}
+              error={getFieldError('guardrails')}
+              helpText={
+                guardrailsUnavailableReason ??
+                'Screens the required string arguments of each permitted tool. Tools without one (or on connector and MCP-server targets) are reported as unscreened under Standard and refused under Strict. Adds one Bedrock Guardrails evaluation per tool call.'
+              }
+            />
           </FormSection>
         </div>
       ),
