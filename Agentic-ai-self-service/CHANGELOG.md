@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security — certifi 2026.10.23 in every shipped Python dependency set
+
+- GitHub advisory (critical, Dependabot alerts on `backend/uv.lock` and
+  `backend/requirements-lambda.txt`): certifi before 2026.10.18 bundles emSign root CAs whose
+  intermediate CA keys were compromised. Moved `certifi` 2026.7.22 → 2026.10.23 in the four
+  places this project pins it: `backend/uv.lock` (`uv lock --upgrade-package certifi`, no other
+  package moved), `backend/requirements-lambda.txt` (regenerated with the exact command recorded
+  in its header; hashes refreshed, no other pin moved), `backend/agentcore-deps-constraints.txt`
+  (the lock every AgentCore Runtime bundle is validated against), and the two mirrors of that lock
+  (`DEPENDENCY_BUNDLE_CONSTRAINTS` in `cfn_template_generator.py` and the zlib+base85 snapshot
+  with its SHA-256 in `python_exporter.py`), so the customer-export recipes carry the same pins.
+  The dependency-consistency suites (`test_downloadable_asset_contract`, `test_python_exporter`,
+  `test_reproducible_dependency_artifacts`, bundle pin parity) pass; the next `dev` deploy
+  rebuilds all eleven runtime bundles against the new constraint.
+- Still open from the same Dependabot scan, all medium or low and not fixed here: `mcp`
+  (< 2.2.0, four advisories) and `opentelemetry-api` (≤ 1.45.0) in `backend/uv.lock`;
+  `minimatch` (< 11.0.1) and `fast-xml-parser` (≤ 5.11.2) in `frontend/package-lock.json`.
+  `mcp` moves only through a reviewed lock update with the generated-agent import and
+  multi-provider merge tests (see the note in `agentcore-deps-constraints.txt`).
+
 ### Added — Gateway guardrails: Bedrock Guardrails evaluated by Policy in AgentCore (`policyConfig.guardrails.profile`)
 
 - A policy node can set a *Gateway guardrails profile* (`off` default | `standard` | `strict`).

@@ -3760,7 +3760,7 @@ DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
     "boto3-stubs==1.43.108",
     "botocore==1.43.109",
     "botocore-stubs==1.43.67",
-    "certifi==2026.7.22",
+    "certifi==2026.10.23",
     "cffi==2.1.1",
     "charset-normalizer==3.5.2",
     "click==8.5.0",
