@@ -570,6 +570,28 @@ No candidate is production-ready until its current-commit run finalizes and veri
 Passing unit tests, synthesis, a prior revision's AWS run, or evidence outside
 the declared production release envelope is insufficient.
 
+## Feature flags
+
+Surfaces that are not ready for every environment ship behind a flag so partial work can merge
+to `main`. Flags live in one SSM parameter per environment,
+`/agentcore-workflow/<env>/platform-features`, a JSON object of booleans that the stack creates
+as `{}` (every flag off) and never rewrites afterwards. Operators flip a flag with
+
+```bash
+aws ssm put-parameter --name /agentcore-workflow/dev/platform-features \
+  --type String --overwrite --value '{"platformFlagsCanary": true}'
+```
+
+and it lands within 60 seconds (`FEATURE_FLAGS_TTL_SECONDS`), no redeploy. The backend fails
+closed: a flag is on only for literal `true` under a name the deployed build knows
+(`backend/src/app/services/feature_flags.py`, `KNOWN_FEATURE_FLAGS`); a missing parameter, an
+SSM error, a malformed value, an unknown key or a non-boolean value all mean off, and
+`GET /api/config/features` reports the keys it ignored. A flagged-off route answers the same
+`404 {"detail": "Not Found"}` as a route that does not exist, to every caller, before the scope
+check. `platformFlagsCanary` gates only `GET /api/config/features/canary`; flip it to prove an
+environment's flag plumbing. Local development reads the same JSON from the `FEATURE_FLAGS`
+environment variable.
+
 ## Accessing the Platform
 
 After deployment completes, the script prints two URLs:

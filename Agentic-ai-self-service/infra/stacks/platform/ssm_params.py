@@ -64,6 +64,20 @@ def build_ssm_parameters(
         description="DynamoDB table name for flow persistence",
     )
 
+    # Platform feature flags (backend/src/app/services/feature_flags.py). Created EMPTY
+    # (every known flag off) and then operator-managed with
+    # `aws ssm put-parameter --name <this> --type String --overwrite --value '{"flag": true}'`.
+    # CloudFormation only rewrites a parameter when its template value changes, and this
+    # template value never does, so operator-set values survive redeploys; a flag the
+    # backend does not know is ignored and reported, never acted on.
+    ssm.StringParameter(
+        stack,
+        "PlatformFeatureFlagsParam",
+        parameter_name=f"{prefix}/platform-features",
+        string_value="{}",
+        description="Platform feature flags: JSON object of booleans; absent or unknown flag = off",
+    )
+
     # Platform OTEL defaults — only written when the feature is enabled.
     # Backend reads these via services.observability.get_platform_observability_defaults().
     if otel.enabled:

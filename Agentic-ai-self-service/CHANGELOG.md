@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — platform feature flags (`/agentcore-workflow/{env}/platform-features`, `GET /api/config/features`)
+
+- Every surface that is not ready for every environment can now ship behind a flag, so partial
+  work merges to `main`. Flags are a JSON object of booleans in one SSM parameter the stack creates
+  as `{}` (all off) and operators manage with `aws ssm put-parameter --overwrite`; CloudFormation
+  never rewrites it after creation, so operator values survive redeploys. The backend
+  (`services/feature_flags.py`) resolves them per Lambda container with a 60 s TTL
+  (`FEATURE_FLAGS_TTL_SECONDS`) and **fails closed**: a flag is on only for literal `true` under a
+  name in the build's `KNOWN_FEATURE_FLAGS` registry; a missing parameter, an SSM error, a
+  non-JSON or non-object value, an unknown key or a non-boolean value all resolve to off, and the
+  unknown / non-boolean keys are reported in `ignored` so a typo is visible instead of silent.
+- `GET /api/config/features` (JWT access token + `agent:read`, which every builder holds) returns
+  `{features, source, parameter, ignored, ttlSeconds, refreshedAt, descriptions}`. A flagged-off
+  route is declared with `Depends(require_feature("<flag>"))` placed BEFORE `require_scopes` and
+  answers the exact `404 {"detail": "Not Found"}` of a nonexistent route to every caller (a 403
+  first would reveal the route exists). `require_feature` refuses an unregistered name at import
+  time. API Gateway route `GET /api/config/{proxy+}` → workflow Lambda, access-token scope enforced.
+- `platformFlagsCanary` is the first registered flag: it gates `GET /api/config/features/canary`
+  (404 → 200 when flipped) and no product feature, so an environment's flag plumbing can be
+  proven end to end. Local development reads the same JSON from the `FEATURE_FLAGS` env var.
+- Frontend: `useFeatureFlags()` (fetches once per signed-in session through `authFetch`; a flag is
+  off while loading, after an error, and for any name this build does not know) and
+  `<FeatureGate state flag>`; `KNOWN_FEATURE_FLAGS` mirrors the backend registry. The backend 404
+  is the control; hiding the surface is a courtesy.
+- Tests: `backend/tests/test_feature_flags.py` (33: parsing matrix, every failure source, TTL
+  cache, dependency ordering, exact 404 parity with a nonexistent route, RBAC under an injected
+  Lambda JWT event, router mount) with ten mutation fixtures that each break the suite; infra
+  route-parity / access-token-only / stack tests cover the new route and parameter; frontend
+  parser, gate and unauthenticated-call tests.
+
 ### Security — certifi 2026.10.23 in every shipped Python dependency set
 
 - GitHub advisory (critical, Dependabot alerts on `backend/uv.lock` and
