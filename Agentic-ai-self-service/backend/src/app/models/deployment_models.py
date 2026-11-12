@@ -1098,6 +1098,22 @@ class DeployRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_web_answer_region(self) -> "DeployRequest":
+        """Reject Web Answer for an explicit Region that does not offer it.
+
+        Same shape as the Web Search check above; the live route resolves an omitted
+        ``targetRegion`` to the platform's home Region and re-checks there.
+        """
+
+        if (self.deployment_mode or "runtime") == "harness":
+            return self
+        from ..services.managed_web_answer import managed_web_answer_requested, require_web_answer_region
+
+        if managed_web_answer_requested(self.template_id, self.gateway_tools) and self.target_region:
+            require_web_answer_region(self.target_region)
+        return self
+
+    @model_validator(mode="after")
     def _check_runtime_platform_version_region(self) -> "DeployRequest":
         """Refuse Runtime platform V2 for an explicit Region that does not offer it.
 

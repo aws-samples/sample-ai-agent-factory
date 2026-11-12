@@ -1392,6 +1392,26 @@ def _reject_unsupported_managed_web_search_region(request: DeployRequest) -> Non
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _reject_unsupported_web_answer_region(request: DeployRequest) -> None:
+    """Reject Web Answer outside its effective live-deployment Region (us-east-1 today).
+
+    Same contract as the Web Search gate above: the shared model refuses an EXPLICIT
+    unsupported ``targetRegion``; this resolves the omitted value to the platform's home
+    Region for the live route only, before any deployment/version row or AWS resource.
+    """
+    if (request.deployment_mode or "runtime") == "harness":
+        return
+    from app.services.managed_web_answer import managed_web_answer_requested, require_web_answer_region
+
+    if not managed_web_answer_requested(request.template_id, request.gateway_tools):
+        return
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_web_answer_region(effective_region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _reject_unsupported_runtime_platform_version_region(request: DeployRequest) -> None:
     """Reject Runtime platform V2 outside its effective live-deployment Region.
 
@@ -1832,6 +1852,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
     _reject_unsupported_release_region(request)
     _reject_unsupported_managed_web_search_region(request)
+    _reject_unsupported_web_answer_region(request)
     _reject_unsupported_runtime_platform_version_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)

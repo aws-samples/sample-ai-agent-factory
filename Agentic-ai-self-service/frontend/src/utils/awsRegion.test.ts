@@ -17,6 +17,7 @@ import {
   MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
   RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
   SUPPORTED_SINGLE_REGION_RELEASES,
+  WEB_ANSWER_SUPPORTED_REGIONS,
   awsAgentRegistryUnavailableReason,
   getDeploymentRegion,
   getRegionFeatureProfile,
@@ -27,6 +28,7 @@ import {
   paletteToolUnavailableReason,
   runtimePlatformV2UnavailableReason,
   templateUnavailableReason,
+  webAnswerUnavailableReason,
 } from './awsRegion';
 
 describe('getRegionPrefixFor', () => {
@@ -94,30 +96,52 @@ describe('regional feature profiles', () => {
         releaseSupported: true,
         managedWebSearch: true,
         awsAgentRegistry: true,
-        unsupportedFeatures: [],
       });
     },
   );
 
+  it('lists Web Answer as unsupported everywhere but N. Virginia, even in full Regions', () => {
+    expect(getRegionFeatureProfile('us-east-1')).toMatchObject({ webAnswer: true, unsupportedFeatures: [] });
+    for (const region of ['us-east-2', 'us-west-2', 'eu-west-1']) {
+      expect(getRegionFeatureProfile(region)).toMatchObject({
+        webAnswer: false,
+        unsupportedFeatures: ['Amazon Bedrock AgentCore Web Answer'],
+      });
+    }
+    expect([...WEB_ANSWER_SUPPORTED_REGIONS]).toEqual(['us-east-1']);
+    expect(webAnswerUnavailableReason('us-east-1')).toBeNull();
+    const reason = webAnswerUnavailableReason('eu-west-1');
+    expect(reason).toMatch(/Europe \(Ireland\) \(eu-west-1\)/);
+    expect(reason).toMatch(/Remove the Web Answer tool/);
+    expect(reason!.split('supported release Regions:')[1]).toContain('us-east-1');
+    expect(reason!.split('supported release Regions:')[1]).not.toContain('eu-west-1');
+    expect(paletteToolUnavailableReason('web_answer', 'eu-west-1')).toBe(reason);
+    expect(paletteToolUnavailableReason('web_answer', 'us-east-1')).toBeNull();
+  });
+
   it.each(['eu-central-1', 'eu-west-2'])(
-    '%s enables Registry federation but reports Web Search unavailable',
+    '%s enables Registry federation but reports Web Search and Web Answer unavailable',
     (region) => {
       expect(getRegionFeatureProfile(region)).toMatchObject({
         releaseSupported: true,
         managedWebSearch: false,
         awsAgentRegistry: true,
-        unsupportedFeatures: ['Amazon Bedrock AgentCore Web Search'],
+        unsupportedFeatures: [
+          'Amazon Bedrock AgentCore Web Search',
+          'Amazon Bedrock AgentCore Web Answer',
+        ],
       });
     },
   );
 
-  it('keeps both optional services disabled in Paris', () => {
+  it('keeps every optional service disabled in Paris', () => {
     expect(getRegionFeatureProfile('eu-west-3')).toMatchObject({
       releaseSupported: true,
       managedWebSearch: false,
       awsAgentRegistry: false,
       unsupportedFeatures: [
         'Amazon Bedrock AgentCore Web Search',
+        'Amazon Bedrock AgentCore Web Answer',
         'AWS Agent Registry federation',
       ],
     });

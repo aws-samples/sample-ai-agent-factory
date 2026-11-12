@@ -39,6 +39,13 @@ from app.services.gateway_mutation_lock import (
 )
 from app.services.gateway_update import NO_CLIENT_ALLOWED, preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
+from app.services.managed_web_answer import (
+    MANAGED_WEB_ANSWER_TARGET_NAME,
+    managed_web_answer_requested,
+    managed_web_answer_target_params,
+    require_web_answer_region,
+    without_managed_web_answer_tools,
+)
 from app.services.managed_web_search import (
     MANAGED_WEB_SEARCH_TARGET_NAME,
     MANAGED_WEB_SEARCH_TOOL_IDS,
@@ -5290,6 +5297,7 @@ def _build_gateway_role_policy(
     account_id: str,
     gateway_name: str,
     managed_web_search: bool = False,
+    managed_web_answer: bool = False,
     obo_required: bool = False,
     owner_sub: str = "",
     partition: str = "aws",
@@ -5377,6 +5385,18 @@ def _build_gateway_role_policy(
                 "Resource": f"arn:{partition}:bedrock-agentcore:{region}:aws:tool/web-search.v1",
             }
         )
+    if managed_web_answer:
+        # Service-owned ARN checked per request (AgentCore developer guide, "Add a
+        # Connector target with Web Answer"). No bedrock:InvokeModel: Web Answer runs
+        # its own model; the agent's model runs under the agent's identity.
+        statements.append(
+            {
+                "Sid": "ManagedWebAnswer",
+                "Effect": "Allow",
+                "Action": ["bedrock-agentcore:InvokeWebAnswer"],
+                "Resource": f"arn:{partition}:bedrock-agentcore:{region}:aws:tool/web-answer.v1",
+            }
+        )
     return {"Version": "2012-10-17", "Statement": statements}
 
 
@@ -5388,6 +5408,7 @@ def _gateway_role_policy_for(
     managed_web_search: bool,
     owner_sub: str,
     obo_required: bool = False,
+    managed_web_answer: bool = False,
 ) -> dict:
     parts = str(role_arn or "").split(":", 5)
     if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam" or not parts[4]:
@@ -5397,6 +5418,7 @@ def _gateway_role_policy_for(
         account_id=parts[4],
         gateway_name=gateway_name,
         managed_web_search=managed_web_search,
+        managed_web_answer=managed_web_answer,
         obo_required=obo_required,
         owner_sub=owner_sub,
         partition=parts[1],
@@ -6244,6 +6266,12 @@ def deploy_gateway(
             # migration alias for the managed connector, never a Lambda
             # tool backed by unsupported HTML scraping.
             gateway_tools = without_managed_web_search_tools(gateway_tools)
+        managed_web_answer = managed_web_answer_requested(template_id, gateway_tools)
+        if managed_web_answer:
+            # us-east-1 only today. Refused here, before any client exists, so the
+            # failure carries refused_before_side_effects=True like the Web Search gate.
+            require_web_answer_region(region)
+            gateway_tools = without_managed_web_answer_tools(gateway_tools)
 
         # Fail closed on a tool set this deployer cannot faithfully serve, BEFORE any
         # AWS side effect (no client is created yet, so refused_before_side_effects is
@@ -6434,6 +6462,7 @@ def deploy_gateway(
                 region=region,
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
+                managed_web_answer=managed_web_answer,
                 owner_sub=owner_sub,
                 obo_required=obo_required,
             )
@@ -6470,6 +6499,7 @@ def deploy_gateway(
                 region=region,
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
+                managed_web_answer=managed_web_answer,
                 owner_sub=owner_sub,
                 obo_required=obo_required,
             )
@@ -6814,6 +6844,16 @@ def deploy_gateway(
                 update_existing=True,
             )
             logger.info("AWS-managed Web Search target deployed")
+        if managed_web_answer:
+            web_answer_params = managed_web_answer_target_params(gateway["gatewayId"])
+            _create_gateway_target_with_retry(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                MANAGED_WEB_ANSWER_TARGET_NAME,
+                web_answer_params,
+                update_existing=True,
+            )
+            logger.info("AWS-managed Web Answer target deployed")
 
         # Step 3b: Create MCP Server Runtime target (if provided)
         if mcp_server_runtime_arn:

@@ -67,6 +67,13 @@ RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS = frozenset(
     }
 )
 
+#: Regions where AgentCore Web Answer (synthesized, cited answers over the managed web
+#: index) is documented. Source: "Add a Connector target with Web Answer" in
+#: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html
+#: and the launch note https://aws.amazon.com/about-aws/whats-new/2026/11/web-answer-amazon-bedrock/
+#: (both read 2026-11-12): US East (N. Virginia) only. Fail closed everywhere else.
+WEB_ANSWER_SUPPORTED_REGIONS = frozenset({"us-east-1"})
+
 _REGION_NAMES = {
     "eu-central-1": "Europe (Frankfurt)",
     "eu-north-1": "Europe (Stockholm)",
@@ -94,12 +101,17 @@ class RegionFeatureProfile:
     #: feature a workflow can request, so it is reported here for the UI's platform-version
     #: control but deliberately kept out of ``unsupported_features``.
     runtime_platform_v2: bool = False
+    #: Web Answer is a workflow feature (a Gateway tool a canvas can request), so unlike
+    #: ``runtime_platform_v2`` it IS listed in ``unsupported_features`` where absent.
+    web_answer: bool = False
 
     @property
     def unsupported_features(self) -> tuple[str, ...]:
         features: list[str] = []
         if not self.managed_web_search:
             features.append("Amazon Bedrock AgentCore Web Search")
+        if not self.web_answer:
+            features.append("Amazon Bedrock AgentCore Web Answer")
         if not self.aws_agent_registry:
             features.append("AWS Agent Registry federation")
         return tuple(features)
@@ -155,7 +167,14 @@ def region_feature_profile(region: str) -> RegionFeatureProfile:
         managed_web_search=region in MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
         aws_agent_registry=region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
         runtime_platform_v2=region in RUNTIME_PLATFORM_V2_SUPPORTED_REGIONS,
+        web_answer=region in WEB_ANSWER_SUPPORTED_REGIONS,
     )
+
+
+def web_answer_region_supported(region: str) -> bool:
+    """Whether AWS documents the managed Web Answer connector in ``region``."""
+
+    return region in WEB_ANSWER_SUPPORTED_REGIONS
 
 
 def runtime_platform_v2_region_supported(region: str) -> bool:
@@ -220,5 +239,13 @@ def feature_unavailable_message(feature: str, region: str) -> str:
             f"AgentCore Runtime platform version V2 is not available in {where}. "
             "Deploy this runtime on platform version V1 (the default) here, or choose one of "
             f"these supported release Regions for V2: {alternatives}."
+        )
+    if feature == "web_answer":
+        alternatives = _format_release_alternatives(WEB_ANSWER_SUPPORTED_REGIONS)
+        return (
+            f"Amazon Bedrock AgentCore Web Answer is not available in {where}. "
+            "Remove the Web Answer tool from this workflow (managed Web Search remains available "
+            "where its own Region list allows), or deploy it in one of these supported release "
+            f"Regions: {alternatives}."
         )
     raise ValueError(f"Unknown regional feature: {feature}")

@@ -78,7 +78,13 @@ def test_full_release_regions_enable_both_optional_services() -> None:
         assert profile.release_supported is True
         assert profile.managed_web_search is True
         assert profile.aws_agent_registry is True
-        assert profile.unsupported_features == ()
+    # Web Answer (2026-11) is documented in N. Virginia only, so it is the one optional
+    # tool a "full" Region other than us-east-1 still names as unsupported.
+    assert capabilities.region_feature_profile("us-east-1").unsupported_features == ()
+    for region in ("us-east-2", "us-west-2", "eu-west-1"):
+        assert capabilities.region_feature_profile(region).unsupported_features == (
+            "Amazon Bedrock AgentCore Web Answer",
+        )
 
 
 def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
@@ -89,7 +95,10 @@ def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
         assert profile.release_supported is True
         assert profile.managed_web_search is False
         assert profile.aws_agent_registry is True
-        assert profile.unsupported_features == ("Amazon Bedrock AgentCore Web Search",)
+        assert profile.unsupported_features == (
+            "Amazon Bedrock AgentCore Web Search",
+            "Amazon Bedrock AgentCore Web Answer",
+        )
 
     paris = capabilities.region_feature_profile("eu-west-3")
     assert entries["eu-west-3"]["profile"] == "reduced"
@@ -98,6 +107,7 @@ def test_reduced_release_regions_have_capability_accurate_profiles() -> None:
     assert paris.aws_agent_registry is False
     assert paris.unsupported_features == (
         "Amazon Bedrock AgentCore Web Search",
+        "Amazon Bedrock AgentCore Web Answer",
         "AWS Agent Registry federation",
     )
 

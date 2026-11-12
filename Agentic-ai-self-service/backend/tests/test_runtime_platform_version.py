@@ -72,9 +72,11 @@ def test_other_regions_are_not_inferred_to_have_v2(region: str) -> None:
 
 
 def test_v2_availability_does_not_change_the_customer_facing_unsupported_feature_list() -> None:
-    # London has Agent Registry but neither Web Search nor V2; only product features are listed.
+    # London has Agent Registry but neither Web Search, Web Answer nor V2; only product
+    # features are listed, never the platform version.
     assert capabilities.region_feature_profile("eu-west-2").unsupported_features == (
         "Amazon Bedrock AgentCore Web Search",
+        "Amazon Bedrock AgentCore Web Answer",
     )
 
 

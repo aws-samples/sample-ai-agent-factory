@@ -850,6 +850,9 @@ All Lambda functions include `PYTHONPATH=/var/task/src:/var/task:/var/task/lib` 
 - Managed Web Search: intentionally not implied, so this generic template remains deployable
   in reduced-profile Regions. Add `web_search` explicitly in a supported Region, or use
   Template 1 when managed Web Search is required.
+- Managed Web Answer: likewise never implied. Add `web_answer` explicitly in `us-east-1`; it
+  becomes an `AmazonWebAnswer` connector target (default connector version, no Lambda) and the
+  Gateway role gains `bedrock-agentcore:InvokeWebAnswer` on the service-owned tool ARN.
 - Auth: Cognito OAuth2 (client_credentials grant)
 - Components: Runtime + Gateway + Identity (16 CFN resources)
 

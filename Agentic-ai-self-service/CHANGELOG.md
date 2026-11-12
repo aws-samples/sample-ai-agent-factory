@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — AWS-managed Web Answer as a Gateway tool (`web_answer`, US East (N. Virginia))
+
+- A second managed connector beside Web Search: `web_answer` on a canvas becomes an
+  `AmazonWebAnswer` Gateway target (`connectorId: web-answer`, configuration `WebAnswer`,
+  `GATEWAY_IAM_ROLE`), and the Gateway role gains exactly
+  `bedrock-agentcore:InvokeWebAnswer` on the service-owned
+  `arn:<partition>:bedrock-agentcore:<region>:aws:tool/web-answer.v1` (no `bedrock:InvokeModel`;
+  Web Answer runs its own model). One tool call returns a synthesized answer with citations;
+  the agent needs no search-retrieve-synthesize pipeline. `backend/src/app/services/managed_web_answer.py`.
+- No connector version is pinned: AWS documents Web Answer on the connector's current default
+  version, so the live request and the export send none, and the version the service resolved is
+  read back from `GetGatewayTarget` as evidence. (Web Search keeps its `1.2.0` pin and custom
+  resource; Web Answer needs neither, so the CloudFormation export emits a NATIVE
+  `AWS::BedrockAgentCore::GatewayTarget` connector target plus a `WebAnswerRegion` rule.)
+- Region gate, fail-closed before any side effect: `WEB_ANSWER_SUPPORTED_REGIONS = {us-east-1}`
+  (`region_capabilities`). Refused at the request model for an explicit `targetRegion` (422),
+  at the live route for the resolved home Region (400), and inside the deployer before any
+  client exists. "Amazon Bedrock AgentCore Web Answer" now appears in
+  `RegionFeatureProfile.unsupported_features` everywhere else, including the full-profile
+  Regions `us-east-2`, `us-west-2` and `eu-west-1`; the UI palette disables the tool with the
+  reason and the gallery banner names it. Cedar: the export derives `AmazonWebAnswer___WebAnswer`.
+- NL agent generation (`agent_generator`) may now pick `web_answer` for "a direct researched
+  answer with citations".
+- Tests: `backend/tests/test_managed_web_answer.py` (Region contract, SDK-model-validated
+  target request, role policy, deployer ordering, admission gates, export parity) with nine
+  mutation fixtures that each break the suite; frontend twins in `awsRegion.test.ts`, palette
+  and gallery accessibility tests. Not in this change: target-level domain include/exclude
+  lists and a Web Answer gallery template.
+
 ### Added — opt-in AgentCore Runtime platform version V2
 
 - `RuntimeConfig.platformVersion` (`"V1"` | `"V2"`, default absent = service default V1) is
