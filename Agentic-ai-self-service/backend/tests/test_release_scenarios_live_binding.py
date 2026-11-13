@@ -13,6 +13,7 @@ import argparse
 import base64
 import hashlib
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -118,6 +119,13 @@ def sealed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         },
     )
     return binding, observed, target, published
+
+
+def test_published_asset_pins_every_read_to_the_bound_account():
+    source = inspect.getsource(live._published_asset)
+    assert source.count("ExpectedBucketOwner=binding.account_id") == 2
+    assert "s3.head_object(" in source
+    assert "s3.get_object(" in source
 
 
 def test_the_candidate_binds_and_the_comparison_is_reported(sealed):

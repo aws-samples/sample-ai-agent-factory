@@ -534,7 +534,9 @@ tracked-file secret scanning, high-severity npm dependency audit, and the exact
 customer-download suite over both authenticated export endpoints, the standalone Python
 exporter, CloudFormation export/deployability, staging/isolation, and workflow validation.
 That suite pins cfn-lint 1.57.0, Checkov 3.3.1, Terraform 1.14.6, ShellCheck 0.11.0,
-and actionlint 1.7.12. The infrastructure nag gate reads each stack's CLI-consumed
+and actionlint 1.7.12. Published CDK asset reads pin `ExpectedBucketOwner` to the
+run-bound account before comparing object bytes with the sealed assembly. The infrastructure
+nag gate reads each stack's CLI-consumed
 `additionalMetadataFile` directly rather than depending on import-order-sensitive jsii
 conversion through overlapping generated CDK schema distributions.
 

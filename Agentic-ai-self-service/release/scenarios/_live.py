@@ -345,19 +345,29 @@ def _published_asset(binding: RunBinding, key: str, cache_dir: Path) -> bytes:
     """Bytes of s3://cdk-hnb659fds-assets-<account>-<region>/<key>, cached by ETag + size."""
     bucket = f"cdk-hnb659fds-assets-{binding.account_id}-{binding.region}"
     s3 = boto3_session(binding.region).client("s3")
-    head = s3.head_object(Bucket=bucket, Key=key)
+    head = s3.head_object(
+        Bucket=bucket,
+        Key=key,
+        ExpectedBucketOwner=binding.account_id,
+    )
     etag, size = head["ETag"], int(head["ContentLength"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / key
     stamp = cache_dir / f"{key}.etag"
     if cached.is_file() and stamp.is_file() and stamp.read_text() == f"{etag} {size}" and cached.stat().st_size == size:
         return cached.read_bytes()
-    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-    if len(body) != size:
-        raise ScenarioFailed(f"published asset {key} is {len(body)} bytes, HEAD said {size}")
-    cached.write_bytes(body)
+    response = s3.get_object(
+        Bucket=bucket,
+        Key=key,
+        ExpectedBucketOwner=binding.account_id,
+    )
+    with response["Body"] as body:
+        data = body.read()
+    if len(data) != size:
+        raise ScenarioFailed(f"published asset {key} is {len(data)} bytes, HEAD said {size}")
+    cached.write_bytes(data)
     stamp.write_text(f"{etag} {size}")
-    return body
+    return data
 
 
 def bind_lambda_code(
