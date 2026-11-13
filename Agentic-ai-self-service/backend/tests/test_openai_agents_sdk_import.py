@@ -291,7 +291,7 @@ def test_requirements_pin_the_verified_sdk_and_the_platform_runtime_versions() -
 # --------------------------------------------------------------------------- package
 
 
-def test_zip_is_byte_reproducible_regardless_of_mtimes_and_creation_order(tmp_path: Path) -> None:
+def test_zip_is_byte_reproducible_regardless_of_mtimes_and_creation_order(tmp_path: Path, monkeypatch) -> None:
     left, right = tmp_path / "left", tmp_path / "right"
     for root, order in ((left, ("a.py", "b.py", "sub/c.py")), (right, ("sub/c.py", "b.py", "a.py"))):
         for rel in order:
@@ -309,6 +309,18 @@ def test_zip_is_byte_reproducible_regardless_of_mtimes_and_creation_order(tmp_pa
     with zipfile.ZipFile(left_zip) as archive:
         assert [i.filename for i in archive.infolist()] == ["a.py", "b.py", "sub/c.py"]
         assert all(i.date_time == (1980, 1, 1, 0, 0, 0) for i in archive.infolist())
+
+    # The filesystem may hand the same files back in the same order on every run, which would let an
+    # unsorted writer pass the comparison above by luck. Force a reversed enumeration and demand the
+    # identical bytes.
+    class ReversedEnumeration(type(Path())):
+        def rglob(self, pattern):
+            return reversed(list(super().rglob(pattern)))
+
+    monkeypatch.setattr(imp, "Path", ReversedEnumeration)
+    reversed_zip = tmp_path / "reversed.zip"
+    assert imp.build_zip(left, reversed_zip) == imp._sha256_file(left_zip)
+    assert reversed_zip.read_bytes() == left_zip.read_bytes()
 
 
 # --------------------------------------------------------------------------- deploy request & IAM
