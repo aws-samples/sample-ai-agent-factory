@@ -39,6 +39,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies. Customer-owned AWS resources require an explicit `AgentCoreFlowsAccess=allow` opt-in before the platform can grant a Knowledge Base role access.
 - **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning with AgentCore batch-evaluation-gated production promotion and emergency rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
 - **Manifest-driven teardown with live ownership proof** — Every deploy records the sub-resources it creates; delete re-validates live ownership, confirms asynchronous removal, and reports retained or failed resources instead of claiming they were removed.
+- **OpenAI Agent Builder exit** — Agent Builder shuts down on 2026-11-30. `scripts/import/openai_agents_sdk.py` takes its *Code → Agents SDK (Python)* export unchanged, refuses what cannot run headless on AWS with the replacement named, packages it for the AgentCore Runtime (hash-locked, ARM64-verified, deterministic), runs it on OpenAI GPT models served by Amazon Bedrock with a short-term API key from the runtime's own role (or on OpenAI with a key from Secrets Manager), and adopts it as a caller-owned runtime with tool receipts and clean guardrail refusals. See [Migrate from OpenAI Agent Builder](docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md).
 
 ## Prerequisites
 
@@ -945,6 +946,7 @@ Integration tests run against a real deployed stack — see [Development](docs/D
 | [Data Retention](docs/DATA_RETENTION.md) | TTLs, PII posture, audit access |
 | [MCP Catalog](docs/MCP_CATALOG.md) | External MCP catalog servers as Gateway targets |
 | [MCP Gateway Integration](docs/MCP_GATEWAY_INTEGRATION.md) | MCP protocol details for gateway-connected agents |
+| [Migrate from OpenAI Agent Builder](docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md) | Import an Agent Builder *Code → Agents SDK (Python)* export as a governed AgentCore Runtime before the 2026-11-30 shutdown: refusals, node mapping, Bedrock/OpenAI model modes, adopt, invoke, teardown |
 
 ## License
 

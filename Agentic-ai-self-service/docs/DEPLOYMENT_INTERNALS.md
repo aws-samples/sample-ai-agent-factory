@@ -1053,6 +1053,8 @@ Policy --> Runtime, Gateway
 |   +-- cleanup.sh                        # One-command teardown of all AWS resources
 |   +-- install-lambda-deps.sh            # Install Lambda deps for Linux x86_64 into backend/lib/
 |   +-- install-agentcore-deps.sh         # Build AgentCore dependency bundles into backend/agentcore-deps/
+|   +-- import/
+|       +-- openai_agents_sdk.py          # OpenAI Agent Builder exit: validate/wrap/package/deploy/adopt/teardown an Agents SDK export
 +-- docs/                                 # Documentation + architecture diagram (see README "Documentation" section)
 +-- .gitignore
 +-- .pre-commit-config.yaml               # Security scanning and code quality hooks

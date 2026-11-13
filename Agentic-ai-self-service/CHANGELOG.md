@@ -6,6 +6,44 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — OpenAI Agent Builder exit importer (`scripts/import/openai_agents_sdk.py`)
+
+- OpenAI deprecated Agent Builder on 2026-06-03 and shuts it down on 2026-11-30; the only export
+  is *Code → Agents SDK* (Python/TypeScript). The importer takes the Python export and, without
+  editing it, makes it a governed AgentCore Runtime adopted into the platform:
+  `validate` (offline, exact refusals with the AWS replacement named: literal secrets,
+  OpenAI-hosted tools and vector stores, human approval, TypeScript-only, non-SDK code, ambiguous
+  entry; MCP passthrough and OpenAI tracing are warnings), `wrap` (a `BedrockAgentCoreApp`
+  entrypoint around the export's entry function, platform payload/response contract, tool
+  receipts with argument digests, a tripped SDK guardrail answered as a clean refusal), `package`
+  (hash-locked `uv` closure for Linux ARM64 / CPython 3.13, every native file verified ELF
+  AArch64, deterministic ZIP), `deploy` (least-privilege execution role, `CreateAgentRuntime` in
+  the platform's own request shape tagged by the importer and never with the platform's ownership
+  tags, `POST /api/runtime/import`, warm-up + smoke through `POST /api/test-runtime`), `teardown`
+  (release the record, delete the runtime and confirm absence, then role, service-created log
+  groups and ZIP).
+- Two model modes. `bedrock` (default): the export runs on Bedrock's OpenAI-compatible endpoint
+  with a short-term Bedrock API key minted per invocation from the runtime role, the Responses API
+  and `global.openai.gpt-5.6-terra` (function tools work; `chat_completions` +
+  `openai.gpt-oss-120b-1:0` documented for exports without function tools), tracing to OpenAI
+  off, model id injected through `RunConfig`; the role holds `bedrock:InvokeModel*` on the one
+  model, `bedrock:InvokeModel` on the account's default project (the Responses API authorizes
+  both) and `bedrock:CallWithBearerToken` under `bedrock:bearerTokenType = SHORT_TERM`. `openai`:
+  the key is read at cold start from one Secrets Manager secret.
+- Docs: `docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md` (export steps, node mapping, refusal table,
+  model modes, invoke and delete semantics for adopted runtimes, live evidence); `POST
+  /api/runtime/import` and the adopted-runtime semantics of `/api/test-runtime` and `DELETE
+  /api/runtime/{id}` added to the API reference.
+- Tests: `backend/tests/test_openai_agents_sdk_import.py` (33: refusal matrix, flag scope, entry
+  detection, unchanged export + wrapper files, byte-reproducible ZIP under forced enumeration
+  order, `CreateAgentRuntime` request validated against the SDK model, importer-only tags,
+  per-provider least privilege, trust policy, ARM64 verification, bounded smoke retry, paginated
+  lookup + confirmed destroy, teardown ordering) with 21 mutation fixtures that each break the
+  suite. Live on `dev` at `f3afbb4`: 49/49 (four adversarial exports refused with nothing created;
+  fixture deployed, adopted, answered with a `lookup_order` receipt; card-number prompt blocked by
+  the export's guardrail; slot route 404, anonymous 401, release leaves the runtime running;
+  teardown left zero residue).
+
 ### Added — platform feature flags (`/agentcore-workflow/{env}/platform-features`, `GET /api/config/features`)
 
 - Every surface that is not ready for every environment can now ship behind a flag, so partial
