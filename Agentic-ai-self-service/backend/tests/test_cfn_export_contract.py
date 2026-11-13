@@ -5905,10 +5905,8 @@ class TestStagingBucketIsHardened:
     @ALL_COMBINATIONS
     def test_existing_bucket_requires_exact_owner_and_region(self, combo):
         script = _generate(**combo).deploy_sh
-        preflight = script.split("# 2. Ensure the staging bucket exists", 1)[1].split(
-            "# 3. Build or verify", 1
-        )[0]
-        assert 'CALLER_ACCOUNT=$(printf \'%s\' "$CALLER_ARN" | cut -d: -f5)' in script
+        preflight = script.split("# 2. Ensure the staging bucket exists", 1)[1].split("# 3. Build or verify", 1)[0]
+        assert "CALLER_ACCOUNT=$(printf '%s' \"$CALLER_ARN\" | cut -d: -f5)" in script
         assert 'head-bucket --bucket "$BUCKET" --region "$REGION"' in preflight
         assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in preflight
         assert "get-bucket-location" in preflight
@@ -5930,11 +5928,7 @@ class TestStagingBucketIsHardened:
             if not line.endswith("\\"):
                 commands.append(" ".join(current))
                 current = []
-        object_commands = [
-            command
-            for command in commands
-            if re.search(r"aws s3api (?:get|put|head)-object", command)
-        ]
+        object_commands = [command for command in commands if re.search(r"aws s3api (?:get|put|head)-object", command)]
         assert object_commands
         for command in object_commands:
             assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in command, command

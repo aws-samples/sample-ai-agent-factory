@@ -218,7 +218,8 @@ def test_explicit_operator_digest_accepts_matching_existing_bytes_without_rebuil
     aws.write_text(
         "#!/usr/bin/env bash\n"
         'if [[ "$1" == "s3api" && "$2" == "head-object" ]]; then exit 0; fi\n'
-        'if [[ "$1" == "s3" && "$2" == "cp" ]]; then cp "$REMOTE_BUNDLE" "$4"; exit 0; fi\n'
+        'if [[ "$1" == "s3api" && "$2" == "get-object" ]]; then '
+        'cp "$REMOTE_BUNDLE" "${@: -1}"; exit 0; fi\n'
         "exit 64\n"
     )
     aws.chmod(0o755)
@@ -226,7 +227,10 @@ def test_explicit_operator_digest_accepts_matching_existing_bytes_without_rebuil
         [
             "bash",
             "-c",
-            "set -euo pipefail\nBUCKET=bucket\nREGION=us-east-1\n" + sha_helper.group(0) + "\n" + section.group(0),
+            "set -euo pipefail\nBUCKET=bucket\nREGION=us-east-1\nCALLER_ACCOUNT=123456789012\n"
+            + sha_helper.group(0)
+            + "\n"
+            + section.group(0),
         ],
         cwd=tmp_path,
         env={
