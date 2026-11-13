@@ -273,7 +273,9 @@ def test_embedded_lock_is_byte_derived_from_the_committed_accepted_lock():
     ]
     canonical = "\n".join(sorted(pins, key=str.casefold)) + "\n"
     assert accepted_lock_text() == canonical
-    assert len(pins) == 169
+    # 171: the ADOT 0.22.0 graph added opentelemetry-exporter-http-transport and
+    # opentelemetry-exporter-otlp-common beside the OTLP/HTTP exporter at 1.45.1.
+    assert len(pins) == 171
     assert all(line.count("==") == 1 for line in pins)
 
 
