@@ -15,6 +15,9 @@ on:
       - 'enterprise-mcp-governance-gateway/connectors/**'
       - 'enterprise-mcp-governance-gateway/policies/**'
       - 'workshop-building-agentic-ai-platform/source/**/*.ipynb'
+      - 'workshop-building-agentic-ai-platform/source/module-3a-mcp-registry/deploy-registry.sh'
+      - 'workshop-building-agentic-ai-platform/scripts/verify-s3-owner-guards.py'
+      - 'workshop-building-agentic-ai-platform/scripts/live-test-s3-owner-guards.sh'
       - 'workshop-building-agentic-ai-platform/content/**'
       - 'workshop-building-agentic-ai-platform/static/img/**'
       - 'enterprise-agentic-ai-platform-blueprint/assets/**'
@@ -33,6 +36,9 @@ on:
       - 'enterprise-mcp-governance-gateway/connectors/**'
       - 'enterprise-mcp-governance-gateway/policies/**'
       - 'workshop-building-agentic-ai-platform/source/**/*.ipynb'
+      - 'workshop-building-agentic-ai-platform/source/module-3a-mcp-registry/deploy-registry.sh'
+      - 'workshop-building-agentic-ai-platform/scripts/verify-s3-owner-guards.py'
+      - 'workshop-building-agentic-ai-platform/scripts/live-test-s3-owner-guards.sh'
       - 'workshop-building-agentic-ai-platform/content/**'
       - 'workshop-building-agentic-ai-platform/static/img/**'
       - 'enterprise-agentic-ai-platform-blueprint/assets/**'
@@ -63,6 +69,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+
+      - name: Verify S3 bucket owner guards
+        working-directory: workshop-building-agentic-ai-platform
+        run: |
+          bash -n source/module-3a-mcp-registry/deploy-registry.sh
+          bash -n scripts/live-test-s3-owner-guards.sh
+          python3 scripts/verify-s3-owner-guards.py
 
       - name: Setup Node.js
         # actions/setup-node v7.0.0
