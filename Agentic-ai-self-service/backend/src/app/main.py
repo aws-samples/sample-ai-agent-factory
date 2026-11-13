@@ -16,6 +16,7 @@ from app.routers.flows import router as flows_router
 from app.routers.git_sync import router as git_sync_router
 from app.routers.observability import router as observability_router
 from app.routers.provider_credentials import router as provider_credentials_router
+from app.routers.specs import router as specs_router
 from app.routers.workspaces import router as workspaces_router
 
 # routers/deployment.py and routers/tools.py used to mount /api/deploy + tool
@@ -116,6 +117,9 @@ app.include_router(git_sync_router)  # Gap 3D GitOps - /api/workflows/{id}/git-s
 # Phase 0 item 5 — feature flags. /api/config/features tells the signed-in UI which flagged
 # surfaces to show; a flagged-off backend route answers the same 404 as a nonexistent one.
 app.include_router(config_router)
+# Phase 1 component A — Agent Spec v2 read surface, behind the specV2Read flag (exact 404 while off).
+# On the workflow Lambda because it reads the flows table through the flows router's storage.
+app.include_router(specs_router)
 
 
 @app.get("/health")

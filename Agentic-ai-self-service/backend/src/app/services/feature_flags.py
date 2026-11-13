@@ -53,6 +53,11 @@ KNOWN_FEATURE_FLAGS: dict[str, str] = {
         "Operational self-test for the flag plumbing: enables GET /api/config/features/canary. "
         "Gates no product feature; flip it to prove an environment's flags path end to end."
     ),
+    "specV2Read": (
+        "Agent Spec v2 read surface: GET /api/specs/{flowId} (a saved flow projected as Spec v2, "
+        "migrated on read, nothing written), POST /api/specs/validate and POST /api/specs/{flowId}/compile. "
+        "Off: those routes answer the exact 404 of a nonexistent route."
+    ),
 }
 
 PARAMETER_SUFFIX = "platform-features"

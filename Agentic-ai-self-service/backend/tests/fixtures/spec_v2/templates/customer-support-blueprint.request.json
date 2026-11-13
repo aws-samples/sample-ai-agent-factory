@@ -1,0 +1,49 @@
+{
+  "deploymentMode": "runtime",
+  "nodeId": "runtime-1767225600000-0-i",
+  "config": {
+    "name": "customer_support_agent",
+    "entrypoint": "agent.py",
+    "framework": "strands_agents",
+    "model": {
+      "provider": "anthropic",
+      "modelId": "us.anthropic.claude-sonnet-5",
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "systemPrompt": "You are a customer support agent. Your role is to answer customer questions about orders, account information, and refund requests.\n\nGuidelines:\n- Use the customer's ID to look up their account and orders automatically\n- When showing orders, always fetch full order details (get_order) to include item names, quantities, and prices\n- Summarize information clearly and concisely for the customer\n- For refunds, validate the order exists and the amount before processing\n\nDemo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)",
+    "deploymentType": "direct_code_deploy",
+    "pythonRuntime": "PYTHON_3_13",
+    "protocol": "HTTP",
+    "idleTimeout": 300,
+    "maxLifetime": 3600,
+    "enableOtel": false
+  },
+  "connectedTools": [
+    "gateway",
+    "memory"
+  ],
+  "gatewayConfig": {
+    "name": "support_gateway",
+    "enableSemanticSearch": true,
+    "targets": []
+  },
+  "gatewayTools": [
+    "get_order",
+    "get_customer",
+    "list_orders",
+    "process_refund"
+  ],
+  "templateId": "customer-support-blueprint",
+  "memoryConfig": {
+    "name": "support_memory",
+    "enabled": true,
+    "strategies": [
+      {
+        "type": "semantic",
+        "name": "support_semantic",
+        "description": "Long-term facts about the customer and their orders, recalled across sessions"
+      }
+    ]
+  }
+}

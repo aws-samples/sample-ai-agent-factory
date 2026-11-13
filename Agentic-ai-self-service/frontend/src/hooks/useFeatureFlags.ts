@@ -14,7 +14,7 @@ import { apiErrorFromResponse, getErrorMessage } from '../services/api/client';
  */
 
 /** Every flag this frontend build knows. Mirror of KNOWN_FEATURE_FLAGS in the backend. */
-export const KNOWN_FEATURE_FLAGS = ['platformFlagsCanary'] as const;
+export const KNOWN_FEATURE_FLAGS = ['platformFlagsCanary', 'specV2Read'] as const;
 export type FeatureFlagName = (typeof KNOWN_FEATURE_FLAGS)[number];
 
 export type FeatureFlagSource = 'ssm' | 'env' | 'missing' | 'invalid' | 'error';

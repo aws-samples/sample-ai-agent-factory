@@ -1,0 +1,124 @@
+{
+  "id": "flow-mcp-server-gateway-target",
+  "name": "auto-save",
+  "description": "",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "runtime-1767225600000-0-i",
+      "type": "runtime",
+      "position": {
+        "x": 100,
+        "y": 250
+      },
+      "data": {
+        "name": "mcp_gateway_agent",
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {
+          "provider": "anthropic",
+          "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "system_prompt": "You are a helpful assistant with access to order management tools through the MCP Gateway. Use the available tools to help users look up orders, customers, and process refunds.",
+        "deployment_type": "direct_code_deploy",
+        "python_runtime": "PYTHON_3_13",
+        "protocol": "HTTP",
+        "idle_timeout": 300,
+        "max_lifetime": 3600,
+        "enable_otel": false,
+        "component_type": "runtime"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "gateway-1767225600000-1-i",
+      "type": "gateway",
+      "position": {
+        "x": 450,
+        "y": 250
+      },
+      "data": {
+        "name": "mcp_server_gateway",
+        "enable_semantic_search": true,
+        "component_type": "gateway"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "runtime-1767225600000-2-i",
+      "type": "runtime",
+      "position": {
+        "x": 800,
+        "y": 250
+      },
+      "data": {
+        "name": "mcp_server_agent",
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {
+          "provider": "anthropic",
+          "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "system_prompt": "MCP Server that exposes order management tools: get_order, get_customer, list_orders, and process_refund.",
+        "deployment_type": "direct_code_deploy",
+        "python_runtime": "PYTHON_3_13",
+        "protocol": "MCP",
+        "idle_timeout": 300,
+        "max_lifetime": 3600,
+        "enable_otel": false,
+        "component_type": "runtime"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1767225600000-0-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "gateway-1767225600000-1-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-1-i",
+      "source": "gateway-1767225600000-1-i",
+      "target": "runtime-1767225600000-2-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "metadata": {
+    "author": "system",
+    "tags": [],
+    "aws_region": "us-east-1",
+    "deployment_status": "not_deployed"
+  },
+  "governance": {
+    "version": 1,
+    "namingProfile": null,
+    "tags": {
+      "explicitValues": {},
+      "effectiveValues": {},
+      "profile": null,
+      "policyRevision": ""
+    }
+  },
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "updated_at": "2026-01-01T00:00:00.000Z"
+}

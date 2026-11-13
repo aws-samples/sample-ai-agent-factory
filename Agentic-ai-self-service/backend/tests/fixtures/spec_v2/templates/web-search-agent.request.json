@@ -1,0 +1,45 @@
+{
+  "deploymentMode": "runtime",
+  "nodeId": "runtime-1767225600000-0-i",
+  "config": {
+    "name": "web_search_agent",
+    "entrypoint": "agent.py",
+    "framework": "strands_agents",
+    "model": {
+      "provider": "anthropic",
+      "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "systemPrompt": "You are a helpful web research assistant. Use the managed WebSearch tool for current information and retain source titles, URLs, and citations in every grounded answer. Use fetch_webpage only when the user needs bounded content from a specific public URL.",
+    "deploymentType": "direct_code_deploy",
+    "pythonRuntime": "PYTHON_3_13",
+    "protocol": "HTTP",
+    "idleTimeout": 300,
+    "maxLifetime": 3600,
+    "enableOtel": false,
+    "modelProvider": "bedrock",
+    "multiAgentPattern": "none"
+  },
+  "connectedTools": [
+    "gateway",
+    "identity"
+  ],
+  "gatewayConfig": {
+    "name": "web_search_gateway",
+    "enableSemanticSearch": true,
+    "targets": []
+  },
+  "gatewayTools": [
+    "web_search"
+  ],
+  "templateId": "web-search-agent",
+  "identityConfig": {
+    "mode": "shared",
+    "provider": "cognito",
+    "clientId": "",
+    "clientSecretRef": "",
+    "discoveryUrl": "",
+    "scopes": []
+  }
+}
