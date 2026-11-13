@@ -216,9 +216,9 @@ def test_external_protocol_reaches_the_actual_sdk_exporter_selection(monkeypatch
     # closure contains both protocols; the same constraints govern that build.
     assert "aws-opentelemetry-distro" in bundle.build_bundle_sh
     constraints = (Path(__file__).resolve().parents[1] / "agentcore-deps-constraints.txt").read_text()
-    assert "aws-opentelemetry-distro==0.21.0" in constraints
-    assert "opentelemetry-exporter-otlp-proto-grpc==1.44.0" in constraints
-    assert "opentelemetry-exporter-otlp-proto-http==1.44.0" in constraints
+    assert "aws-opentelemetry-distro==0.22.0" in constraints
+    assert "opentelemetry-exporter-otlp-proto-grpc==1.45.1" in constraints
+    assert "opentelemetry-exporter-otlp-proto-http==1.45.1" in constraints
 
 
 @pytest.mark.parametrize("unknown", ["samplingRate", "dualExportNative", "sessionReplay"])

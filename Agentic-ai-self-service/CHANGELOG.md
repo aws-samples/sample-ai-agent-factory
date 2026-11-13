@@ -6,6 +6,56 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security — OpenTelemetry 1.45.1 / ADOT 0.22.0 in every runtime bundle, `mcp` 1.30.0 in the test environment, `minimatch` 11 and `fast-xml-parser` 5.12 in the frontend lock
+
+- Closes the four medium/low Dependabot alerts left open by the certifi fix below, in the places
+  this project actually pins them:
+  - **`opentelemetry-api` ≤ 1.45.0** (GHSA-xcq7-p3pf-p88h, unbounded tracestate parsing). The
+    runtime bundles held the whole OpenTelemetry graph at 1.44.0 / 0.65b0 through
+    `aws-opentelemetry-distro==0.21.0`, which pins `opentelemetry-api` and `-sdk` exactly. Moved
+    the graph to **ADOT 0.22.0**: api/sdk/exporters/proto/propagators 1.44.0 → 1.45.1 and the 49
+    `opentelemetry-instrumentation-*` / `-distro` / `-processor-baggage` / `-util-http` /
+    `-semantic-conventions` pins 0.65b0 → 0.66b1 in `backend/agentcore-deps-constraints.txt`,
+    plus the two distributions the OTLP/HTTP exporter gained at 1.45.1
+    (`opentelemetry-exporter-http-transport==0.66b1`, `opentelemetry-exporter-otlp-common==0.66b1`),
+    so the lock still names every installed distribution (169 → 171 pins). Mirrored into
+    `DEPENDENCY_BUNDLE_CONSTRAINTS` (`cfn_template_generator.py`) and the zlib+base85 snapshot in
+    `python_exporter.py` (`tools/embed_accepted_lock.py`, round-trip checked), and into the `dev`
+    extra of `backend/pyproject.toml` so the test interpreter runs the container's versions. All
+    eleven bundles were rebuilt against the new lock and every installed distribution matched it.
+    The platform Lambdas (`backend/requirements-lambda.txt`) were already on 1.45.1 / 0.66b1.
+    `strands-agents` 1.56.0 writes `gen_ai.usage.input_tokens` / `output_tokens` as literal
+    attribute names, not through `opentelemetry-semantic-conventions`, so the cost ledger's
+    CloudWatch Insights parse is unaffected by the semconv bump.
+  - **`mcp` 2.1.1** (GHSA-w4fh-qvv9-3v23, GHSA-rwrf-2pqf-9j8j, GHSA-5h93-6whr-6q8j) was a
+    transitive of the `dev` extra only (`strands-agents` requires `mcp>=1.23.0,<2.2`); no Lambda
+    ships it and the runtime bundles pin 1.30.0 because the code generators emit the mcp 1.x API.
+    The patched 2.2.0 is unresolvable under strands' cap, so the `dev` extra now pins
+    **`mcp==1.30.0`**, which carries the same three fixes on the 1.x line. This also ends a
+    different-major split between the test environment and the container, which is what the
+    `dev` extra exists to prevent (`test_runtime_bundle_pins_match_the_test_environment.py`;
+    `mcp` was already in its `REQUIRED_PINS`). `uv lock` moved only the named packages; the
+    mcp 2.x-only `httpx2`/`httpcore2`/`mcp-types`/`truststore` left the lock and `httpx-sse`
+    returned (the version the bundles already pin).
+  - **`minimatch` 3.1.5 / 10.2.6** (GHSA-g3hv-75wg-m249) reached `frontend/package-lock.json`
+    only through `eslint` and `@typescript-eslint/typescript-estree` (`^10.2.2`, also at their
+    latest), so it is a devDependency and never ships. An npm `overrides` entry pins
+    **`minimatch` 11.0.8** (CommonJS and ESM entry points, Node 18 || 20 || >=22, the one
+    `minimatch(path, pattern, {dot})` call typescript-estree makes is unchanged); `eslint .` runs
+    clean on it.
+  - **`fast-xml-parser` 5.11.1** (GHSA-474x-hrwr-fgx4, low) is a dependency of
+    `@aws-amplify/storage` (`^5.7.2`); `npm update fast-xml-parser` resolved **5.12.1** in range.
+    `npm audit --audit-level=high` reports 0 vulnerabilities; the production build verifies.
+- Tests: 418 passed across the lock, bundle, exporter, observability and cost-tracking suites
+  (`test_runtime_bundle_pins_match_the_test_environment` against the rebuilt bundles,
+  `test_mcp_pin_matches_codegen`, `test_the_bundle_build_uses_a_capable_pinned_pip`,
+  `test_downloadable_asset_contract`, `test_python_exporter`, `test_cfn_observability_parity`,
+  `test_observability`, `test_gateway_tool_name_limit`, `test_generated_scripts_are_not_injectable`,
+  `test_agent_registry_ga`, `test_reproducible_dependency_artifacts`,
+  `test_provider_sdks_ship_in_a_bundle`, `test_cost_tracking`); the two assertions that named
+  the old versions (ADOT 0.21.0 / exporters 1.44.0, pin count 169) now name the new ones.
+  Frontend: vitest 114 files, eslint, build and production-build verification green.
+
 ### Added — OpenAI Agent Builder exit importer (`scripts/import/openai_agents_sdk.py`)
 
 - OpenAI deprecated Agent Builder on 2026-06-03 and shuts it down on 2026-11-30; the only export
@@ -88,11 +138,10 @@ All notable changes to this project are documented here. The format follows
   The dependency-consistency suites (`test_downloadable_asset_contract`, `test_python_exporter`,
   `test_reproducible_dependency_artifacts`, bundle pin parity) pass; the next `dev` deploy
   rebuilds all eleven runtime bundles against the new constraint.
-- Still open from the same Dependabot scan, all medium or low and not fixed here: `mcp`
-  (< 2.2.0, four advisories) and `opentelemetry-api` (≤ 1.45.0) in `backend/uv.lock`;
+- Still open from the same Dependabot scan at the time, all medium or low and not fixed there:
+  `mcp` (< 2.2.0, three advisories) and `opentelemetry-api` (≤ 1.45.0) in `backend/uv.lock`;
   `minimatch` (< 11.0.1) and `fast-xml-parser` (≤ 5.11.2) in `frontend/package-lock.json`.
-  `mcp` moves only through a reviewed lock update with the generated-agent import and
-  multi-provider merge tests (see the note in `agentcore-deps-constraints.txt`).
+  Closed by the OpenTelemetry / `mcp` / frontend lock entry above.
 
 ### Added — Gateway guardrails: Bedrock Guardrails evaluated by Policy in AgentCore (`policyConfig.guardrails.profile`)
 
