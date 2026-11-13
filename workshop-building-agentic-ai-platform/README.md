@@ -224,6 +224,36 @@ git push -u origin feature/{scope-of-change}
 
 ## Security
 
+### S3 template staging
+
+The Module 3a standalone deploy script stages trusted nested CloudFormation templates in an
+S3 **account-regional namespace** bucket named
+`cfn-deploy-agentic-platform-<account>-<region>-an`. Another AWS account cannot
+claim that name. The script also sends `ExpectedBucketOwner` on every applicable S3 request
+and refuses a bucket in another account or Region before uploading a template or calling
+CloudFormation. An `S3_BUCKET` override is supported only when the caller's account owns it.
+
+Account-regional bucket creation requires an AWS CLI v2 release whose
+`s3api create-bucket` command supports `--bucket-namespace`. Verify the source contract,
+including its removal-mutation checks, with:
+
+```bash
+python3 scripts/verify-s3-owner-guards.py
+```
+
+Run the real S3 positive and adversarial checks in a disposable account and supported Region with:
+
+```bash
+./scripts/live-test-s3-owner-guards.sh "$(aws sts get-caller-identity --query Account --output text)" us-west-2
+```
+
+The live test refuses a pre-existing default bucket, verifies a real foreign-owner 403 and a
+wrong-Region refusal, stages all six templates, checks the bucket controls, and deletes only the
+bucket it created on every exit path.
+
+`deploy-registry.sh destroy` rechecks ownership before deleting staged objects and removes the
+default bucket when it is empty. It never deletes a caller-supplied bucket.
+
 If you discover a potential security issue, please follow the AWS vulnerability reporting process
 described in [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications) — do **not** open a
 public GitHub issue.

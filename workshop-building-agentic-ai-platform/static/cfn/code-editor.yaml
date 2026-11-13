@@ -2591,7 +2591,7 @@ Resources:
   # GENERATED FROM static/cfn/workshop-iam-policy-core.json -- DO NOT EDIT BY HAND.
   # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
   # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
-  # IAM-counted size 4458/6144 bytes (IAM managed-policy limit).
+  # IAM-counted size 4549/6144 bytes (IAM managed-policy limit).
   CodeEditorParticipantPolicyCore:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -2656,6 +2656,15 @@ Resources:
               - "bedrock:UntagResource"
 
             "Resource": "arn:aws:bedrock:*:*:guardrail/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
 
           -
             "Sid": "ACRegistryServiceLinkedRole"

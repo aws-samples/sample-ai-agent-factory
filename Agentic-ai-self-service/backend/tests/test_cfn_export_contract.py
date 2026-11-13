@@ -812,7 +812,7 @@ class TestLiteLLMExport:
         assert "LITELLM_API_KEY_SECRET_ARN" in script
         assert 'PARAM_OVERRIDES+=("LiteLLMApiKeySecretArn=$LITELLM_SECRET_ARN")' in script
         # The check has to precede the first upload, or "fail early" is a lie.
-        assert script.index("LITELLM_SECRET_ARN") < script.index("aws s3 cp")
+        assert script.index("LITELLM_SECRET_ARN") < script.index("aws s3api put-object")
 
     @pytest.mark.parametrize(
         ("args", "env", "expect_exit", "expect_text"),
@@ -1129,7 +1129,8 @@ class TestSourceIntegrity:
         aws.write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$1" == "s3api" && "$2" == "head-object" ]]; then exit 0; fi\n'
-            'if [[ "$1" == "s3" && "$2" == "cp" ]]; then cp "$REMOTE_BUNDLE" "$4"; exit 0; fi\n'
+            'if [[ "$1" == "s3api" && "$2" == "get-object" ]]; then '
+            'cp "$REMOTE_BUNDLE" "${@: -1}"; exit 0; fi\n'
             'echo "unexpected fake AWS call" >&2; exit 64\n'
         )
         aws.chmod(0o755)
@@ -1137,7 +1138,10 @@ class TestSourceIntegrity:
             [
                 "bash",
                 "-c",
-                "set -euo pipefail\nBUCKET=bkt\nREGION=us-east-1\n" + helper.group(0) + "\n" + region.group(0),
+                "set -euo pipefail\nBUCKET=bkt\nREGION=us-east-1\nCALLER_ACCOUNT=123456789012\n"
+                + helper.group(0)
+                + "\n"
+                + region.group(0),
             ],
             cwd=tmp_path,
             env={"PATH": f"{fake_bin}:/usr/bin:/bin", "REMOTE_BUNDLE": str(remote)},
@@ -1255,7 +1259,9 @@ class TestTheLambdaZipsAreContentAddressed:
         for parameter, (zip_name, shell_var) in self.DIRECT_TO_LAMBDA.items():
             stem = zip_name.removesuffix(".zip")
             assert f"{shell_var}=$(staged_key {zip_name} {stem})" in script, parameter
-            assert f'aws s3 cp {zip_name} "s3://$BUCKET/${shell_var}"' in script, parameter
+            assert f'--key "${shell_var}"' in script, parameter
+            assert f"--body {zip_name}" in script, parameter
+            assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in script, parameter
             assert f'"{parameter}=${shell_var}"' in script, parameter
             # And the fixed key it used to upload to is gone, in both places.
             assert f"${{STACK_NAME}}/{zip_name}" not in script, f"{parameter} is still a fixed key"
@@ -5897,6 +5903,37 @@ class TestStagingBucketIsHardened:
         assert set(statement["Resource"]) == {"arn:aws:s3:::example-bucket", "arn:aws:s3:::example-bucket/*"}
 
     @ALL_COMBINATIONS
+    def test_existing_bucket_requires_exact_owner_and_region(self, combo):
+        script = _generate(**combo).deploy_sh
+        preflight = script.split("# 2. Ensure the staging bucket exists", 1)[1].split("# 3. Build or verify", 1)[0]
+        assert "CALLER_ACCOUNT=$(printf '%s' \"$CALLER_ARN\" | cut -d: -f5)" in script
+        assert 'head-bucket --bucket "$BUCKET" --region "$REGION"' in preflight
+        assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in preflight
+        assert "get-bucket-location" in preflight
+        assert 'if [[ "$BUCKET_REGION" != "$REGION" ]]' in preflight
+        assert "elif grep -Eq" in preflight, "only a confirmed 404 may create a bucket"
+        assert "Refusing to upload executable artifacts" in preflight
+
+    @ALL_COMBINATIONS
+    def test_every_artifact_transfer_pins_the_bucket_owner(self, combo):
+        script = _generate(**combo).deploy_sh
+        assert "aws s3 cp " not in script, "high-level transfers cannot assert ExpectedBucketOwner"
+        assert "aws s3api get-object" in script
+        assert "aws s3api put-object" in script
+        commands = []
+        current = []
+        for raw_line in script.splitlines():
+            line = raw_line.strip()
+            current.append(line.removesuffix("\\").rstrip())
+            if not line.endswith("\\"):
+                commands.append(" ".join(current))
+                current = []
+        object_commands = [command for command in commands if re.search(r"aws s3api (?:get|put|head)-object", command)]
+        assert object_commands
+        for command in object_commands:
+            assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in command, command
+
+    @ALL_COMBINATIONS
     def test_the_partition_is_read_from_the_caller_not_assumed(self, combo):
         script = _generate(**combo).deploy_sh
         assert "PARTITION=$(printf '%s' \"$CALLER_ARN\" | cut -d: -f2)" in script
@@ -6129,7 +6166,8 @@ class TestDependencyBundleIsObtainable:
     def test_deploy_builds_and_uploads_the_bundle_instead_of_giving_up(self, combo):
         script = _generate(**combo).deploy_sh
         assert "build-dependency-bundle.sh" in script
-        assert 'aws s3 cp "$file"' in script
+        assert 'aws s3api put-object --bucket "$BUCKET" --key "$key" --body "$file"' in script
+        assert '--expected-bucket-owner "$CALLER_ACCOUNT"' in script
         # The old behaviour, which must not come back.
         assert "See README.md for instructions." not in script
 

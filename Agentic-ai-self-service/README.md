@@ -103,6 +103,11 @@ Strands baseline and `google-genai`; an incompatible update fails before CDK.
 
 Use **Download CloudFormation** or **Download Python** in the authenticated deploy panel, or call the corresponding authenticated API through the deployed CloudFront URL. A direct call to a local generator is a developer test, not release evidence for the customer download path. The API response binds the returned ZIP with `archive_sha256` and `archive_bytes`. Verify those response values before extraction.
 
+The generated CloudFormation `deploy.sh` derives the expected bucket owner from STS, verifies an
+existing artifacts bucket's owner and Region before any upload, and accepts only a confirmed 404
+as permission to create it. Every executable-artifact transfer independently supplies
+`ExpectedBucketOwner`.
+
 Every ZIP has one artifact root and three integrity files:
 
 | File | Contract |
@@ -534,7 +539,9 @@ tracked-file secret scanning, high-severity npm dependency audit, and the exact
 customer-download suite over both authenticated export endpoints, the standalone Python
 exporter, CloudFormation export/deployability, staging/isolation, and workflow validation.
 That suite pins cfn-lint 1.57.0, Checkov 3.3.1, Terraform 1.14.6, ShellCheck 0.11.0,
-and actionlint 1.7.12. The infrastructure nag gate reads each stack's CLI-consumed
+and actionlint 1.7.12. Published CDK asset reads pin `ExpectedBucketOwner` to the
+run-bound account before comparing object bytes with the sealed assembly. The infrastructure
+nag gate reads each stack's CLI-consumed
 `additionalMetadataFile` directly rather than depending on import-order-sensitive jsii
 conversion through overlapping generated CDK schema distributions.
 

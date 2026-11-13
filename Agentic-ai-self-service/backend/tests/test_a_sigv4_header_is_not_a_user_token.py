@@ -12,7 +12,7 @@ from app import stream_handler as sh
 
 JWT = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiJ1c2VyLTEifQ.FAKESIGNATURE"
 SIGV4 = (
-    "AWS4-HMAC-SHA256 Credential=AKIAFAKEFAKEFAKEFAKE/20260928/us-east-1/lambda/aws4_request, "
+    "AWS4-HMAC-SHA256 Credential=AKIAFAKEFAKEFAKEFAKE/20260928/us-east-1/lambda/aws4_request, "  # pragma: allowlist secret
     "SignedHeaders=host;x-amz-date, Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
