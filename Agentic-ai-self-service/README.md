@@ -103,6 +103,11 @@ Strands baseline and `google-genai`; an incompatible update fails before CDK.
 
 Use **Download CloudFormation** or **Download Python** in the authenticated deploy panel, or call the corresponding authenticated API through the deployed CloudFront URL. A direct call to a local generator is a developer test, not release evidence for the customer download path. The API response binds the returned ZIP with `archive_sha256` and `archive_bytes`. Verify those response values before extraction.
 
+The generated CloudFormation `deploy.sh` derives the expected bucket owner from STS, verifies an
+existing artifacts bucket's owner and Region before any upload, and accepts only a confirmed 404
+as permission to create it. Every executable-artifact transfer independently supplies
+`ExpectedBucketOwner`.
+
 Every ZIP has one artifact root and three integrity files:
 
 | File | Contract |

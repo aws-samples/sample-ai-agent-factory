@@ -10835,7 +10835,10 @@ fi
 # Upload MCP server code
 echo "Packaging MCP server code..."
 cd agent-code && zip -r ../mcp-server-code.zip mcp_server.py && cd ..
-aws s3 cp mcp-server-code.zip "s3://${BUCKET}/cfn-assets/${STACK_NAME}/mcp-server-code.zip" --region "$REGION"
+aws s3api put-object --bucket "$BUCKET" \
+    --key "cfn-assets/$STACK_NAME/mcp-server-code.zip" \
+    --body mcp-server-code.zip --expected-bucket-owner "$CALLER_ACCOUNT" \
+    --checksum-algorithm SHA256 --region "$REGION" >/dev/null
 MCP_SERVER_DIGEST=$(content_digest agent-code mcp_server.py)
 echo "MCP server code digest: $MCP_SERVER_DIGEST"
 """
@@ -11005,19 +11008,35 @@ echo "Caller: $CALLER_ARN"
 # prefix is aws-us-gov in GovCloud and aws-cn in China. A hardcoded "aws" would produce
 # a policy that applies to nothing while looking like it applied to everything.
 PARTITION=$(printf '%s' "$CALLER_ARN" | cut -d: -f2)
+CALLER_ACCOUNT=$(printf '%s' "$CALLER_ARN" | cut -d: -f5)
+if [[ ! "$CALLER_ACCOUNT" =~ ^[0-9]{{12}}$ ]]; then
+    echo "ERROR: AWS STS returned an invalid account ID: $CALLER_ACCOUNT" >&2
+    exit 1
+fi
 {litellm_account_guard}
 
 # 2. Ensure the staging bucket exists
 #
 # Everything the agent runs passes through this bucket — the agent code, the dependency
-# bundle, and the merged code.zip the runtime executes — so it is hardened at creation.
-# A bucket that already exists is left exactly as it is: it is the recipient's, it may
-# be shared with other things, and versioning in particular cannot be turned back off.
-if aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" 2>/dev/null; then
+# bundle, and the merged code.zip the runtime executes — so ownership is a hard gate.
+# A 403 is not "missing": it can be a foreign bucket deliberately made writable.
+HEAD_ERROR=""
+if HEAD_ERROR=$(aws s3api head-bucket --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" 2>&1); then
+    BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" --query LocationConstraint --output text)
+    case "$BUCKET_REGION" in
+        ""|None|null) BUCKET_REGION="us-east-1" ;;
+        EU) BUCKET_REGION="eu-west-1" ;;
+    esac
+    if [[ "$BUCKET_REGION" != "$REGION" ]]; then
+        echo "ERROR: artifacts bucket $BUCKET is in $BUCKET_REGION, not $REGION." >&2
+        exit 1
+    fi
     echo "Using existing bucket s3://$BUCKET; its settings are left untouched."
     echo "  If it is not already blocking public access, encrypted, versioned with an"
     echo "  expiry, and TLS-only, see README.md > Staging Bucket for the four commands."
-else
+elif grep -Eq '[(]404[)]|Not Found|NoSuchBucket' <<<"$HEAD_ERROR"; then
     echo "Creating S3 bucket: $BUCKET"
     aws s3 mb "s3://$BUCKET" --region "$REGION"
 
@@ -11026,6 +11045,7 @@ else
     # already there. Nothing here is ever served publicly.
     echo "  Blocking public access..."
     aws s3api put-public-access-block --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" \
         --public-access-block-configuration \\
         "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
 
@@ -11036,6 +11056,7 @@ else
     # set regardless so switching to a CMK later does not cost a KMS call per object.
     echo "  Enabling default encryption..."
     aws s3api put-bucket-encryption --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" \
         --server-side-encryption-configuration \\
         '{{"Rules":[{{"ApplyServerSideEncryptionByDefault":{{"SSEAlgorithm":"AES256"}},"BucketKeyEnabled":true}}]}}'
 
@@ -11043,8 +11064,10 @@ else
     # with an expiry — otherwise every re-export leaves a version behind forever.
     echo "  Enabling versioning with an expiry..."
     aws s3api put-bucket-versioning --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" \
         --versioning-configuration Status=Enabled
     aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" \
         --lifecycle-configuration "$(cat <<'LIFECYCLE_JSON'
 {lifecycle_json}
 LIFECYCLE_JSON
@@ -11054,10 +11077,16 @@ LIFECYCLE_JSON
     # refuses a plaintext PUT of the code the runtime will execute.
     echo "  Requiring TLS..."
     aws s3api put-bucket-policy --bucket "$BUCKET" --region "$REGION" \\
+        --expected-bucket-owner "$CALLER_ACCOUNT" \
         --policy "$(cat <<TLS_POLICY_JSON
 {tls_policy_json}
 TLS_POLICY_JSON
 )"
+else
+    echo "ERROR: cannot verify that AWS account $CALLER_ACCOUNT owns artifacts bucket" >&2
+    echo "       '$BUCKET'. Refusing to upload executable artifacts." >&2
+    echo "       S3 response: $HEAD_ERROR" >&2
+    exit 1
 fi
 
 # 3. Build or verify the reviewed dependency recipe, then compare exact S3 bytes.
@@ -11073,7 +11102,8 @@ bundle_digest_in_bucket() {{
     local key tmp
     key="$1"
     tmp="$(mktemp)"
-    if ! aws s3 cp "s3://$BUCKET/$key" "$tmp" --region "$REGION" --quiet; then
+    if ! aws s3api get-object --bucket "$BUCKET" --key "$key" \\
+            --expected-bucket-owner "$CALLER_ACCOUNT" --region "$REGION" "$tmp" >/dev/null; then
         rm -f "$tmp"
         echo "ERROR: could not read back the dependency object for independent comparison." >&2
         echo "       s3:GetObject on the exact bundle key is required." >&2
@@ -11097,7 +11127,7 @@ stage_reviewed_bundle() {{
         echo "ERROR: the explicit $label bundle digest is not sha256:<64 lowercase hex>." >&2
         exit 1
     fi
-    if [[ -n "$expected" ]] && aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" >/dev/null 2>&1; then
+    if [[ -n "$expected" ]] && aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" --expected-bucket-owner "$CALLER_ACCOUNT" >/dev/null 2>&1; then
         remote="$(bundle_digest_in_bucket "$key")"
         if [[ "$remote" != "$expected" ]]; then
             echo "ERROR: existing $label bundle bytes do not match the explicit trusted digest." >&2
@@ -11118,7 +11148,7 @@ stage_reviewed_bundle() {{
         exit 1
     fi
     expected="${{expected:-$local_digest}}"
-    if aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" >/dev/null 2>&1; then
+    if aws s3api head-object --bucket "$BUCKET" --key "$key" --region "$REGION" --expected-bucket-owner "$CALLER_ACCOUNT" >/dev/null 2>&1; then
         remote="$(bundle_digest_in_bucket "$key")"
         if [[ "$remote" != "$expected" ]]; then
             echo "ERROR: stale or substituted bytes already occupy the content-addressed $label key." >&2
@@ -11126,7 +11156,9 @@ stage_reviewed_bundle() {{
             exit 1
         fi
     else
-        aws s3 cp "$file" "s3://$BUCKET/$key" --region "$REGION"
+        aws s3api put-object --bucket "$BUCKET" --key "$key" --body "$file" \\
+            --expected-bucket-owner "$CALLER_ACCOUNT" --checksum-algorithm SHA256 \\
+            --region "$REGION" >/dev/null
         remote="$(bundle_digest_in_bucket "$key")"
         if [[ "$remote" != "$expected" ]]; then
             echo "ERROR: uploaded $label bundle bytes differ from the reviewed local build." >&2
@@ -11145,12 +11177,17 @@ echo "Dependency bundle digest: $BUNDLE_DIGEST"
 # 4. Package and upload assets (stack-specific keys to avoid collisions)
 echo "Packaging CFN provider Lambda..."
 CFN_PROVIDER_KEY=$(staged_key cfn-provider.zip cfn-provider)
-aws s3 cp cfn-provider.zip "s3://$BUCKET/$CFN_PROVIDER_KEY" --region "$REGION"
+aws s3api put-object --bucket "$BUCKET" --key "$CFN_PROVIDER_KEY" \\
+    --body cfn-provider.zip --expected-bucket-owner "$CALLER_ACCOUNT" \\
+    --checksum-algorithm SHA256 --region "$REGION" >/dev/null
 echo "  key: $CFN_PROVIDER_KEY"
 
 echo "Packaging agent code..."
 cd agent-code && zip -r ../agent-code.zip . -x '*/__pycache__/*' '*.pyc' && cd ..
-aws s3 cp agent-code.zip "s3://$BUCKET/cfn-assets/${{STACK_NAME}}/agent-code.zip" --region "$REGION"
+aws s3api put-object --bucket "$BUCKET" \\
+    --key "cfn-assets/${{STACK_NAME}}/agent-code.zip" --body agent-code.zip \\
+    --expected-bucket-owner "$CALLER_ACCOUNT" --checksum-algorithm SHA256 \\
+    --region "$REGION" >/dev/null
 rm -f agent-code.zip
 # Computed from the local files, not from the bucket: this is what tells the stack
 # the code changed, and what the packaging step checks the uploaded zip against.
@@ -11160,14 +11197,18 @@ echo "Agent code digest: $AGENT_CODE_DIGEST"
 if [[ -f tool-lambdas.zip ]]; then
     echo "Uploading tool Lambda code..."
     TOOL_LAMBDA_KEY=$(staged_key tool-lambdas.zip tool-lambdas)
-    aws s3 cp tool-lambdas.zip "s3://$BUCKET/$TOOL_LAMBDA_KEY" --region "$REGION"
+    aws s3api put-object --bucket "$BUCKET" --key "$TOOL_LAMBDA_KEY" \\
+        --body tool-lambdas.zip --expected-bucket-owner "$CALLER_ACCOUNT" \\
+        --checksum-algorithm SHA256 --region "$REGION" >/dev/null
     echo "  key: $TOOL_LAMBDA_KEY"
 fi
 
 if [[ -f custom-tools.zip ]]; then
     echo "Uploading custom tool Lambda code..."
     CUSTOM_TOOL_KEY=$(staged_key custom-tools.zip custom-tools)
-    aws s3 cp custom-tools.zip "s3://$BUCKET/$CUSTOM_TOOL_KEY" --region "$REGION"
+    aws s3api put-object --bucket "$BUCKET" --key "$CUSTOM_TOOL_KEY" \\
+        --body custom-tools.zip --expected-bucket-owner "$CALLER_ACCOUNT" \\
+        --checksum-algorithm SHA256 --region "$REGION" >/dev/null
     echo "  key: $CUSTOM_TOOL_KEY"
 fi
 {mcp_upload}
