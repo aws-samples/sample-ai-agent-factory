@@ -259,12 +259,12 @@ def _graph_integrity(spec: AgentSpecV2) -> list[dict[str, str]]:
             )
         ids[node.id] = index
     for index, edge in enumerate(spec.logic.edges):
-        for end in ("source", "target"):
-            if getattr(edge, end) not in ids:
+        for end, node_id in (("source", edge.source), ("target", edge.target)):
+            if node_id not in ids:
                 errors.append(
                     {
                         "path": f"/logic/edges/{index}/{end}",
-                        "message": f"edge {end} {getattr(edge, end)!r} is not a node id",
+                        "message": f"edge {end} {node_id!r} is not a node id",
                         "type": "dangling_edge",
                     }
                 )
