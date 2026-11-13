@@ -7,11 +7,14 @@ This tool takes that Python export and, without editing it, makes it a governed 
 
     validate  -> refuse what cannot run headless on AWS (exact messages, nothing created)
     wrap      -> add agent.py, a BedrockAgentCoreApp entrypoint around the export's entry callable
-    package   -> a deterministic ZIP with hash-locked dependencies for Linux x86_64 / Python 3.13
-    deploy    -> least-privilege execution role + S3 upload + CreateAgentRuntime (the platform's
-                 own tested request shape, services.runtime_deployer.create_agent_runtime)
-    adopt     -> POST /api/runtime/import so observability, cost, registry, slots and DELETE apply
-    teardown  -> DELETE ... ?destroy=true, then the role and the ZIP; zero residue asserted
+    package   -> a deterministic ZIP with hash-locked dependencies for Linux ARM64 / Python 3.13
+                 (the AgentCore Runtime container; every native file is verified ELF AArch64)
+    deploy    -> least-privilege execution role + S3 upload + CreateAgentRuntime (the same request
+                 shape the platform sends for its own runtimes, minus its ownership tags)
+    adopt     -> POST /api/runtime/import so observability, cost, registry and DELETE apply; the
+                 smoke prompt goes through POST /api/test-runtime (an adopted runtime has no slot)
+    teardown  -> DELETE the platform record (release), delete the runtime and confirm its absence,
+                 then the role, the service-created log groups and the ZIP; zero residue asserted
 
 Model providers:
     openai   the export keeps calling OpenAI; the key is read at cold start from the Secrets Manager
@@ -19,13 +22,14 @@ Model providers:
     bedrock  the export runs on Amazon Bedrock's OpenAI-compatible endpoint
              (https://bedrock-runtime.{region}.amazonaws.com/openai/v1) with a short-term Bedrock API
              key minted per invocation by aws-bedrock-token-generator, the SDK switched to the
-             chat-completions API, tracing to OpenAI disabled, and the model id overridden through a
-             RunConfig injected by a thin Runner.run wrapper (the export's OpenAI model names would
-             not resolve on Bedrock). Zero edits to the exported file.
+             Responses API (GPT-5.6; `--bedrock-openai-api chat_completions` for gpt-oss), tracing to
+             OpenAI disabled, and the model id overridden through a RunConfig injected by a thin
+             Runner.run wrapper (the export's OpenAI model names would not resolve on Bedrock).
+             Zero edits to the exported file.
 
-Runs with the backend virtualenv (`backend/.venv/bin/python scripts/import/openai_agents_sdk.py ...`)
-so `deploy` can import the platform's runtime deployer. Everything before `deploy` is pure and
-offline. See docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md.
+Runs with the backend virtualenv (`backend/.venv/bin/python scripts/import/openai_agents_sdk.py ...`),
+which carries boto3, requests and uv. Everything before `deploy` is pure and offline.
+See docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md.
 """
 
 from __future__ import annotations
@@ -49,7 +53,13 @@ from pathlib import Path
 IMPORTER_VERSION = "1.0.0"
 PYTHON_RUNTIME = "PYTHON_3_13"
 PIP_PYTHON_VERSION = "3.13"
-PIP_PLATFORM = "x86_64-manylinux2014"
+#: AgentCore Runtime containers are Linux ARM64. A bundle built for x86_64 is accepted by
+#: CreateAgentRuntime and then fails asynchronously ("Your artifact contains binary files that
+#: are incompatible with Linux ARM64", measured live 2026-11-12); verify_native_arch catches it
+#: offline, before anything is uploaded.
+PIP_PLATFORM = "aarch64-manylinux2014"
+ELF_MAGIC = b"\x7fELF"
+ELF_MACHINE_AARCH64 = 0xB7
 MODEL_PROVIDERS = ("openai", "bedrock")
 #: Verified live 2026-11-12 (us-east-1): GPT-5.6 on Bedrock serves the Agents SDK through the Responses API with
 #: function tools, guardrails and handoffs untouched. gpt-oss models only support chat completions there and
@@ -74,7 +84,7 @@ BUNDLE_REQUIREMENTS: tuple[str, ...] = (
 R_NO_PYTHON = "no_python_export"
 R_TYPESCRIPT = "typescript_export"
 R_NO_AGENTS_IMPORT = "no_agents_sdk_import"
-R_LITERAL_SECRET = "literal_secret"
+R_LITERAL_SECRET = "literal_secret"  # pragma: allowlist secret
 R_HOSTED_TOOL = "openai_hosted_tool"
 R_HUMAN_APPROVAL = "human_approval"
 R_ENTRY_AMBIGUOUS = "entry_ambiguous"
@@ -779,6 +789,40 @@ def install_requirements(bundle_dir: Path) -> None:
         shutil.rmtree(pycache, ignore_errors=True)
 
 
+def _native_files(bundle_dir: Path) -> list[Path]:
+    return sorted(p for p in Path(bundle_dir).rglob("*") if p.is_file() and (p.suffix == ".so" or ".so." in p.name))
+
+
+def _elf_machine(path: Path) -> int | None:
+    """The ELF e_machine of ``path``, or None when the file is not an ELF object."""
+    with path.open("rb") as handle:
+        header = handle.read(20)
+    if len(header) < 20 or header[:4] != ELF_MAGIC:
+        return None
+    return int.from_bytes(header[18:20], "little" if header[5] == 1 else "big")
+
+
+def verify_native_arch(bundle_dir: Path) -> int:
+    """Every native extension in the bundle must be ELF AArch64; return how many were checked.
+
+    uv honours --python-platform, but a resolver change, a package without an aarch64 wheel or a
+    hand-edited lock could still put a foreign binary in the bundle. Checked here because the
+    service does not check it synchronously: the runtime is created, then enters CREATE_FAILED.
+    """
+    wrong = []
+    native = _native_files(bundle_dir)
+    for path in native:
+        machine = _elf_machine(path)
+        if machine != ELF_MACHINE_AARCH64:
+            wrong.append(f"{path.relative_to(bundle_dir)} (e_machine={machine if machine is None else hex(machine)})")
+    if wrong:
+        raise RuntimeError(
+            "bundle contains native files that are not Linux ARM64 (AgentCore Runtime is aarch64); "
+            "nothing was uploaded: " + ", ".join(wrong)
+        )
+    return len(native)
+
+
 def build_zip(bundle_dir: Path, zip_path: Path) -> str:
     """Deterministic ZIP: sorted paths, fixed timestamp, normalized permissions. Returns its SHA-256."""
     bundle_dir, zip_path = Path(bundle_dir), Path(zip_path)
@@ -903,7 +947,22 @@ def execution_role_policy(
                     f"arn:aws:bedrock:{region}::foundation-model/{bedrock_model_id}",
                     f"arn:aws:bedrock:*::foundation-model/{bare}",
                     f"arn:aws:bedrock:{region}:{account_id}:inference-profile/{bedrock_model_id}",
+                    f"arn:aws:bedrock:{region}::inference-profile/{bedrock_model_id}",
                 ],
+            }
+        )
+        # The OpenAI-compatible Responses API on bedrock-runtime authorizes InvokeModel on the
+        # inference target AND on the account's default project (Bedrock user guide, "Responses
+        # API" > Prerequisites). Measured live 2026-11-12 without this statement: every turn
+        # failed with "not authorized to perform: bedrock:InvokeModel on resource:
+        # arn:aws:bedrock:us-east-1:<account>:project/default". No stored-response verbs
+        # (GetInvoke/CancelInvoke/DeleteInvoke): the Agents SDK does not manage stored responses.
+        statements.append(
+            {
+                "Sid": "BedrockDefaultProject",
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeModel"],
+                "Resource": f"arn:aws:bedrock:{region}:{account_id}:project/default",
             }
         )
         # The OpenAI-compatible endpoint authenticates with a short-term Bedrock API key minted
@@ -1061,15 +1120,21 @@ def adopt_runtime(platform_url: str, token: str, runtime_arn: str, region: str) 
     return resp.json()
 
 
-def smoke_invoke(platform_url: str, token: str, runtime_name: str, prompt: str) -> dict:
-    import uuid
+SMOKE_STILL_RUNNING = "Agent still running"
+SMOKE_ATTEMPTS = 4
+SMOKE_RETRY_SECONDS = 20
 
+
+def _platform_invoke(platform_url: str, token: str, body: dict) -> dict:
+    """POST /api/test-runtime. An ADOPTED runtime has a deployment record but no version/slot
+    rows, so the slot route (/api/runtimes/{name}/slots/{slot}/invoke) answers 404 for it;
+    /api/test-runtime resolves the owner-checked record by runtimeId, which is what adoption wrote."""
     import requests
 
     resp = requests.post(
-        f"{platform_url.rstrip('/')}/api/runtimes/{runtime_name}/slots/production/invoke",
+        f"{platform_url.rstrip('/')}/api/test-runtime",
         headers={"Authorization": f"Bearer {token}"},
-        json={"input": prompt, "sessionId": str(uuid.uuid4())},
+        json=body,
         timeout=240,
     )
     return {
@@ -1078,15 +1143,91 @@ def smoke_invoke(platform_url: str, token: str, runtime_name: str, prompt: str) 
     }
 
 
-def destroy_via_platform(platform_url: str, token: str, runtime_id: str) -> int:
+def _smoke_still_running(outcome: dict) -> bool:
+    body = outcome.get("body")
+    return (
+        isinstance(body, dict) and body.get("success") is False and SMOKE_STILL_RUNNING in str(body.get("error") or "")
+    )
+
+
+def smoke_invoke(platform_url: str, token: str, runtime_id: str, prompt: str) -> dict:
+    """Warm the freshly created runtime, then ask it the prompt through the platform.
+
+    The first request to a new runtime pays its container cold start, which for a bundle of
+    this size exceeds the platform's synchronous read timeout; that timeout answers
+    `success: false` + "Agent still running". The warm-up absorbs it, and the real prompt is
+    retried a bounded number of times while the platform still reports that message."""
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    warmup = _platform_invoke(
+        platform_url, token, {"input": "warmup", "runtimeId": runtime_id, "sessionId": session_id, "warmup": True}
+    )
+    attempts = []
+    for _ in range(SMOKE_ATTEMPTS):
+        outcome = _platform_invoke(
+            platform_url, token, {"input": prompt, "runtimeId": runtime_id, "sessionId": str(uuid.uuid4())}
+        )
+        attempts.append(outcome)
+        if not _smoke_still_running(outcome):
+            break
+        time.sleep(SMOKE_RETRY_SECONDS)
+    final = attempts[-1]
+    return {"status": final["status"], "body": final["body"], "warmup": warmup, "attempts": len(attempts)}
+
+
+def release_from_platform(platform_url: str, token: str, runtime_id: str) -> dict:
+    """DELETE /api/runtime/{id} WITHOUT ?destroy=true.
+
+    The platform marks an adopted record released and destroys nothing: its destroy path
+    proves ownership through its own ManagedBy/AgentCoreStack tags, which an imported runtime
+    deliberately does not carry, so ?destroy=true could only ever answer "retained". The
+    importer built the runtime, so the importer destroys it (destroy_runtime below)."""
     import requests
 
-    return requests.delete(
+    resp = requests.delete(
         f"{platform_url.rstrip('/')}/api/runtime/{runtime_id}",
-        params={"destroy": "true"},
         headers={"Authorization": f"Bearer {token}"},
         timeout=60,
-    ).status_code
+    )
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:300]
+    return {"status": resp.status_code, "body": body}
+
+
+def find_runtime_ids(session, runtime_name: str) -> list[str]:
+    ctrl = session.client("bedrock-agentcore-control")
+    ids = []
+    token = None
+    while True:
+        kwargs = {"maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        page = ctrl.list_agent_runtimes(**kwargs)
+        ids.extend(
+            r["agentRuntimeId"] for r in page.get("agentRuntimes", []) if r.get("agentRuntimeName") == runtime_name
+        )
+        token = page.get("nextToken")
+        if not token:
+            return ids
+
+
+def destroy_runtime(session, runtime_id: str, *, timeout: int = 300) -> None:
+    """Delete and CONFIRM absence before anything that the runtime still depends on (its role) goes."""
+    ctrl = session.client("bedrock-agentcore-control")
+    try:
+        ctrl.delete_agent_runtime(agentRuntimeId=runtime_id)
+    except ctrl.exceptions.ResourceNotFoundException:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = ctrl.get_agent_runtime(agentRuntimeId=runtime_id).get("status", "")
+        except ctrl.exceptions.ResourceNotFoundException:
+            return
+        if status.endswith("FAILED"):
+            raise RuntimeError(f"runtime {runtime_id} delete ended in {status}")
+        time.sleep(5)
+    raise RuntimeError(f"runtime {runtime_id} still present after {timeout}s; role and ZIP left in place")
 
 
 def delete_role(session, role_name: str) -> None:
@@ -1097,6 +1238,24 @@ def delete_role(session, role_name: str) -> None:
         iam.delete_role(RoleName=role_name)
     except iam.exceptions.NoSuchEntityException:
         pass
+
+
+def runtime_log_group_prefix(runtime_name: str) -> str:
+    """AgentCore writes a runtime's logs to /aws/bedrock-agentcore/runtimes/<runtime_id>-<endpoint>, and
+    the runtime id is <name>-<10 chars>; the trailing dash keeps a longer name from matching."""
+    return f"/aws/bedrock-agentcore/runtimes/{runtime_name}-"
+
+
+def delete_runtime_log_groups(session, runtime_name: str) -> list[str]:
+    """The service-created log groups outlive the runtime (measured live 2026-11-12); delete them."""
+    logs = session.client("logs")
+    deleted = []
+    paginator = logs.get_paginator("describe_log_groups")
+    for page in paginator.paginate(logGroupNamePrefix=runtime_log_group_prefix(runtime_name)):
+        for group in page.get("logGroups", []):
+            logs.delete_log_group(logGroupName=group["logGroupName"])
+            deleted.append(group["logGroupName"])
+    return deleted
 
 
 # --------------------------------------------------------------------------- CLI
@@ -1139,16 +1298,16 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         )
         p.add_argument("--smoke-prompt", default=None)
         p.add_argument("--tag", action="append", default=[], help="key=value resource tag (repeatable)")
-    t = sub.add_parser("teardown")
+        p.add_argument("--result-json", type=Path, default=None, help="also write the deploy result to this file")
+    t = sub.add_parser(
+        "teardown", help="release from the platform, delete the runtime (confirmed), its role and its ZIP"
+    )
     t.add_argument("--runtime-name", required=True)
     t.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
     t.add_argument("--profile", default=None)
     t.add_argument("--bucket", required=True)
-    t.add_argument("--platform-url", default=None)
+    t.add_argument("--platform-url", default=None, help="also DELETE the platform's record of the adopted runtime")
     t.add_argument("--platform-token-env", default="API_BEARER_TOKEN")
-    t.add_argument(
-        "--deployment-runtime-id", default=None, help="the platform runtime_id to DELETE ?destroy=true (from adopt)"
-    )
     return parser.parse_args(argv)
 
 
@@ -1175,9 +1334,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         compile_requirements(args.out)
         install_requirements(args.out)
+        native_count = verify_native_arch(args.out)
         zip_path = args.out.with_suffix(".zip")
         digest = build_zip(args.out, zip_path)
-        print(f"zip written: {zip_path} sha256={digest}")
+        print(f"zip written: {zip_path} sha256={digest} native_files_verified_aarch64={native_count}")
         if args.command == "package":
             return 0
         if not RUNTIME_NAME.match(args.runtime_name):
@@ -1237,9 +1397,11 @@ def main(argv: list[str] | None = None) -> int:
             result["adopted"] = adopted
             print(f"adopted into the platform: deployment {adopted.get('deploymentId')}")
             if args.smoke_prompt:
-                result["smoke"] = smoke_invoke(args.platform_url, token, args.runtime_name, args.smoke_prompt)
-                print(f"smoke invoke: {result['smoke']['status']}")
+                result["smoke"] = smoke_invoke(args.platform_url, token, runtime_id, args.smoke_prompt)
+                print(f"smoke invoke: {result['smoke']['status']} after {result['smoke']['attempts']} attempt(s)")
         print(json.dumps(result, indent=2, default=str))
+        if args.result_json:
+            args.result_json.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
         return 0
     except ImportRefused as refused:
         print("IMPORT REFUSED", file=sys.stderr)
@@ -1252,22 +1414,30 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def teardown(args: argparse.Namespace) -> int:
+    if not RUNTIME_NAME.match(args.runtime_name):
+        raise ValueError("--runtime-name must match [A-Za-z][A-Za-z0-9_]{0,47}")
     session = _session(args.region, args.profile)
-    if args.platform_url and args.deployment_runtime_id:
+    runtime_ids = find_runtime_ids(session, args.runtime_name)
+    if args.platform_url:
         token = os.environ.get(args.platform_token_env, "")
-        status = destroy_via_platform(args.platform_url, token, args.deployment_runtime_id)
-        print(f"platform DELETE ?destroy=true -> {status}")
-    ctrl = session.client("bedrock-agentcore-control")
-    for runtime in ctrl.list_agent_runtimes(maxResults=100).get("agentRuntimes", []):
-        if runtime.get("agentRuntimeName") == args.runtime_name:
-            ctrl.delete_agent_runtime(agentRuntimeId=runtime["agentRuntimeId"])
-            print(f"deleted runtime {runtime['agentRuntimeId']}")
+        if not token:
+            raise RuntimeError(f"{args.platform_token_env} is not set; mint a platform access token first")
+        for runtime_id in runtime_ids:
+            released = release_from_platform(args.platform_url, token, runtime_id)
+            print(f"platform release of {runtime_id}: {released['status']}")
+    for runtime_id in runtime_ids:
+        destroy_runtime(session, runtime_id)
+        print(f"deleted runtime {runtime_id} (absence confirmed)")
     delete_role(session, f"ImportedAgentRuntime-{args.runtime_name}"[:64])
+    log_groups = delete_runtime_log_groups(session, args.runtime_name)
     s3 = session.client("s3")
     prefix = f"imports/openai-agents-sdk/{args.runtime_name}/"
     for obj in s3.list_objects_v2(Bucket=args.bucket, Prefix=prefix).get("Contents", []):
         s3.delete_object(Bucket=args.bucket, Key=obj["Key"])
-    print("teardown complete")
+    print(
+        f"teardown complete: runtimes={len(runtime_ids)} log_groups={len(log_groups)} "
+        f"role and s3://{args.bucket}/{prefix} cleared"
+    )
     return 0
 
 

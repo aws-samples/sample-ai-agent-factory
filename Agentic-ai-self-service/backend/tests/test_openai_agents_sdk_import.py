@@ -92,16 +92,20 @@ def test_a_clean_export_validates_with_no_findings(tmp_path: Path) -> None:
     "snippet, code, needle",
     [
         (
-            'KEY = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n',
+            'KEY = "sk-abcdefghijklmnopqrstuvwxyz0123456789"\n',  # pragma: allowlist secret
             imp.R_LITERAL_SECRET,
             "OpenAI API key is written in the code",
         ),
         (
-            'import os\nos.environ["OPENAI_API_KEY"] = "sk-live-xxxxxxxxxxxxxxxxxxxx"\n',
+            'import os\nos.environ["OPENAI_API_KEY"] = "sk-live-xxxxxxxxxxxxxxxxxxxx"\n',  # pragma: allowlist secret
             imp.R_LITERAL_SECRET,
             "OPENAI_API_KEY is assigned a literal value",
         ),
-        ('OPENAI_API_KEY = "whatever"\n', imp.R_LITERAL_SECRET, "OPENAI_API_KEY is assigned a literal value"),
+        (
+            'OPENAI_API_KEY = "whatever"\n',  # pragma: allowlist secret
+            imp.R_LITERAL_SECRET,
+            "OPENAI_API_KEY is assigned a literal value",
+        ),
         (
             "from agents import FileSearchTool\nt = FileSearchTool(vector_store_ids=['x'])\n",
             imp.R_HOSTED_TOOL,
@@ -359,11 +363,16 @@ def test_execution_role_is_least_privilege_per_provider() -> None:
         "RuntimeTraces",
         "WorkloadIdentity",
         "BedrockModel",
+        "BedrockDefaultProject",
         "BedrockShortTermBearer",
     }
     assert sids["BedrockShortTermBearer"]["Condition"] == {"StringEquals": {"bedrock:bearerTokenType": "SHORT_TERM"}}
     assert "arn:aws:bedrock:us-east-1::foundation-model/global.openai.gpt-5.6-terra" in sids["BedrockModel"]["Resource"]
     assert "arn:aws:bedrock:*::foundation-model/openai.gpt-5.6-terra" in sids["BedrockModel"]["Resource"]
+    # The Responses API authorizes InvokeModel on the account's default project too (measured live:
+    # without it every turn is "not authorized ... on resource: ...:project/default").
+    assert sids["BedrockDefaultProject"]["Action"] == ["bedrock:InvokeModel"]
+    assert sids["BedrockDefaultProject"]["Resource"] == "arn:aws:bedrock:us-east-1:111122223333:project/default"
     actions = {a for s in bedrock["Statement"] for a in s["Action"]}
     assert not any(a.startswith("bedrock-agentcore:") and "WorkloadAccessToken" not in a for a in actions), (
         "no control-plane actions"
@@ -374,12 +383,12 @@ def test_execution_role_is_least_privilege_per_provider() -> None:
         "111122223333",
         "oai_exit_probe",
         model_provider="openai",
-        secret_arn="arn:aws:secretsmanager:us-east-1:111122223333:secret:openai-key-AbCdEf",
+        secret_arn="arn:aws:secretsmanager:us-east-1:111122223333:secret:openai-key-AbCdEf",  # pragma: allowlist secret
         bedrock_model_id="x",
     )
     osids = {s["Sid"]: s for s in openai["Statement"]}
     assert osids["OpenAIKey"]["Resource"] == "arn:aws:secretsmanager:us-east-1:111122223333:secret:openai-key-AbCdEf"
-    assert "BedrockModel" not in osids and "BedrockShortTermBearer" not in osids
+    assert not {"BedrockModel", "BedrockDefaultProject", "BedrockShortTermBearer"} & set(osids)
     with pytest.raises(ValueError, match="openai-key-secret-arn"):
         imp.execution_role_policy(
             "us-east-1",
@@ -408,3 +417,207 @@ def test_cli_validate_exit_codes(tmp_path: Path, capsys) -> None:
     assert imp.main(["validate", str(bad)]) == 2
     assert imp.main(["wrap", str(bad), "--out", str(tmp_path / "out")]) == 2
     assert "IMPORT REFUSED" in capsys.readouterr().err
+
+
+def _elf(e_machine: int) -> bytes:
+    """A minimal little-endian ELF64 header with the given e_machine."""
+    return (
+        b"\x7fELF"
+        + bytes([2, 1, 1, 0])
+        + b"\x00" * 8
+        + (3).to_bytes(2, "little")
+        + e_machine.to_bytes(2, "little")
+        + b"\x00" * 44
+    )
+
+
+def test_bundle_dependencies_target_the_runtime_architecture_and_native_files_are_verified(tmp_path: Path) -> None:
+    # AgentCore Runtime is Linux ARM64; an x86_64 bundle is accepted by CreateAgentRuntime and fails
+    # minutes later ("binary files that are incompatible with Linux ARM64", measured live).
+    assert imp.PIP_PLATFORM == "aarch64-manylinux2014"
+    bundle = tmp_path / "bundle"
+    (bundle / "pkg").mkdir(parents=True)
+    (bundle / "pkg" / "fast.cpython-313-aarch64-linux-gnu.so").write_bytes(_elf(imp.ELF_MACHINE_AARCH64))
+    (bundle / "pkg" / "libz.so.1").write_bytes(_elf(imp.ELF_MACHINE_AARCH64))
+    (bundle / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    assert imp.verify_native_arch(bundle) == 2
+    (bundle / "pkg" / "wrong.cpython-313-x86_64-linux-gnu.so").write_bytes(_elf(0x3E))
+    with pytest.raises(
+        RuntimeError, match=r"not Linux ARM64.*wrong\.cpython-313-x86_64-linux-gnu\.so \(e_machine=0x3e\)"
+    ):
+        imp.verify_native_arch(bundle)
+    (bundle / "pkg" / "wrong.cpython-313-x86_64-linux-gnu.so").unlink()
+    (bundle / "pkg" / "notelf.so").write_bytes(b"MZ" + b"\x00" * 30)
+    with pytest.raises(RuntimeError, match=r"notelf\.so \(e_machine=None\)"):
+        imp.verify_native_arch(bundle)
+
+
+def test_smoke_invoke_uses_test_runtime_warms_up_first_and_retries_only_while_still_running(monkeypatch) -> None:
+    calls: list[dict] = []
+    answers = iter(
+        [
+            {"status": 200, "body": {"success": True, "response": ""}},  # warm-up
+            {"status": 200, "body": {"success": False, "error": "Agent still running; exceeded 30s sync test limit"}},
+            {"status": 200, "body": {"success": True, "response": "Order ORD-1 shipped."}},
+        ]
+    )
+
+    def fake_invoke(platform_url, token, body):
+        calls.append(body)
+        return next(answers)
+
+    monkeypatch.setattr(imp, "_platform_invoke", fake_invoke)
+    monkeypatch.setattr(imp.time, "sleep", lambda _s: None)
+    result = imp.smoke_invoke("https://p.example", "tok", "oai_exit_probe-abc", "What about ORD-1?")
+    assert calls[0]["warmup"] is True and calls[0]["runtimeId"] == "oai_exit_probe-abc"
+    assert all(c["runtimeId"] == "oai_exit_probe-abc" and "input" in c for c in calls[1:])
+    assert len({c["sessionId"] for c in calls}) == 3, "each attempt is its own session"
+    assert result["attempts"] == 2 and result["body"]["response"] == "Order ORD-1 shipped."
+    assert result["warmup"]["body"]["success"] is True
+
+    # A real failure is NOT retried: the platform's generic error is returned as is after one attempt.
+    answers = iter(
+        [
+            {"status": 200, "body": {"success": True, "response": ""}},
+            {"status": 200, "body": {"success": False, "error": "Runtime invocation failed."}},
+        ]
+    )
+    result = imp.smoke_invoke("https://p.example", "tok", "oai_exit_probe-abc", "x")
+    assert result["attempts"] == 1 and result["body"]["error"] == "Runtime invocation failed."
+
+    # The retry budget is bounded.
+    answers = iter(
+        [{"status": 200, "body": {"success": True, "response": ""}}]
+        + [{"status": 200, "body": {"success": False, "error": "Agent still running"}}] * 50
+    )
+    result = imp.smoke_invoke("https://p.example", "tok", "oai_exit_probe-abc", "x")
+    assert result["attempts"] == imp.SMOKE_ATTEMPTS == 4
+
+
+class _FakeControl:
+    """bedrock-agentcore-control stand-in: delete is an acceptance, absence arrives after N reads."""
+
+    class exceptions:
+        class ResourceNotFoundException(Exception):
+            pass
+
+    def __init__(self, reads_until_gone: int):
+        self.reads_until_gone = reads_until_gone
+        self.log: list[str] = []
+        self.pages = [
+            {"agentRuntimes": [{"agentRuntimeId": "other-1", "agentRuntimeName": "other"}], "nextToken": "p2"},
+            {"agentRuntimes": [{"agentRuntimeId": "oai_exit_probe-abc", "agentRuntimeName": "oai_exit_probe"}]},
+        ]
+
+    def list_agent_runtimes(self, **kwargs):
+        return self.pages[1] if kwargs.get("nextToken") == "p2" else self.pages[0]
+
+    def delete_agent_runtime(self, agentRuntimeId):
+        self.log.append(f"delete {agentRuntimeId}")
+
+    def get_agent_runtime(self, agentRuntimeId):
+        self.log.append(f"get {agentRuntimeId}")
+        if self.reads_until_gone <= 0:
+            raise self.exceptions.ResourceNotFoundException()
+        self.reads_until_gone -= 1
+        return {"status": "DELETING"}
+
+
+class _FakeSession:
+    def __init__(self, ctrl):
+        self.ctrl = ctrl
+
+    def client(self, name, **_):
+        assert name == "bedrock-agentcore-control"
+        return self.ctrl
+
+
+def test_find_runtime_ids_paginates_and_destroy_runtime_confirms_absence(monkeypatch) -> None:
+    ctrl = _FakeControl(reads_until_gone=2)
+    session = _FakeSession(ctrl)
+    monkeypatch.setattr(imp.time, "sleep", lambda _s: None)
+    assert imp.find_runtime_ids(session, "oai_exit_probe") == ["oai_exit_probe-abc"]
+    imp.destroy_runtime(session, "oai_exit_probe-abc")
+    assert ctrl.log == [
+        "delete oai_exit_probe-abc",
+        "get oai_exit_probe-abc",
+        "get oai_exit_probe-abc",
+        "get oai_exit_probe-abc",
+    ]
+
+    failed = _FakeControl(reads_until_gone=99)
+    failed.get_agent_runtime = lambda agentRuntimeId: {"status": "DELETE_FAILED"}
+    with pytest.raises(RuntimeError, match="DELETE_FAILED"):
+        imp.destroy_runtime(_FakeSession(failed), "oai_exit_probe-abc")
+
+
+def test_teardown_releases_then_destroys_then_removes_role_log_groups_and_zip(monkeypatch, tmp_path: Path) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(imp, "_session", lambda region, profile=None: "session")
+    monkeypatch.setattr(imp, "find_runtime_ids", lambda session, name: ["oai_exit_probe-abc"])
+    monkeypatch.setattr(
+        imp,
+        "release_from_platform",
+        lambda url, token, rid: order.append(f"release {rid} {url} {token}") or {"status": 200, "body": {}},
+    )
+    monkeypatch.setattr(imp, "destroy_runtime", lambda session, rid: order.append(f"destroy {rid}"))
+    monkeypatch.setattr(imp, "delete_role", lambda session, name: order.append(f"role {name}"))
+    monkeypatch.setattr(
+        imp,
+        "delete_runtime_log_groups",
+        lambda session, name: (
+            order.append(f"logs {name}")
+            or ["/aws/bedrock-agentcore/runtimes/oai_exit_probe-abc-DEFAULT"]  # pragma: allowlist secret
+        ),
+    )
+
+    class _S3:
+        def list_objects_v2(self, Bucket, Prefix):
+            order.append(f"list {Bucket}/{Prefix}")
+            return {"Contents": [{"Key": Prefix + "deadbeef.zip"}]}
+
+        def delete_object(self, Bucket, Key):
+            order.append(f"s3 {Key}")
+
+    class _Session:
+        def client(self, name, **_):
+            assert name == "s3"
+            return _S3()
+
+    monkeypatch.setattr(imp, "_session", lambda region, profile=None: _Session())
+    monkeypatch.setenv("API_BEARER_TOKEN", "tok")
+    args = imp._parse(
+        ["teardown", "--runtime-name", "oai_exit_probe", "--bucket", "b", "--platform-url", "https://p.example/"]
+    )
+    assert imp.teardown(args) == 0
+    assert order == [
+        "release oai_exit_probe-abc https://p.example/ tok",
+        "destroy oai_exit_probe-abc",
+        "role ImportedAgentRuntime-oai_exit_probe",
+        "logs oai_exit_probe",
+        "list b/imports/openai-agents-sdk/oai_exit_probe/",
+        "s3 imports/openai-agents-sdk/oai_exit_probe/deadbeef.zip",
+    ]
+    # Without a platform URL nothing is released and no token is needed.
+    order.clear()
+    monkeypatch.delenv("API_BEARER_TOKEN")
+    assert imp.teardown(imp._parse(["teardown", "--runtime-name", "oai_exit_probe", "--bucket", "b"])) == 0
+    assert order[0] == "destroy oai_exit_probe-abc"
+    # A platform URL without a token refuses before touching anything.
+    with pytest.raises(RuntimeError, match="API_BEARER_TOKEN is not set"):
+        imp.teardown(
+            imp._parse(
+                ["teardown", "--runtime-name", "oai_exit_probe", "--bucket", "b", "--platform-url", "https://p.example"]
+            )
+        )
+    with pytest.raises(ValueError, match="runtime-name"):
+        imp.teardown(imp._parse(["teardown", "--runtime-name", "bad-name!", "--bucket", "b"]))
+
+
+def test_runtime_log_group_prefix_cannot_match_a_longer_runtime_name() -> None:
+    prefix = imp.runtime_log_group_prefix("oai_exit_probe")
+    assert prefix == "/aws/bedrock-agentcore/runtimes/oai_exit_probe-"
+    longer_name_group = "/aws/bedrock-agentcore/runtimes/oai_exit_probe_v2-abc-DEFAULT"  # pragma: allowlist secret
+    own_group = "/aws/bedrock-agentcore/runtimes/oai_exit_probe-abc-DEFAULT"  # pragma: allowlist secret
+    assert not longer_name_group.startswith(prefix)
+    assert own_group.startswith(prefix)
