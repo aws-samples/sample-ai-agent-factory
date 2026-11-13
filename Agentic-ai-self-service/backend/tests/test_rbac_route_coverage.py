@@ -82,6 +82,11 @@ PINNED = {
     ("main", "GET", "/api/flows/{flow_id}"): {"agent:read"},
     ("main", "PUT", "/api/flows/{flow_id}"): {"agent:write"},
     ("main", "DELETE", "/api/flows/{flow_id}"): {"agent:write"},
+    # Spec v2 read surface (flag specV2Read, exact 404 while off): pure reads of the caller's flow
+    # or of the posted document, so agent:read like GET /api/flows/{flow_id}.
+    ("main", "GET", "/api/specs/{flow_id}"): {"agent:read"},
+    ("main", "POST", "/api/specs/validate"): {"agent:read"},
+    ("main", "POST", "/api/specs/{flow_id}/compile"): {"agent:read"},
     ("main", "POST", "/api/workflows/{workflow_id}/git-token"): {"agent:write"},
     ("main", "POST", "/api/workflows/{workflow_id}/git-sync"): {"agent:write"},
 }

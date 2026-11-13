@@ -22,9 +22,8 @@ import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
 import type { AgentCoreComponentType } from './types/workflow';
 import type { WorkflowTemplate } from './types/templates';
-import type { ComponentConfiguration, RuntimeConfiguration, IdentityConfiguration, ToolConfiguration, ConnectorConfiguration } from './types/components';
-import { CONNECTOR_TOOL_PREFIX } from './types/components';
-import type { DeployConnector } from './components/deploy/DeployPanel';
+import type { ComponentConfiguration, RuntimeConfiguration, ToolConfiguration } from './types/components';
+import { deriveCanvasDeployInputs, findDefaultDeployableRuntime } from './utils/deployRequestFromCanvas';
 import type { GeneratedTool } from './services/api';
 import { resolvePersonaRoute, useScopes } from './auth/scopes';
 import { ChatPage } from './components/chat/ChatPage';
@@ -167,201 +166,18 @@ function App() {
     ? selectedNode.data.configuration as RuntimeConfiguration
     : null;
 
-  // Find first HTTP-protocol runtime node if none selected.
-  // Prefer HTTP runtimes over MCP runtimes — the MCP server is a target, not the deployable agent.
-  // Also exclude runtime nodes that are MCP server targets (connected to a gateway alongside another runtime).
-  const mcpServerNodeIds = new Set<string>();
-  // Detect multi-runtime-gateway pattern: if a gateway has 2+ runtimes connected, the non-agent ones are MCP servers.
-  const gatewayNodes = nodes.filter((n) => n.data.componentType === 'gateway');
-  for (const gw of gatewayNodes) {
-    const connectedRuntimeIds = edges
-      .filter((e) => e.source === gw.id || e.target === gw.id)
-      .map((e) => (e.source === gw.id ? e.target : e.source))
-      .filter((nid) => nodes.find((n) => n.id === nid)?.data.componentType === 'runtime');
-    if (connectedRuntimeIds.length >= 2) {
-      // Multiple runtimes on one gateway — identify which is the MCP server.
-      // Prefer the runtime with protocol=MCP as the server. If none, pick the one with fewer total connections.
-      const runtimeInfos = connectedRuntimeIds.map((rid) => {
-        const rn = nodes.find((n) => n.id === rid)!;
-        const cfg = rn.data.configuration as RuntimeConfiguration | undefined;
-        const totalEdges = edges.filter((e) => e.source === rid || e.target === rid).length;
-        return { id: rid, protocol: cfg?.protocol || 'HTTP', totalEdges };
-      });
-      // First pass: any with MCP protocol is the server
-      const mcpOnes = runtimeInfos.filter((r) => r.protocol === 'MCP');
-      if (mcpOnes.length > 0) {
-        mcpOnes.forEach((r) => mcpServerNodeIds.add(r.id));
-      } else {
-        // Both HTTP: the one with fewer connections is likely the MCP server (agent has more connections: identity, memory, etc.)
-        const sorted = [...runtimeInfos].sort((a, b) => a.totalEdges - b.totalEdges);
-        // Mark all except the one with most connections as MCP servers
-        sorted.slice(0, -1).forEach((r) => mcpServerNodeIds.add(r.id));
-      }
-    }
-  }
-
-  const firstRuntimeNode = nodes.find((n) => {
-    if (n.data.componentType !== 'runtime') return false;
-    if (mcpServerNodeIds.has(n.id)) return false; // Exclude MCP server targets
-    const cfg = n.data.configuration as RuntimeConfiguration | undefined;
-    return !cfg || cfg.protocol !== 'MCP';
-  }) || nodes.find((n) => n.data.componentType === 'runtime' && !mcpServerNodeIds.has(n.id))
-     || nodes.find((n) => n.data.componentType === 'runtime');
+  // Default deployable runtime when none is selected (MCP server targets excluded); see
+  // utils/deployRequestFromCanvas.ts, which the backend Spec v2 compiler mirrors.
+  const firstRuntimeNode = findDefaultDeployableRuntime(nodes, edges);
   const deployableConfig = selectedRuntimeConfig || (firstRuntimeNode?.data.configuration as RuntimeConfiguration | undefined);
   // Always use the runtime node's ID (not a selected non-runtime node like a gateway)
   const deployableNodeId = (selectedRuntimeConfig ? selectedNodeId : null) || firstRuntimeNode?.id || null;
 
   // Get connected tools, gateway config, identity config, custom tools, and MCP server config
-  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = useMemo(() => {
-    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], connectors: [] as DeployConnector[], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null, a2aConfig: null };
-    const connectedTools: string[] = [];
-    const gatewayTools: string[] = [];
-    let gatewayConfig = null;
-    let gatewayNodeId: string | null = null;
-    let identityConfig: IdentityConfiguration | null = null;
-    let memoryConfig: Record<string, unknown> | null = null;
-    let evaluationConfig: Record<string, unknown> | null = null;
-    let policyConfig: Record<string, unknown> | null = null;
-    let guardrailsConfig: Record<string, unknown> | null = null;
-    let observabilityConfig: Record<string, unknown> | null = null;
-    let a2aConfig: Record<string, unknown> | null = null;
-    let mcpServerConfig: Record<string, unknown> | null = null;
-
-    // Find direct connections to the runtime node
-    edges.forEach(edge => {
-      if (edge.source === deployableNodeId || edge.target === deployableNodeId) {
-        const otherNodeId = edge.source === deployableNodeId ? edge.target : edge.source;
-        const otherNode = nodes.find(n => n.id === otherNodeId);
-        if (otherNode) {
-          const type = otherNode.data.componentType;
-          if (['browser', 'code_interpreter', 'memory', 'gateway', 'identity', 'observability', 'evaluation', 'policy', 'guardrails', 'a2a'].includes(type)) {
-            connectedTools.push(type);
-            if (type === 'gateway' && otherNode.data.configuration) {
-              gatewayConfig = otherNode.data.configuration;
-              gatewayNodeId = otherNode.id;
-            }
-            if (type === 'identity' && otherNode.data.configuration) {
-              identityConfig = otherNode.data.configuration as IdentityConfiguration;
-            }
-            if (type === 'memory') {
-              memoryConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
-            }
-            if (type === 'evaluation') {
-              evaluationConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
-            }
-            if (type === 'observability') {
-              observabilityConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: false };
-            }
-            if (type === 'a2a') {
-              const cfg = (otherNode.data.configuration as unknown as Record<string, unknown>) || {};
-              a2aConfig = {
-                capabilities: cfg.capabilities || [],
-                advertised_description: cfg.advertisedDescription || '',
-                peer_allowlist: cfg.peerAllowlist || [],
-              };
-            }
-            if (type === 'policy') {
-              policyConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
-            }
-            if (type === 'guardrails') {
-              guardrailsConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
-            }
-          }
-        }
-      }
-    });
-
-    // Find tool nodes and MCP Server Runtime nodes connected to the gateway
-    const customTools: Array<{ toolName: string; displayName: string; description: string; lambdaCode: string; inputSchema: Record<string, unknown> }> = [];
-    // Phase A — SaaS connectors. A connector is a `tool`-typed node whose
-    // toolId is "connector:<id>". They wire through the gateway like tools but
-    // are emitted as a separate `connectors` array (snake_case, see below).
-    const connectors: DeployConnector[] = [];
-    let knowledgeBaseConfig: Record<string, unknown> | null = null;
-    const mcpServerTools: string[] = [];
-    if (gatewayNodeId) {
-      edges.forEach(edge => {
-        if (edge.source === gatewayNodeId || edge.target === gatewayNodeId) {
-          const otherNodeId = edge.source === gatewayNodeId ? edge.target : edge.source;
-          // Skip the main deployable runtime
-          if (otherNodeId === deployableNodeId) return;
-          const otherNode = nodes.find(n => n.id === otherNodeId);
-          if (otherNode?.data.componentType === 'tool') {
-            const toolConfig = otherNode.data.configuration as { toolId?: string; isCustom?: boolean; isKnowledgeBase?: boolean; isConnector?: boolean; lambdaCode?: string; inputSchema?: Record<string, unknown>; displayName?: string; description?: string } | undefined;
-            if (toolConfig?.isConnector || toolConfig?.toolId?.startsWith(CONNECTOR_TOOL_PREFIX)) {
-              const c = toolConfig as unknown as ConnectorConfiguration;
-              const isOauth = c.authMethod === 'oauth2_cc';
-              connectors.push({
-                connector_id: c.connectorId || (c.toolId || '').slice(CONNECTOR_TOOL_PREFIX.length),
-                auth_method: c.authMethod,
-                // Transient — minted into Secrets Manager backend-side, then dropped.
-                // Read from the in-memory secrets map (the persisted node has the
-                // raw value stripped for security); fall back to any inline value.
-                secret_value: connectorSecrets[otherNodeId] || c.secretValue || undefined,
-                secret_arn: c.secretArn || undefined,
-                spec_url: c.specUrl || undefined,
-                spec_inline: c.specContent || undefined,
-                scopes: isOauth ? (c.scopes || []) : undefined,
-                client_id: isOauth ? (c.clientId || undefined) : undefined,
-                oauth_vendor: isOauth ? (c.oauthVendor || undefined) : undefined,
-                discovery_url: isOauth ? (c.discoveryUrl || undefined) : undefined,
-                credential_location: !isOauth ? (c.credentialLocation || undefined) : undefined,
-                credential_parameter_name: !isOauth ? (c.credentialParameterName || undefined) : undefined,
-                credential_prefix: !isOauth ? (c.credentialPrefix || undefined) : undefined,
-              });
-            } else if (toolConfig?.toolId === 'knowledge_base' && toolConfig?.isKnowledgeBase) {
-              knowledgeBaseConfig = toolConfig as unknown as Record<string, unknown>;
-            } else if (toolConfig?.toolId && !toolConfig?.isCustom) {
-              gatewayTools.push(toolConfig.toolId);
-            }
-            if (toolConfig?.isCustom && toolConfig?.lambdaCode) {
-              customTools.push({
-                toolName: toolConfig.toolId || '',
-                displayName: toolConfig.displayName || toolConfig.toolId || '',
-                description: toolConfig.description || '',
-                lambdaCode: toolConfig.lambdaCode,
-                inputSchema: toolConfig.inputSchema || {},
-              });
-            }
-          }
-          // Detect Runtime nodes connected to gateway (MCP Server pattern).
-          // Any non-deployable runtime connected to the gateway is treated as an MCP server target.
-          if (otherNode?.data.componentType === 'runtime' && otherNode.data.configuration) {
-            const runtimeCfg = otherNode.data.configuration as RuntimeConfiguration;
-            const protocol = runtimeCfg.protocol || 'HTTP';
-            // If this runtime has HTTP protocol, it's likely misconfigured — still treat it as MCP server
-            // since it's connected to gateway and is not the deployable runtime.
-            if (protocol === 'HTTP') {
-              console.warn(`Runtime "${runtimeCfg.name}" connected to gateway has HTTP protocol — consider changing to MCP for MCP Server pattern.`);
-            }
-            mcpServerConfig = {
-              name: runtimeCfg.name || 'mcp-server',
-              framework: runtimeCfg.framework || 'strands_agents',
-              systemPrompt: runtimeCfg.systemPrompt || '',
-              model: runtimeCfg.model,
-              tools: mcpServerTools, // will be populated from tool nodes connected to this runtime
-            };
-            // Find tool nodes connected to the MCP Server Runtime
-            edges.forEach(mcpEdge => {
-              if (mcpEdge.source === otherNodeId || mcpEdge.target === otherNodeId) {
-                const mcpToolNodeId = mcpEdge.source === otherNodeId ? mcpEdge.target : mcpEdge.source;
-                if (mcpToolNodeId === gatewayNodeId) return; // skip the gateway itself
-                const mcpToolNode = nodes.find(n => n.id === mcpToolNodeId);
-                if (mcpToolNode?.data.componentType === 'tool') {
-                  const mcpToolCfg = mcpToolNode.data.configuration as { toolId?: string } | undefined;
-                  if (mcpToolCfg?.toolId) {
-                    mcpServerTools.push(mcpToolCfg.toolId);
-                  }
-                }
-              }
-            });
-          }
-        }
-      });
-    }
-
-    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
-  }, [deployableNodeId, edges, nodes, connectorSecrets]);
+  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = useMemo(
+    () => deriveCanvasDeployInputs(deployableNodeId, nodes, edges, connectorSecrets),
+    [deployableNodeId, edges, nodes, connectorSecrets],
+  );
 
   // Close config modal
   const handleCloseConfig = useCallback(() => {

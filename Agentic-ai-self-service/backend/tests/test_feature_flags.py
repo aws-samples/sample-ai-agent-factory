@@ -255,7 +255,9 @@ def test_features_route_lists_every_known_flag_with_its_description(monkeypatch)
     resp = _app(monkeypatch).get("/api/config/features")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["features"] == {CANARY: True}
+    # Every KNOWN flag is listed; the one the parameter set is on, the rest are off (unset = false).
+    assert body["features"] == {name: name == CANARY for name in ff.KNOWN_FEATURE_FLAGS}
+    assert body["features"][CANARY] is True
     assert body["source"] == "ssm" and body["parameter"] == PARAM
     assert body["ignored"] == ["typo"] and body["ttlSeconds"] == 60
     assert set(body["descriptions"]) == set(ff.KNOWN_FEATURE_FLAGS)

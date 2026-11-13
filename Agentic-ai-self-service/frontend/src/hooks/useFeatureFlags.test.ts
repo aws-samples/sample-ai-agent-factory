@@ -10,7 +10,7 @@ import {
 // The producer's shape: backend/src/app/routers/config.py FeatureFlagsResponse, pinned on the
 // backend side by tests/test_feature_flags.py::test_features_route_lists_every_known_flag_with_its_description.
 const LIVE_OFF = {
-  features: { platformFlagsCanary: false },
+  features: { platformFlagsCanary: false, specV2Read: false },
   source: 'ssm',
   parameter: '/agentcore-workflow/dev/platform-features',
   ignored: [],
@@ -58,7 +58,7 @@ describe('parseFeatureFlags', () => {
   it('tolerates optional metadata of the wrong type without turning anything on', () => {
     const parsed = parseFeatureFlags({ features: { platformFlagsCanary: true }, source: 'env', ttlSeconds: 'x' });
     expect(parsed).toEqual({
-      features: { platformFlagsCanary: true },
+      features: { platformFlagsCanary: true, specV2Read: false },
       source: 'env',
       parameter: '',
       ignored: [],
@@ -88,6 +88,6 @@ describe('isFeatureEnabled', () => {
   it('mirrors the backend registry', () => {
     // Twin of KNOWN_FEATURE_FLAGS in backend/src/app/services/feature_flags.py; a flag is added
     // to both in the PR that adds its surface.
-    expect([...KNOWN_FEATURE_FLAGS]).toEqual(['platformFlagsCanary']);
+    expect([...KNOWN_FEATURE_FLAGS]).toEqual(['platformFlagsCanary', 'specV2Read']);
   });
 });

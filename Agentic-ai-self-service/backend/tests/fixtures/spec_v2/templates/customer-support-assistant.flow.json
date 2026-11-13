@@ -1,0 +1,171 @@
+{
+  "id": "flow-customer-support-assistant",
+  "name": "auto-save",
+  "description": "",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "runtime-1767225600000-0-i",
+      "type": "runtime",
+      "position": {
+        "x": 250,
+        "y": 250
+      },
+      "data": {
+        "name": "support_assistant",
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {
+          "provider": "anthropic",
+          "model_id": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "system_prompt": "You are a customer support assistant. You have access to tools through the MCP Gateway to look up customer information, order status, and knowledge base articles.\n\nGuidelines:\n- Always greet the customer warmly\n- Use available tools to look up relevant information before answering\n- If you cannot find the answer, escalate to a human agent\n- Keep responses concise and helpful\n- Remember context from previous messages in the conversation",
+        "deployment_type": "direct_code_deploy",
+        "python_runtime": "PYTHON_3_13",
+        "protocol": "HTTP",
+        "idle_timeout": 300,
+        "max_lifetime": 3600,
+        "enable_otel": false,
+        "component_type": "runtime"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "gateway-1767225600000-1-i",
+      "type": "gateway",
+      "position": {
+        "x": 550,
+        "y": 100
+      },
+      "data": {
+        "name": "support_gateway",
+        "enable_semantic_search": true,
+        "component_type": "gateway"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "identity-1767225600000-2-i",
+      "type": "identity",
+      "position": {
+        "x": 550,
+        "y": 250
+      },
+      "data": {
+        "name": "support_cognito_auth",
+        "credential_type": "oauth2",
+        "oauth2_config": {
+          "provider": "cognito",
+          "client_id": "",
+          "client_secret_ref": "",
+          "scopes": []
+        },
+        "component_type": "identity"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "memory-1767225600000-3-i",
+      "type": "memory",
+      "position": {
+        "x": 550,
+        "y": 400
+      },
+      "data": {
+        "name": "support_memory",
+        "enabled": true,
+        "strategies": [
+          {
+            "type": "semantic",
+            "name": "support_semantic",
+            "description": "Long-term facts about the customer and their orders, recalled across sessions"
+          }
+        ],
+        "component_type": "memory"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "observability-1767225600000-4-i",
+      "type": "observability",
+      "position": {
+        "x": 850,
+        "y": 250
+      },
+      "data": {
+        "name": "support_observability",
+        "enable_otel": false,
+        "component_type": "observability"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1767225600000-0-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "gateway-1767225600000-1-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-1-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "identity-1767225600000-2-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-2-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "memory-1767225600000-3-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-3-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "observability-1767225600000-4-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "metadata": {
+    "author": "system",
+    "tags": [],
+    "aws_region": "us-east-1",
+    "deployment_status": "not_deployed"
+  },
+  "governance": {
+    "version": 1,
+    "namingProfile": null,
+    "tags": {
+      "explicitValues": {},
+      "effectiveValues": {},
+      "profile": null,
+      "policyRevision": ""
+    }
+  },
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "updated_at": "2026-01-01T00:00:00.000Z"
+}

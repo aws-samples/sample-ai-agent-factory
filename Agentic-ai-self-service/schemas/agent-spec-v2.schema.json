@@ -1,0 +1,977 @@
+{
+  "$defs": {
+    "ABTestSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "successMetric": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Successmetric",
+          "type": "string"
+        },
+        "weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Weights",
+          "type": "object"
+        }
+      },
+      "title": "ABTestSpec",
+      "type": "object"
+    },
+    "BudgetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "monthlyUsd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Monthlyusd"
+        },
+        "perRunUsd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Perrunusd"
+        }
+      },
+      "title": "BudgetSpec",
+      "type": "object"
+    },
+    "ChannelSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "identityMode": {
+          "default": "service",
+          "enum": [
+            "obo",
+            "service"
+          ],
+          "title": "Identitymode",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "web",
+            "slack",
+            "teams",
+            "email",
+            "api",
+            "mcp",
+            "a2a"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "ChannelSpec",
+      "type": "object"
+    },
+    "CodeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "customNodes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CustomNodeCode"
+          },
+          "title": "Customnodes",
+          "type": "object"
+        },
+        "hooks": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hooks"
+        }
+      },
+      "title": "CodeSpec",
+      "type": "object"
+    },
+    "CustomNodeCode": {
+      "additionalProperties": false,
+      "properties": {
+        "inline": {
+          "anyOf": [
+            {
+              "maxLength": 102400,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inline"
+        },
+        "language": {
+          "default": "python",
+          "enum": [
+            "python",
+            "typescript"
+          ],
+          "title": "Language",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "sourceRef": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Sourceref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceRef",
+        "sha256"
+      ],
+      "title": "CustomNodeCode",
+      "type": "object"
+    },
+    "DeploymentSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "deployableNodeId": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Deployablenodeid"
+        },
+        "governance": {
+          "additionalProperties": true,
+          "title": "Governance",
+          "type": "object"
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity"
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory"
+        },
+        "mode": {
+          "default": "runtime",
+          "enum": [
+            "runtime",
+            "harness"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "platformVersion": {
+          "anyOf": [
+            {
+              "enum": [
+                "V1",
+                "V2"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Platformversion"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "templateId": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Templateid"
+        },
+        "vpcEgress": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vpcegress"
+        }
+      },
+      "title": "DeploymentSpec",
+      "type": "object"
+    },
+    "DerivedFrom": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "recommendation",
+            "template",
+            "import"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "ref"
+      ],
+      "title": "DerivedFrom",
+      "type": "object"
+    },
+    "EvaluationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "abTest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ABTestSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "datasets": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Datasets",
+          "type": "array"
+        },
+        "evaluators": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Evaluators",
+          "type": "array"
+        },
+        "thresholds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Thresholds",
+          "type": "object"
+        }
+      },
+      "title": "EvaluationSpec",
+      "type": "object"
+    },
+    "InstructionsSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "guardrailProfile": {
+          "default": "off",
+          "enum": [
+            "off",
+            "standard",
+            "strict"
+          ],
+          "title": "Guardrailprofile",
+          "type": "string"
+        },
+        "languages": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Languages",
+          "type": "array"
+        },
+        "style": {
+          "anyOf": [
+            {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Style"
+        },
+        "system": {
+          "default": "",
+          "maxLength": 100000,
+          "title": "System",
+          "type": "string"
+        }
+      },
+      "title": "InstructionsSpec",
+      "type": "object"
+    },
+    "KnowledgeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "dataClass": {
+          "default": "unclassified",
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "pii",
+            "unclassified"
+          ],
+          "title": "Dataclass",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "managedKb",
+            "customKb",
+            "webSearch",
+            "webAnswer"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "KnowledgeSpec",
+      "type": "object"
+    },
+    "LogicEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "animated": {
+          "default": false,
+          "title": "Animated",
+          "type": "boolean"
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "sourceHandle": {
+          "default": "output",
+          "maxLength": 64,
+          "title": "Sourcehandle",
+          "type": "string"
+        },
+        "target": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        },
+        "targetHandle": {
+          "default": "input",
+          "maxLength": 64,
+          "title": "Targethandle",
+          "type": "string"
+        },
+        "type": {
+          "default": "data",
+          "maxLength": 32,
+          "title": "Type",
+          "type": "string"
+        },
+        "xLegacy": {
+          "additionalProperties": true,
+          "title": "Xlegacy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "source",
+        "target"
+      ],
+      "title": "LogicEdge",
+      "type": "object"
+    },
+    "LogicNode": {
+      "additionalProperties": false,
+      "description": "A canvas node, in the persisted v1 shape (``buildFlowSavePayload``), carried verbatim.\n\n``data`` is the component configuration in snake_case with ``component_type``; it is kept as a\nmapping (not re-modelled) so that a configuration the frontend writes today round-trips byte\nfor byte. Unknown node-level properties a future canvas adds are not forbidden silently: the\nmigration moves them under ``x_legacy`` and a validation error names anything else.",
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "position": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "title": "Position",
+          "type": "object"
+        },
+        "selected": {
+          "default": false,
+          "title": "Selected",
+          "type": "boolean"
+        },
+        "type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "validationStatus": {
+          "default": "pending",
+          "maxLength": 32,
+          "title": "Validationstatus",
+          "type": "string"
+        },
+        "xLegacy": {
+          "additionalProperties": true,
+          "title": "Xlegacy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "LogicNode",
+      "type": "object"
+    },
+    "LogicSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/LogicEdge"
+          },
+          "maxItems": 400,
+          "title": "Edges",
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/LogicNode"
+          },
+          "maxItems": 200,
+          "title": "Nodes",
+          "type": "array"
+        },
+        "viewport": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "title": "Viewport",
+          "type": "object"
+        }
+      },
+      "title": "LogicSpec",
+      "type": "object"
+    },
+    "MetaSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "contentHash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contenthash"
+        },
+        "createdAt": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Createdat",
+          "type": "string"
+        },
+        "createdBy": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Createdby",
+          "type": "string"
+        },
+        "derivedFrom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "revision": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "xLegacy": {
+          "additionalProperties": true,
+          "title": "Xlegacy",
+          "type": "object"
+        }
+      },
+      "title": "MetaSpec",
+      "type": "object"
+    },
+    "ModelSpec": {
+      "additionalProperties": false,
+      "description": "Which model the agent runs on. ``provider`` is the serving provider (bedrock, openai, ...);\n``vendor`` is the model family the v1 canvas recorded beside the id (e.g. ``anthropic`` for a\nClaude model served by Bedrock) and is kept so a round trip loses nothing.",
+      "properties": {
+        "fallbackModelId": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fallbackmodelid"
+        },
+        "modelId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Modelid",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "provider": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "vendor": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Vendor"
+        }
+      },
+      "required": [
+        "provider",
+        "modelId"
+      ],
+      "title": "ModelSpec",
+      "type": "object"
+    },
+    "PolicySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "approvalTier": {
+          "default": "derived",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "derived"
+          ],
+          "title": "Approvaltier",
+          "type": "string"
+        },
+        "budget": {
+          "$ref": "#/$defs/BudgetSpec"
+        },
+        "cedarPolicyRefs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Cedarpolicyrefs",
+          "type": "array"
+        },
+        "gatewayGuardrailProfile": {
+          "default": "off",
+          "enum": [
+            "off",
+            "standard",
+            "strict"
+          ],
+          "title": "Gatewayguardrailprofile",
+          "type": "string"
+        }
+      },
+      "title": "PolicySpec",
+      "type": "object"
+    },
+    "ToolSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "auth": {
+          "additionalProperties": true,
+          "title": "Auth",
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "ref": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Ref",
+          "type": "string"
+        },
+        "riskClass": {
+          "default": "unclassified",
+          "enum": [
+            "read",
+            "write",
+            "pay",
+            "unclassified"
+          ],
+          "title": "Riskclass",
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Scopes",
+          "type": "array"
+        },
+        "type": {
+          "enum": [
+            "lambda",
+            "mcp",
+            "openapi",
+            "smithy",
+            "connector",
+            "agent",
+            "knowledgeBase"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "ref"
+      ],
+      "title": "ToolSpec",
+      "type": "object"
+    },
+    "TriggerSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "schedule",
+            "webhook",
+            "event",
+            "email",
+            "file"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "TriggerSpec",
+      "type": "object"
+    }
+  },
+  "$id": "https://github.com/aws-samples/sample-ai-agent-factory/schemas/agent-spec-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "channels": {
+      "items": {
+        "$ref": "#/$defs/ChannelSpec"
+      },
+      "maxItems": 32,
+      "title": "Channels",
+      "type": "array"
+    },
+    "code": {
+      "$ref": "#/$defs/CodeSpec"
+    },
+    "deployment": {
+      "$ref": "#/$defs/DeploymentSpec"
+    },
+    "description": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Description",
+      "type": "string"
+    },
+    "evaluation": {
+      "$ref": "#/$defs/EvaluationSpec"
+    },
+    "id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "instructions": {
+      "$ref": "#/$defs/InstructionsSpec"
+    },
+    "knowledge": {
+      "items": {
+        "$ref": "#/$defs/KnowledgeSpec"
+      },
+      "maxItems": 64,
+      "title": "Knowledge",
+      "type": "array"
+    },
+    "logic": {
+      "$ref": "#/$defs/LogicSpec"
+    },
+    "meta": {
+      "$ref": "#/$defs/MetaSpec"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ModelSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "origin": {
+      "default": "canvas",
+      "enum": [
+        "copilot",
+        "form",
+        "canvas",
+        "code",
+        "import",
+        "template"
+      ],
+      "title": "Origin",
+      "type": "string"
+    },
+    "ownerSub": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ownersub"
+    },
+    "policy": {
+      "$ref": "#/$defs/PolicySpec"
+    },
+    "specVersion": {
+      "const": 2,
+      "default": 2,
+      "title": "Specversion",
+      "type": "integer"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 50,
+      "title": "Tags",
+      "type": "array"
+    },
+    "tools": {
+      "items": {
+        "$ref": "#/$defs/ToolSpec"
+      },
+      "maxItems": 128,
+      "title": "Tools",
+      "type": "array"
+    },
+    "triggers": {
+      "items": {
+        "$ref": "#/$defs/TriggerSpec"
+      },
+      "maxItems": 32,
+      "title": "Triggers",
+      "type": "array"
+    },
+    "workspaceId": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Workspaceid"
+    }
+  },
+  "required": [
+    "id",
+    "name"
+  ],
+  "title": "AgentSpecV2",
+  "type": "object"
+}

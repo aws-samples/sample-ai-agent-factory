@@ -1,0 +1,53 @@
+{
+  "id": "flow-mcp-server-runtime",
+  "name": "auto-save",
+  "description": "",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "runtime-1767225600000-0-i",
+      "type": "runtime",
+      "position": {
+        "x": 400,
+        "y": 250
+      },
+      "data": {
+        "name": "mcp_server_agent",
+        "entrypoint": "agent.py",
+        "deployment_type": "direct_code_deploy",
+        "python_runtime": "PYTHON_3_13",
+        "protocol": "MCP",
+        "idle_timeout": 300,
+        "max_lifetime": 3600,
+        "enable_otel": false,
+        "component_type": "runtime"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    }
+  ],
+  "edges": [],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "metadata": {
+    "author": "system",
+    "tags": [],
+    "aws_region": "us-east-1",
+    "deployment_status": "not_deployed"
+  },
+  "governance": {
+    "version": 1,
+    "namingProfile": null,
+    "tags": {
+      "explicitValues": {},
+      "effectiveValues": {},
+      "profile": null,
+      "policyRevision": ""
+    }
+  },
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "updated_at": "2026-01-01T00:00:00.000Z"
+}

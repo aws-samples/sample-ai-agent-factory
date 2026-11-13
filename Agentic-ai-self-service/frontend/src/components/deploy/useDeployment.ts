@@ -12,6 +12,7 @@ import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration 
 import type { CustomToolData, DeployConnector } from './DeployPanel';
 import type { ResourceTagState } from './resourceTagState';
 import { runtimeConfigForRequest } from '../../utils/runtimeRequestConfig';
+import { identityConfigForRequest } from '../../utils/deployRequestFromCanvas';
 import { isReleaseRegion, releaseRegionUnavailableReason } from '../../utils/awsRegion';
 
 interface DeploymentStatus {
@@ -149,15 +150,7 @@ export function useDeployment(params: UseDeploymentParams) {
           gatewayConfig,
           gatewayTools,
           templateId,
-          identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
-            mode: identityConfig?.mode ?? 'shared',
-            provider: identityConfig?.oauth2Config?.provider,
-            clientId: identityConfig?.oauth2Config?.clientId,
-            clientSecretRef: identityConfig?.oauth2Config?.clientSecretRef,
-            discoveryUrl: identityConfig?.oauth2Config?.discoveryUrl || '',
-            scopes: identityConfig?.oauth2Config?.scopes || [],
-            audience: identityConfig?.oauth2Config?.audience || undefined,
-          } : undefined,
+          identityConfig: identityConfigForRequest(identityConfig),
           customTools: customTools.length > 0 ? customTools : undefined,
           connectors: connectors.length > 0 ? connectors : undefined,
           externalMcpServers,

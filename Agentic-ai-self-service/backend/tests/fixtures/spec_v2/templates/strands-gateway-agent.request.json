@@ -1,0 +1,41 @@
+{
+  "deploymentMode": "runtime",
+  "nodeId": "runtime-1767225600000-0-i",
+  "config": {
+    "name": "strands_gateway_agent",
+    "entrypoint": "agent.py",
+    "framework": "strands_agents",
+    "model": {
+      "provider": "anthropic",
+      "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "systemPrompt": "You are a helpful assistant with access to tools through the MCP Gateway. Use available tools to answer user questions. Be precise and helpful.",
+    "deploymentType": "direct_code_deploy",
+    "pythonRuntime": "PYTHON_3_13",
+    "protocol": "HTTP",
+    "idleTimeout": 300,
+    "maxLifetime": 3600,
+    "enableOtel": false
+  },
+  "connectedTools": [
+    "gateway",
+    "identity"
+  ],
+  "gatewayConfig": {
+    "name": "agent_gateway",
+    "enableSemanticSearch": true,
+    "targets": []
+  },
+  "gatewayTools": [],
+  "templateId": "strands-gateway-agent",
+  "identityConfig": {
+    "mode": "shared",
+    "provider": "cognito",
+    "clientId": "",
+    "clientSecretRef": "",
+    "discoveryUrl": "",
+    "scopes": []
+  }
+}

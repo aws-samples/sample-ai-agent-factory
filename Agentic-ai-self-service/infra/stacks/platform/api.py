@@ -137,6 +137,18 @@ def build_api_gateway(
         authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
+    # --- Agent Spec v2 (read surface, flag specV2Read) ---
+    # GET /api/specs/{flowId}, POST /api/specs/validate, POST /api/specs/{flowId}/compile. All
+    # three are pure reads of the caller's flow or of the posted document; the write surface
+    # (PUT, revisions, revert) arrives with its own flag and its own routes.
+    api.add_routes(
+        path="/api/specs/{proxy+}",
+        methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+        integration=workflow_integration,
+        authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
+    )
+
     # --- Deployment routes ---
     api.add_routes(
         path="/api/deploy",

@@ -1,0 +1,221 @@
+{
+  "id": "flow-customer-support-blueprint",
+  "name": "auto-save",
+  "description": "",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "runtime-1767225600000-0-i",
+      "type": "runtime",
+      "position": {
+        "x": 200,
+        "y": 250
+      },
+      "data": {
+        "name": "customer_support_agent",
+        "entrypoint": "agent.py",
+        "framework": "strands_agents",
+        "model": {
+          "provider": "anthropic",
+          "model_id": "us.anthropic.claude-sonnet-5",
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "system_prompt": "You are a customer support agent. Your role is to answer customer questions about orders, account information, and refund requests.\n\nGuidelines:\n- Use the customer's ID to look up their account and orders automatically\n- When showing orders, always fetch full order details (get_order) to include item names, quantities, and prices\n- Summarize information clearly and concisely for the customer\n- For refunds, validate the order exists and the amount before processing\n\nDemo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)",
+        "deployment_type": "direct_code_deploy",
+        "python_runtime": "PYTHON_3_13",
+        "protocol": "HTTP",
+        "idle_timeout": 300,
+        "max_lifetime": 3600,
+        "enable_otel": false,
+        "component_type": "runtime"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "gateway-1767225600000-1-i",
+      "type": "gateway",
+      "position": {
+        "x": 500,
+        "y": 150
+      },
+      "data": {
+        "name": "support_gateway",
+        "enable_semantic_search": true,
+        "component_type": "gateway"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "tool-1767225600000-2-i",
+      "type": "tool",
+      "position": {
+        "x": 800,
+        "y": 50
+      },
+      "data": {
+        "name": "Get Order",
+        "tool_id": "get_order",
+        "description": "Look up order details by order ID",
+        "enabled": true,
+        "component_type": "tool"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "tool-1767225600000-3-i",
+      "type": "tool",
+      "position": {
+        "x": 800,
+        "y": 150
+      },
+      "data": {
+        "name": "Get Customer",
+        "tool_id": "get_customer",
+        "description": "Look up customer information",
+        "enabled": true,
+        "component_type": "tool"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "tool-1767225600000-4-i",
+      "type": "tool",
+      "position": {
+        "x": 800,
+        "y": 250
+      },
+      "data": {
+        "name": "List Orders",
+        "tool_id": "list_orders",
+        "description": "List orders for a customer",
+        "enabled": true,
+        "component_type": "tool"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "tool-1767225600000-5-i",
+      "type": "tool",
+      "position": {
+        "x": 800,
+        "y": 350
+      },
+      "data": {
+        "name": "Process Refund",
+        "tool_id": "process_refund",
+        "description": "Process a refund for an order",
+        "enabled": true,
+        "component_type": "tool"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    },
+    {
+      "id": "memory-1767225600000-6-i",
+      "type": "memory",
+      "position": {
+        "x": 500,
+        "y": 400
+      },
+      "data": {
+        "name": "support_memory",
+        "enabled": true,
+        "strategies": [
+          {
+            "type": "semantic",
+            "name": "support_semantic",
+            "description": "Long-term facts about the customer and their orders, recalled across sessions"
+          }
+        ],
+        "component_type": "memory"
+      },
+      "selected": false,
+      "validation_status": "pending"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1767225600000-0-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "gateway-1767225600000-1-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-1-i",
+      "source": "runtime-1767225600000-0-i",
+      "target": "memory-1767225600000-6-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-2-i",
+      "source": "gateway-1767225600000-1-i",
+      "target": "tool-1767225600000-2-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-3-i",
+      "source": "gateway-1767225600000-1-i",
+      "target": "tool-1767225600000-3-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-4-i",
+      "source": "gateway-1767225600000-1-i",
+      "target": "tool-1767225600000-4-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    },
+    {
+      "id": "edge-1767225600000-5-i",
+      "source": "gateway-1767225600000-1-i",
+      "target": "tool-1767225600000-5-i",
+      "source_handle": "output",
+      "target_handle": "input",
+      "type": "data",
+      "animated": false
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "metadata": {
+    "author": "system",
+    "tags": [],
+    "aws_region": "us-east-1",
+    "deployment_status": "not_deployed"
+  },
+  "governance": {
+    "version": 1,
+    "namingProfile": null,
+    "tags": {
+      "explicitValues": {},
+      "effectiveValues": {},
+      "profile": null,
+      "policyRevision": ""
+    }
+  },
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "updated_at": "2026-01-01T00:00:00.000Z"
+}

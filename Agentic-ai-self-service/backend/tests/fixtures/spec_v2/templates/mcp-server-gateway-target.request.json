@@ -1,0 +1,44 @@
+{
+  "deploymentMode": "runtime",
+  "nodeId": "runtime-1767225600000-0-i",
+  "config": {
+    "name": "mcp_gateway_agent",
+    "entrypoint": "agent.py",
+    "framework": "strands_agents",
+    "model": {
+      "provider": "anthropic",
+      "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "systemPrompt": "You are a helpful assistant with access to order management tools through the MCP Gateway. Use the available tools to help users look up orders, customers, and process refunds.",
+    "deploymentType": "direct_code_deploy",
+    "pythonRuntime": "PYTHON_3_13",
+    "protocol": "HTTP",
+    "idleTimeout": 300,
+    "maxLifetime": 3600,
+    "enableOtel": false
+  },
+  "connectedTools": [
+    "gateway"
+  ],
+  "gatewayConfig": {
+    "name": "mcp_server_gateway",
+    "enableSemanticSearch": true,
+    "targets": []
+  },
+  "gatewayTools": [],
+  "templateId": "mcp-server-gateway-target",
+  "mcpServerConfig": {
+    "name": "mcp_server_agent",
+    "framework": "strands_agents",
+    "systemPrompt": "MCP Server that exposes order management tools: get_order, get_customer, list_orders, and process_refund.",
+    "model": {
+      "provider": "anthropic",
+      "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "temperature": 0.7,
+      "topP": 0.9
+    },
+    "tools": []
+  }
+}

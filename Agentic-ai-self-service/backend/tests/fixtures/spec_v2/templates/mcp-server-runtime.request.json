@@ -1,0 +1,18 @@
+{
+  "deploymentMode": "runtime",
+  "nodeId": "runtime-1767225600000-0-i",
+  "config": {
+    "name": "mcp_server_agent",
+    "entrypoint": "agent.py",
+    "deploymentType": "direct_code_deploy",
+    "pythonRuntime": "PYTHON_3_13",
+    "protocol": "MCP",
+    "idleTimeout": 300,
+    "maxLifetime": 3600,
+    "enableOtel": false
+  },
+  "connectedTools": [],
+  "gatewayConfig": null,
+  "gatewayTools": [],
+  "templateId": "mcp-server-runtime"
+}
