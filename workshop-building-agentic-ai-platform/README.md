@@ -249,7 +249,7 @@ Run the real S3 positive and adversarial checks in a disposable account and supp
 
 The live test refuses a pre-existing default bucket, verifies a real foreign-owner 403 and a
 wrong-Region refusal, stages all six templates, checks the bucket controls, and deletes only the
-buckets it created on every exit path.
+bucket it created on every exit path.
 
 `deploy-registry.sh destroy` rechecks ownership before deleting staged objects and removes the
 default bucket when it is empty. It never deletes a caller-supplied bucket.

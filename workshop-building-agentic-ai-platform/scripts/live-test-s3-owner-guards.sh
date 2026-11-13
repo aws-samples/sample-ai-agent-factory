@@ -24,8 +24,6 @@ ALT_REGION="us-east-1"
 if [[ "${TEST_REGION}" == "us-east-1" ]]; then
   ALT_REGION="us-west-2"
 fi
-RUN_ID="$(date -u +%Y%m%d%H%M%S)-$$"
-WRONG_REGION_BUCKET="s3guard-${RUN_ID}-${CALLER_ACCOUNT}-${ALT_REGION}-an"
 REGISTRY_TEMPLATES=(
   network-stack.yaml
   data-stack.yaml
@@ -35,7 +33,6 @@ REGISTRY_TEMPLATES=(
   observability-stack.yaml
 )
 DEFAULT_BUCKET_CREATED=false
-WRONG_REGION_BUCKET_CREATED=false
 
 bucket_exists_owned() {
   local bucket="$1" region="$2"
@@ -58,13 +55,6 @@ empty_known_templates() {
 
 cleanup() {
   set +e
-  if [[ "${WRONG_REGION_BUCKET_CREATED}" == "true" ]] && \
-      bucket_exists_owned "${WRONG_REGION_BUCKET}" "${ALT_REGION}"; then
-    aws s3api delete-bucket \
-      --bucket "${WRONG_REGION_BUCKET}" \
-      --expected-bucket-owner "${CALLER_ACCOUNT}" \
-      --region "${ALT_REGION}" >/dev/null 2>&1
-  fi
   if [[ "${DEFAULT_BUCKET_CREATED}" == "true" ]] && \
       bucket_exists_owned "${DEFAULT_BUCKET}" "${TEST_REGION}"; then
     empty_known_templates "${DEFAULT_BUCKET}" "${TEST_REGION}" "cfn/registry/"
@@ -97,19 +87,18 @@ if [[ "${foreign_output}" != *"Refusing to upload trusted templates"* ||
 fi
 printf 'PASS foreign owner: denied before upload\n'
 
-# An owned bucket in another Region must also fail before upload.
-create_args=(
-  --bucket "${WRONG_REGION_BUCKET}"
-  --bucket-namespace account-regional
-  --object-ownership BucketOwnerEnforced
-  --region "${ALT_REGION}"
-)
-if [[ "${ALT_REGION}" != "us-east-1" ]]; then
-  create_args+=(--create-bucket-configuration "LocationConstraint=${ALT_REGION}")
-fi
-WRONG_REGION_BUCKET_CREATED=true
-aws s3api create-bucket "${create_args[@]}" >/dev/null
-if wrong_region_output=$(AWS_DEFAULT_REGION="${TEST_REGION}" S3_BUCKET="${WRONG_REGION_BUCKET}" \
+# Exercise the positive path: create the default account-regional bucket, apply
+# controls, upload all six templates, verify them through real S3 reads, and run
+# the product cleanup function. Mark it owned by this run before creation so the
+# EXIT trap also cleans a partial create or upload failure.
+DEFAULT_BUCKET_CREATED=true
+env -u S3_BUCKET AWS_DEFAULT_REGION="${TEST_REGION}" \
+  bash -c "source \"\$1\"; upload_templates" _ "${DEPLOY_SCRIPT}"
+
+# Reuse the known-owned positive fixture to prove that selecting another Region
+# is rejected before any upload. This avoids a second cross-Region bucket and a
+# separate cleanup path.
+if wrong_region_output=$(AWS_DEFAULT_REGION="${ALT_REGION}" S3_BUCKET="${DEFAULT_BUCKET}" \
   bash -c "source \"\$1\"; upload_templates" _ "${DEPLOY_SCRIPT}" 2>&1); then
   echo "ERROR: wrong-Region bucket was accepted." >&2
   exit 1
@@ -119,19 +108,6 @@ if [[ "${wrong_region_output}" == *"Uploaded network-stack.yaml"* ]]; then
   exit 1
 fi
 printf 'PASS wrong Region: denied before upload\n'
-aws s3api delete-bucket \
-  --bucket "${WRONG_REGION_BUCKET}" \
-  --expected-bucket-owner "${CALLER_ACCOUNT}" \
-  --region "${ALT_REGION}" >/dev/null
-WRONG_REGION_BUCKET_CREATED=false
-
-# Exercise the positive path: create the default account-regional bucket, apply
-# controls, upload all six templates, verify them through real S3 reads, and run
-# the product cleanup function. Mark it owned by this run before creation so the
-# EXIT trap also cleans a partial create or upload failure.
-DEFAULT_BUCKET_CREATED=true
-env -u S3_BUCKET AWS_DEFAULT_REGION="${TEST_REGION}" \
-  bash -c "source \"\$1\"; upload_templates" _ "${DEPLOY_SCRIPT}"
 
 location=$(aws s3api get-bucket-location \
   --bucket "${DEFAULT_BUCKET}" \
