@@ -478,6 +478,19 @@ def build_api_gateway(
         authorizer=jwt_authorizer,
         authorization_scopes=["aws.cognito.signin.user.admin"],
     )
+    # Workspace policy admin surface (plan §3.B, flag workspacePolicy):
+    # GET /api/workspaces/policies, GET/PUT/DELETE /api/workspaces/{id}/policy. Routes to the
+    # DEPLOYMENT Lambda (deployment_handler mounts workspace_policies_router; the policies live
+    # in the org-config table only that Lambda has a grant for). Distinct from the exact
+    # GET /api/workspaces above: HTTP API matches the exact route before the greedy one, so the
+    # workflow Lambda keeps the sharing list and this proxy covers every sub-path.
+    api.add_routes(
+        path="/api/workspaces/{proxy+}",
+        methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PUT, apigwv2.HttpMethod.DELETE],
+        integration=deployment_integration,
+        authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
+    )
 
     # --- Observability credential storage route ---
     # Routes to workflow_lambda because main.py (workflow Lambda) is the only

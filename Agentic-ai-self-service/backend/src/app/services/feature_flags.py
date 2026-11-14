@@ -58,6 +58,13 @@ KNOWN_FEATURE_FLAGS: dict[str, str] = {
         "migrated on read, nothing written), POST /api/specs/validate and POST /api/specs/{flowId}/compile. "
         "Off: those routes answer the exact 404 of a nonexistent route."
     ),
+    "workspacePolicy": (
+        "Workspace policy and risk-tiered admission: POST /api/deploy classifies the agent and refuses "
+        "with the exact 403 policy_denied when the governing workspace policy does not allow something "
+        "it uses, before any row, secret, execution or AWS resource exists; the admin surface "
+        "GET/PUT/DELETE /api/workspaces/{workspaceId}/policy and GET /api/workspaces/policies. "
+        "Off: admission is unchanged and the admin routes answer the exact 404 of a nonexistent route."
+    ),
 }
 
 PARAMETER_SUFFIX = "platform-features"

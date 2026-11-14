@@ -1137,6 +1137,7 @@ from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.triggers import webhook_router  # noqa: E402
 from app.routers.versions import router as versions_router  # noqa: E402
 from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
+from app.routers.workspace_policies import router as workspace_policies_router  # noqa: E402  # plan §3.B
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -1216,6 +1217,10 @@ deployment_app.include_router(deploy_targets_router)
 # Phase 5 (Loom) audit dashboard — /api/admin/audit (admin scope). Reads the
 # audit store the middleware writes to.
 deployment_app.include_router(admin_router)
+# Workspace policy admin surface (plan §3.B): /api/workspaces/{id}/policy and
+# /api/workspaces/policies, flag workspacePolicy then admin scope. Lives HERE because the
+# policies share the org-config table this Lambda already reads for tag governance.
+deployment_app.include_router(workspace_policies_router)
 
 
 @deployment_app.get("/health")
@@ -1308,6 +1313,98 @@ def _reject_unowned_flow(flow_id: str | None, caller_sub: str) -> None:
             "flow not found" if flow is None else "not the owner",
         )
         raise
+
+
+def _reject_workspace_policy_violation(request: DeployRequest, caller_sub: str) -> None:
+    """Workspace policy and risk-tiered admission (plan §3.B, step 3). Flag-gated, fail closed.
+
+    Behind the ``workspacePolicy`` feature flag: off, this function returns before reading anything
+    and admission is exactly what it was. On, it runs AFTER ``_reject_unowned_flow`` (ownership is
+    proven first, so this never reads a flow the caller may not see) and BEFORE any persistence,
+    like the regional gates around it: a refusal costs no row, secret, execution or AWS resource.
+
+    What it does: loads the flow the deploy names, reads it as Spec v2 (the same lazy, no-write
+    migration ``GET /api/specs/{id}`` uses, so the admitted document is the one the builder can
+    inspect), resolves the governing workspace policy (the flow's workspace, else the org
+    ``default`` workspace), and asks ``workspace_admission.admit``. A violation is the exact
+    ``403 policy_denied`` with one reason code per offending item. An admitted agent's tier and
+    approver routing are recorded on the request state for the registry record downstream.
+
+    A deploy that names no flow (a harness deploy, an unsaved canvas) carries nothing to classify:
+    it is governed by the ``default`` workspace policy applied to the request's own model and
+    Region, so the flag does not open a hole for flow-less deploys.
+
+    Fail closed: when the policy store cannot be read, or no ``default`` policy exists, the deploy
+    is refused with 503 rather than admitted unclassified -- the same posture as tag governance
+    above. The failure TYPE is logged, never the request content.
+    """
+    from app.services.feature_flags import get_feature_flags
+
+    if not get_feature_flags().enabled("workspacePolicy"):
+        return
+
+    from app.services.workspace_admission import admit, denial_detail
+    from app.services.workspace_policy_service import (
+        DEFAULT_ORG_ID,
+        WorkspacePolicyUnavailableError,
+        get_workspace_policy_store,
+        resolve_policy,
+    )
+
+    spec = _spec_for_admission(request, caller_sub)
+    try:
+        policy, fell_back = resolve_policy(get_workspace_policy_store(), DEFAULT_ORG_ID, spec.workspace_id)
+    except WorkspacePolicyUnavailableError as exc:
+        logger.error("Deploy refused: workspace policy unavailable (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The workspace policy could not be read, so this deployment was refused rather than "
+                "admitted unclassified. Nothing was created. An administrator must store a policy for "
+                "the 'default' workspace before agents can be deployed with workspace admission on."
+            ),
+        ) from exc
+
+    decision = admit(spec, policy)
+    logger.info(
+        "Workspace admission: workspace=%s fallback=%s tier=%s outcome=%s violations=%d",
+        decision.workspace_id,
+        fell_back,
+        decision.tier,
+        decision.outcome,
+        len(decision.violations),
+    )
+    if decision.outcome == "denied":
+        raise HTTPException(status_code=403, detail=denial_detail(decision))
+    request.set_admission_decision(decision.model_dump(by_alias=True))
+
+
+def _spec_for_admission(request: DeployRequest, caller_sub: str):
+    """The Spec v2 document admission judges: the named flow's, else a minimal spec of the request."""
+    from app.routers.specs import spec_for_flow
+    from app.schemas.agent_spec_v2 import AgentSpecV2
+
+    if request.flow_id:
+        store = _flow_store_for_ownership()
+        flow = store.get(request.flow_id) if store is not None else None
+        if flow is None:
+            # Ownership passed a moment ago, so this is a race with a delete; same 404 as that gate.
+            raise HTTPException(status_code=404, detail=f"Flow '{request.flow_id}' not found")
+        return spec_for_flow(flow, caller_sub)
+
+    model = None
+    model_cfg = request.config.model if isinstance(request.config.model, dict) else None
+    if model_cfg and model_cfg.get("modelId"):
+        model = {"provider": request.config.model_provider, "modelId": str(model_cfg["modelId"])}
+    return AgentSpecV2.model_validate(
+        {
+            "id": "unsaved",
+            "name": request.config.name or "unsaved",
+            "ownerSub": caller_sub,
+            "model": model,
+            "deployment": {"region": request.target_region},
+        }
+    )
 
 
 def _reject_cfn_only_naming_profile(request: DeployRequest, operation: str) -> None:
@@ -1871,6 +1968,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # gates, because cnt_jljdNeOwgPnFx2 requires the authorization decision be enforced outside
     # and ahead of the side-effecting path, not compensated for afterwards.
     _reject_unowned_flow(request.flow_id, user_id)
+    # Workspace policy + risk tier (plan §3.B), flag-gated: ownership is proven above, so the flow
+    # this reads is one the caller may see; nothing below has persisted anything yet.
+    _reject_workspace_policy_violation(request, user_id)
 
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
     _reject_unsupported_release_region(request)

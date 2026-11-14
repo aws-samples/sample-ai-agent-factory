@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from .components import ConnectorConfig
 from .template_composition import template_composition_refusal, template_implied_capabilities
@@ -726,6 +726,18 @@ class DeployRequest(BaseModel):
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    #: Workspace admission decision (plan §3.B), set by the deploy handler after the agent is
+    #: admitted. Private so it is never part of the wire schema (``extra="forbid"`` above) and
+    #: never serialized back to a caller; read by the registry record downstream.
+    _admission_decision: dict | None = PrivateAttr(default=None)
+
+    def set_admission_decision(self, decision: dict | None) -> None:
+        self._admission_decision = decision
+
+    @property
+    def admission_decision(self) -> dict | None:
+        return self._admission_decision
 
     @model_validator(mode="before")
     @classmethod
