@@ -88,7 +88,7 @@ def test_pending_groups_follow_policy_order_and_complete_records_count():
     assert wa.admission_tier(admission) == "high"
 
 
-@pytest.mark.parametrize("admission", [None, {"approvers": []}, _admission([], tier="low")])
+@pytest.mark.parametrize("admission", [None, _admission([], tier="low"), _admission([], tier="medium")])
 def test_no_approver_groups_means_no_approval_requirement(admission):
     assert wa.required_approver_groups(admission) == []
     assert wa.requires_approval(admission) is False
@@ -105,6 +105,9 @@ def test_no_approver_groups_means_no_approval_requirement(admission):
         {"approvers": ["g-approvers", 7]},  # a non-string member
         {"approvers": [""]},  # an empty name
         {"approvers": ["bad group!"]},  # a name no approver could ever satisfy
+        {"approvers": []},  # an incomplete decision: no outcome, tier, workspace or reasons
+        {**_admission(["g-approvers"]), "outcome": "denied"},  # a denied decision is never persisted
+        {**_admission(["g-approvers"]), "admissionVersion": "x"},  # a corrupt version marker
         "not-an-object",
     ],
 )
@@ -134,6 +137,28 @@ def test_an_incomplete_approval_record_never_counts_as_an_approval(approvals):
         wa.approved_groups(approvals)
     with pytest.raises(wa.MalformedAdmissionError):
         wa.pending_groups(_admission(["g-approvers"]), approvals)
+
+
+def test_an_approval_record_naming_the_owner_is_tampering_and_blocks(seeded, monkeypatch):
+    """Finding 4 (round 3): the store never writes an owner's approval, so one on the row is corruption;
+    it must not count towards release, and promotion stays blocked."""
+    forged = [wa.approval_record("g-admins-security", OWNER, "t"), wa.approval_record("g-approvers", APPROVER, "t")]
+    with pytest.raises(wa.MalformedAdmissionError):
+        wa.approved_groups(forged, owner_sub=OWNER)
+    assert wa.approved_groups(forged) == {
+        "g-admins-security",
+        "g-approvers",
+    }  # without the owner nothing can be checked
+    seeded._table.update_item(
+        Key={"runtime_name": RUNTIME, "version_id": VERSION},
+        UpdateExpression="SET admission_approvals = :a",
+        ExpressionAttributeValues={":a": forged},
+    )
+    owner = _router_client(monkeypatch, seeded, sub=OWNER, groups=("g-users-default",))
+    blocked = owner.post(PROMOTE, json={"slot": "production"})
+    assert blocked.status_code == 409, blocked.text
+    assert "malformed" in blocked.json()["detail"]
+    owner.slot_write.assert_not_called()
 
 
 def test_an_approval_requirement_routes_to_staging_and_refuses_explicit_production():

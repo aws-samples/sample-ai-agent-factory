@@ -405,7 +405,7 @@ async def promote_version(
         # A present-but-malformed record stays blocked: a requirement that cannot be read cannot
         # be shown to be satisfied.
         try:
-            pending = pending_groups(target.admission, target.admission_approvals)
+            pending = pending_groups(target.admission, target.admission_approvals, owner_sub=target.owner_sub)
         except MalformedAdmissionError as exc:
             logger.error("Version %s/%s has a malformed admission record (%s)", runtime_name, version_id, exc)
             raise HTTPException(
@@ -637,7 +637,7 @@ async def approve_version(
         version_id,
         body.group,
         owner_sub_hash(caller_sub),
-        pending_groups(updated.admission, updated.admission_approvals),
+        pending_groups(updated.admission, updated.admission_approvals, owner_sub=updated.owner_sub),
     )
     return VersionResponse.from_model(updated)
 

@@ -52,22 +52,33 @@ def required_approver_groups(admission: dict[str, Any] | None) -> list[str]:
     """The approver groups an admission decision routes to, in policy order; ``[]`` when none.
 
     ``None`` (no admission: flag off at deploy time, or a legacy row) imposes nothing. A PRESENT
-    admission must carry ``approvers`` as a list of well-formed group names; anything else raises
-    ``MalformedAdmissionError`` instead of being read as "no requirement".
+    admission must be a complete, well-formed ``AdmissionDecision`` whose ``outcome`` is ``admitted``
+    (a denied decision is never persisted, so one on a row is corruption) and whose ``approvers`` are
+    well-formed group names; anything else raises ``MalformedAdmissionError`` instead of being read as
+    "no requirement".
     """
     if admission is None:
         return []
     if not isinstance(admission, dict):
         raise MalformedAdmissionError("admission is not an object")
-    approvers = admission.get("approvers")
-    if not isinstance(approvers, list) or not all(_well_formed_group(group) for group in approvers):
+    try:
+        from app.services.workspace_admission import AdmissionDecision
+
+        decision = AdmissionDecision.model_validate(admission)
+    except Exception as exc:  # noqa: BLE001 - any validation failure is "cannot be read"
+        raise MalformedAdmissionError(f"admission is not a well-formed decision ({type(exc).__name__})") from exc
+    if decision.outcome != "admitted":
+        raise MalformedAdmissionError(f"admission outcome is {decision.outcome!r}, not 'admitted'")
+    if not all(_well_formed_group(group) for group in decision.approvers):
         raise MalformedAdmissionError("admission.approvers is not a list of group names")
-    return list(approvers)
+    return list(decision.approvers)
 
 
-def approved_groups(approvals: list[dict[str, Any]] | None) -> set[str]:
+def approved_groups(approvals: list[dict[str, Any]] | None, *, owner_sub: str | None = None) -> set[str]:
     """The groups with a complete approval record (group, approver subject and timestamp). A record
-    missing any of the three is malformed and raises, never silently counted or ignored."""
+    missing any of the three is malformed and raises, never silently counted or ignored. When the
+    version's ``owner_sub`` is given, a record whose approver IS the owner is malformed too: the store
+    never writes one, so its presence means the row was tampered with, and it must not count."""
     if approvals is None:
         return set()
     if not isinstance(approvals, list):
@@ -77,21 +88,23 @@ def approved_groups(approvals: list[dict[str, Any]] | None) -> set[str]:
         if not isinstance(record, dict):
             raise MalformedAdmissionError("approval record is not an object")
         group, approver, at = record.get("group"), record.get("approverSub"), record.get("approvedAt")
-        if (
-            not _well_formed_group(group)
-            or not isinstance(approver, str)
-            or not approver
-            or not isinstance(at, str)
-            or not at
-        ):
+        complete = _well_formed_group(group) and isinstance(approver, str) and approver and isinstance(at, str) and at
+        if not complete:
             raise MalformedAdmissionError("approval record is incomplete")
+        if owner_sub is not None and approver == owner_sub:
+            raise MalformedAdmissionError("approval record names the version's owner as approver")
         groups.add(group)
     return groups
 
 
-def pending_groups(admission: dict[str, Any] | None, approvals: list[dict[str, Any]] | None) -> list[str]:
+def pending_groups(
+    admission: dict[str, Any] | None,
+    approvals: list[dict[str, Any]] | None,
+    *,
+    owner_sub: str | None = None,
+) -> list[str]:
     """Approver groups that have not approved yet, in policy order."""
-    done = approved_groups(approvals)
+    done = approved_groups(approvals, owner_sub=owner_sub)
     return [group for group in required_approver_groups(admission) if group not in done]
 
 

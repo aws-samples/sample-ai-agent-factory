@@ -80,14 +80,17 @@ def effective_risk_class(tool: ToolSpec, policy: WorkspacePolicy | None = None) 
     """The class the classifier judges a tool by.
 
     Trusted first: a connector's class is floored at what its catalog operations imply, whatever the
-    builder wrote. Then the builder's own assertion counts only when the workspace trusts it
-    (``defaults.trustBuilderClassifications``); otherwise an assertion the platform cannot verify
-    reads as ``unclassified`` (so it floors at the workspace's unclassified tier and is refused on a
-    constrained axis). A builder may raise a class above the catalog floor only in a trusting
-    workspace; nobody can lower it below the floor anywhere.
+    builder wrote. Then the builder's own assertion: in a workspace that trusts builder classifications
+    (``defaults.trustBuilderClassifications``) it counts as written; elsewhere it may only make the agent
+    STRICTER -- a ``write`` or ``pay`` label still counts (a builder declaring more risk is believed),
+    while a ``read`` label is unverifiable and reads as ``unclassified`` (so it floors at the workspace's
+    unclassified tier and is refused on a constrained axis). Nobody can lower a class below the catalog
+    floor anywhere.
     """
     trusted = policy is not None and policy.defaults.trust_builder_classifications
-    asserted: RiskClass = tool.risk_class if trusted else "unclassified"
+    asserted: RiskClass = tool.risk_class
+    if not trusted and asserted not in ("write", "pay"):
+        asserted = "unclassified"
     if tool.type != "connector":
         return asserted
     floor = catalog_risk_floor(tool.ref)
@@ -98,10 +101,13 @@ def effective_risk_class(tool: ToolSpec, policy: WorkspacePolicy | None = None) 
 
 def effective_data_class(item: KnowledgeSpec, policy: WorkspacePolicy | None = None) -> DataClass:
     """The data class the classifier judges knowledge by. There is no trusted source for data classes
-    yet, so a builder's assertion counts only in a workspace that trusts builder classifications;
-    elsewhere every knowledge item is ``unclassified``."""
+    yet, so outside a workspace that trusts builder classifications only a label that RAISES risk
+    counts (``confidential``, ``pii``); ``public`` and ``internal`` are unverifiable and read as
+    ``unclassified``."""
     trusted = policy is not None and policy.defaults.trust_builder_classifications
-    return item.data_class if trusted else "unclassified"
+    if trusted or item.data_class in ("confidential", "pii"):
+        return item.data_class
+    return "unclassified"
 
 
 def _higher(current: RiskTier, candidate: RiskTier) -> RiskTier:

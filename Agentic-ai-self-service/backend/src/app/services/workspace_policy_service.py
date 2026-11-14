@@ -31,7 +31,7 @@ from decimal import Decimal
 from typing import Any
 
 import boto3
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.schemas.workspace_policy import WorkspacePolicy
 
@@ -95,13 +95,18 @@ def policy_to_item(org_id: str, policy: WorkspacePolicy) -> dict[str, Any]:
 
 
 def policy_from_item(item: dict[str, Any]) -> WorkspacePolicy:
-    """Rebuild a policy from its item. Strict: a corrupt or hand-edited item raises rather than
-    yielding a policy that silently allows (or denies) more than the admin wrote, and the document's
-    ``workspaceId`` must be the one the sort key was built from (a policy filed under another key
-    governs nothing)."""
+    """Rebuild a policy from its item. Strict, three ways: a corrupt or hand-edited item raises rather
+    than yielding a policy that silently allows (or denies) more than the admin wrote; the document must
+    be COMPLETE (every field the writer produces, at every level), because a truncated document would
+    reconstruct unconstrained allow-lists and empty approval routing from defaults; and the document's
+    ``workspaceId`` must be the one the sort key was built from (a policy filed under another key governs
+    nothing)."""
     document = item.get("policy")
     if not isinstance(document, dict):
         raise WorkspacePolicyError("workspace policy item has no policy document")
+    missing = _missing_fields(WorkspacePolicy, document)
+    if missing:
+        raise WorkspacePolicyError(f"stored workspace policy is incomplete; missing {sorted(missing)}")
     try:
         policy = WorkspacePolicy.model_validate(_decimals_to_numbers(document))
     except ValidationError as exc:
@@ -112,6 +117,23 @@ def policy_from_item(item: dict[str, Any]) -> WorkspacePolicy:
             f"stored workspace policy for key {keyed!r} names workspace {policy.workspace_id!r}; refusing to use it"
         )
     return policy
+
+
+def _missing_fields(model: type[BaseModel], document: Any, prefix: str = "") -> list[str]:
+    """Dotted paths of every field of ``model`` (and its nested policy models) absent from ``document``.
+    The writer always stores the complete camelCase document, so absence means truncation."""
+    if not isinstance(document, dict):
+        return [prefix.rstrip(".") or "<root>"]
+    missing: list[str] = []
+    for name, field in model.model_fields.items():
+        alias = field.alias or name
+        if alias not in document:
+            missing.append(f"{prefix}{alias}")
+            continue
+        annotation = field.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            missing.extend(_missing_fields(annotation, document[alias], f"{prefix}{alias}."))
+    return missing
 
 
 def _floats_to_decimals(value: Any) -> Any:
@@ -157,6 +179,9 @@ class WorkspacePolicyStore:
         kwargs: dict[str, Any] = {
             "KeyConditionExpression": "org_id = :o AND begins_with(sk, :p)",
             "ExpressionAttributeValues": {":o": org_id, ":p": prefix},
+            # Strongly consistent: admission resolves the governing policy from this list, and a
+            # restrictive policy an admin wrote a moment ago must not be missed in favour of the default.
+            "ConsistentRead": True,
         }
         while True:
             response = self._table.query(**kwargs)

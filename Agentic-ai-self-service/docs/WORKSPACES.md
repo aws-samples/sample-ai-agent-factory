@@ -70,12 +70,15 @@ The workspace is resolved from the **deployer's memberships** (`memberGroups` âˆ
 provider, every connector (`connectors[]` and `gatewayTools` entries of the form `connector:<id>`),
 Gateway Lambda tools, custom tools (which are also *custom code*), external MCP servers, the MCP server
 runtime, the Code Interpreter and Browser when connected, the knowledge base, the managed Web Search /
-Web Answer knowledge tools, and the Region the deployment will run in (the explicit `targetRegion`, else
-the platform's home Region). The saved flow the request names contributes exactly two things: its budget
-declaration, and the `riskClass` / `dataClass` a human gave an entry that is **the same resource** (same
-type, reference and configuration, not merely the same id, so a label reviewed for one knowledge base
-cannot travel to another). It can never add or remove a capability, so naming a benign flow while
-submitting a different body gains nothing. A request that names no flow carries no classifications.
+Web Answer knowledge tools, the channels the deployment exposes (its runtime protocol as `api` / `mcp` /
+`a2a`, plus an A2A configuration), and the Region the deployment will run in (the explicit
+`targetRegion`, else the platform's home Region). The saved flow the request names contributes exactly
+two things: its budget declaration, and the `riskClass` / `dataClass` a human gave an entry that is
+**the same resource** (same type, reference and configuration: a custom tool's code hash, an MCP
+server's endpoint, a connector's auth and scopes, a knowledge base's configuration; never the id alone,
+so a label reviewed for one resource cannot travel to a changed one). It can never add or remove a
+capability, so naming a benign flow while submitting a different body gains nothing. A request that
+names no flow carries no classifications.
 
 ## Risk classes: who is trusted
 
@@ -84,12 +87,14 @@ submitting a different body gains nothing. A request that names no flow carries 
 - A **connector's** class comes from its catalog (`services/connectors_catalog.py`): any
   `create_*`/`send_*`/`update_*`/`delete_*` operation makes it `write`; the Payments category makes it
   `pay`; a connector with only read operations is `read`. Nobody can lower it below that floor.
-- Everything the catalog cannot vouch for (Lambda, MCP and custom tools, unknown connectors, every
-  knowledge item) is `unclassified` in a workspace with `trustBuilderClassifications: false` (the
-  default), so it floors the agent at `unclassifiedRiskTier` and is refused on a constrained axis
-  with `tool_unclassified` / `knowledge_unclassified`.
+- Outside a workspace with `trustBuilderClassifications: true`, a builder's label counts only when it
+  makes the agent **stricter**: `write` and `pay` on a tool, `confidential` and `pii` on knowledge are
+  believed (a builder declaring more risk is never argued with). A label that would *lower* risk
+  (`read`, `public`, `internal`) is unverifiable and reads as `unclassified`, so the item floors the
+  agent at `unclassifiedRiskTier` and is refused on a constrained axis with `tool_unclassified` /
+  `knowledge_unclassified`.
 - A workspace with `trustBuilderClassifications: true` (its builders are its reviewers) uses the
-  builder's labels, still floored at the catalog's class for connectors.
+  builder's labels as written, still floored at the catalog's class for connectors.
 
 ## The risk classifier
 
@@ -142,9 +147,17 @@ to production."`
   between the read and the write is a `409`, never a promotion.
 
 The requirement is read from the **version row**, not from the flag at promote time: turning the
-flag off later does not release a version admitted with an approval requirement, and a present but
-malformed admission or approval record keeps the version blocked (`409`) until an administrator looks.
-Versions deployed while the flag was off carry no admission and promote as before.
+flag off later does not release a version admitted with an approval requirement. A present but
+malformed record keeps the version blocked (`409`) until an administrator looks: an admission that is
+not a complete `admitted` decision, an approval record missing its group, approver or timestamp, or
+one naming the version's owner as approver (the store never writes such a record, so its presence is
+tampering). Versions deployed while the flag was off carry no admission and promote as before. The
+versions table is the trust root here, as it already is for ownership and status: a principal who can
+edit it directly is outside this control's threat model.
+
+Stored policies are read strongly consistently and must be **complete** documents (every field the
+admin API writes, at every level); a truncated item is refused as corruption rather than read as an
+unconstrained workspace.
 
 ## The refusal
 
@@ -189,5 +202,6 @@ to `/api/deploy`.
   enforced at admission).
 - A trusted source for knowledge data classes; until one exists, a locked workspace treats every
   knowledge item as unclassified.
-- Triggers and channels are created after deployment by their own routes, so the public-ingress rule
-  fires only for specs that carry them; gating trigger creation on the workspace policy is a follow-up.
+- Triggers (and Slack/Teams channels) are attached after deployment by their own routes, so the
+  public-ingress rule fires only for specs that carry them and the channel allow-list sees only the
+  protocol and A2A channels at deploy time; gating those routes on the workspace policy is a follow-up.

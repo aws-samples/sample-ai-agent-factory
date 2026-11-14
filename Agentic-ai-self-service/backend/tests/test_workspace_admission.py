@@ -41,7 +41,7 @@ from app.services.workspace_admission import (
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.test_deploy_gate_ordering import OWNER, _body, _client
+from tests.test_deploy_gate_ordering import MODEL_ID, OWNER, _body, _client
 from tests.test_deploy_gate_ordering import spy as _gate_spy
 
 #: The ordered side-effect log of ``test_deploy_gate_ordering`` exposed under the same name, so
@@ -327,8 +327,11 @@ class _FakeTable:
         self._check()
         self.items.pop((Key["org_id"], Key["sk"]), None)
 
-    def query(self, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None):
+    def query(self, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None, ConsistentRead=False):
         self._check()
+        assert ConsistentRead is True, (
+            "policy lists must be strongly consistent: admission resolves the governing policy from them"
+        )
         org, prefix = ExpressionAttributeValues[":o"], ExpressionAttributeValues[":p"]
         items = [copy.deepcopy(v) for (o, sk), v in sorted(self.items.items()) if o == org and sk.startswith(prefix)]
         # Two pages, so pagination is exercised on every list.
@@ -1280,3 +1283,94 @@ def test_the_flows_budget_declaration_reaches_admission(spy, table, monkeypatch)
     assert seen[-1]["tier"] == "high"  # jira write (medium) + budget above default -> high
     assert [r["code"] for r in seen[-1]["reasons"]] == ["write_tool", "budget_above_default"]
     assert seen[-1]["approvers"] == ["g-admins-security"]
+
+
+# --------------------------------------------------------------------------- round-three findings, pinned
+
+
+def test_the_runtime_protocol_and_a2a_are_judged_as_channels(spy, table, monkeypatch):
+    """Finding 1 (round 3): the channels a deployment exposes come from its own configuration."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="API only", allowed={"channels": ["api"]}))
+
+    http = _client().post("/api/deploy", json=_body())
+    assert http.status_code == 202, http.text  # the HTTP runtime is the 'api' channel
+
+    spy.calls.clear()
+    a2a = _client().post(
+        "/api/deploy", json=_body(config={"name": "a2agate", "model": {"modelId": MODEL_ID}, "protocol": "A2A"})
+    )
+    assert a2a.status_code == 403, a2a.text
+    (violation,) = a2a.json()["detail"]["violations"]
+    assert (violation["code"], violation["path"]) == ("channel_not_allowed", "/channels/0/type")
+    assert "'a2a'" in violation["message"]
+    assert spy.side_effects == []
+
+
+def test_a_custom_tools_classification_dies_with_its_code(spy, table, monkeypatch):
+    """Finding 10 (round 3): a classification reviewed for one body of code must not survive the code
+    changing under the same tool name."""
+    from app.services.admission_spec import spec_for_deploy_request
+
+    body = _body(customTools=[{"toolName": "lookup", "lambdaCode": "def handler(e, c): return 'v1'"}])
+    request = dh.DeployRequest.model_validate(body)
+    judged = spec_for_deploy_request(request, OWNER, home_region="us-east-1")
+    reviewed = judged.model_copy(update={"tools": [t.model_copy(update={"risk_class": "read"}) for t in judged.tools]})
+
+    same_code = spec_for_deploy_request(request, OWNER, classified_from=reviewed, home_region="us-east-1")
+    assert [t.risk_class for t in same_code.tools] == ["read"]
+
+    changed = dh.DeployRequest.model_validate(
+        _body(customTools=[{"toolName": "lookup", "lambdaCode": "def handler(e, c): return 'v2'"}])
+    )
+    new_code = spec_for_deploy_request(changed, OWNER, classified_from=reviewed, home_region="us-east-1")
+    assert [t.risk_class for t in new_code.tools] == ["unclassified"]
+    # And the custom-code floor carries the real hash, not a placeholder.
+    assert new_code.code.custom_nodes["lookup"].sha256 != "0" * 64
+
+
+def test_an_mcp_servers_classification_dies_when_its_endpoint_moves():
+    from app.services.admission_spec import spec_for_deploy_request
+
+    def request_for(endpoint: str):
+        return dh.DeployRequest.model_validate(
+            _body(externalMcpServers=[{"server_id": "corp-mcp", "endpoint": endpoint, "auth_type": "none"}])
+        )
+
+    judged = spec_for_deploy_request(request_for("https://mcp.corp.example/sse"), OWNER, home_region="us-east-1")
+    reviewed = judged.model_copy(update={"tools": [t.model_copy(update={"risk_class": "read"}) for t in judged.tools]})
+    same = spec_for_deploy_request(
+        request_for("https://mcp.corp.example/sse"), OWNER, classified_from=reviewed, home_region="us-east-1"
+    )
+    assert [t.risk_class for t in same.tools] == ["read"]
+    moved = spec_for_deploy_request(
+        request_for("https://evil.example/sse"), OWNER, classified_from=reviewed, home_region="us-east-1"
+    )
+    assert [t.risk_class for t in moved.tools] == ["unclassified"]
+
+
+def test_a_truncated_stored_policy_is_corruption_not_an_unconstrained_workspace(table):
+    """Finding 4 (round 3): the writer always stores the complete document, so a stored item missing
+    fields (at any level) must refuse rather than reconstruct permissive defaults."""
+    full = wps.policy_to_item("default", _policy(workspaceId="default", name="D"))
+    assert table.store.put("default", _policy(workspaceId="default", name="D"))  # the full document reads back
+    assert table.store.get("default", "default") is not None
+
+    truncated = {
+        "org_id": "default",
+        "sk": "WORKSPACE#default#POLICY",
+        "policy": {"workspaceId": "default", "name": "D"},
+    }
+    table.items[("default", truncated["sk"])] = truncated
+    with pytest.raises(wps.WorkspacePolicyError) as excinfo:
+        table.store.get("default", "default")
+    assert "incomplete" in str(excinfo.value) and "allowed" in str(excinfo.value)
+    with pytest.raises(wps.WorkspacePolicyUnavailableError):
+        wps.resolve_policy(table.store, "default", None, ["g-users-default"])
+
+    nested = copy.deepcopy(full)
+    del nested["policy"]["approval"]["high"]
+    table.items[("default", truncated["sk"])] = nested
+    with pytest.raises(wps.WorkspacePolicyError) as excinfo:
+        table.store.get("default", "default")
+    assert "approval.high" in str(excinfo.value)

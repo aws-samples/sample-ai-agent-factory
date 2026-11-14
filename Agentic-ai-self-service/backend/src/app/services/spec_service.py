@@ -173,12 +173,27 @@ def project(spec: AgentSpecV2) -> AgentSpecV2:
     return updated
 
 
+def classification_identity(entry: ToolSpec | KnowledgeSpec) -> tuple:
+    """What a classification is bound to: the entry's type, reference and configuration -- never its id
+    alone. A human classified a PARTICULAR resource; an entry that merely shares the id (a connector whose
+    scopes or auth changed, a knowledge base swapped under the fixed ``knowledge-base`` id) is a different
+    resource and starts unclassified."""
+    if isinstance(entry, ToolSpec):
+        return ("tool", entry.type, entry.ref, _canonical_fragment(entry.auth), tuple(entry.scopes))
+    return ("knowledge", entry.type, _canonical_fragment(entry.config))
+
+
+def _canonical_fragment(value: Any) -> str:
+    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _merge_classified(previous: list, derived: list) -> list:
-    """Re-projection keeps the classification a human already gave an entry with the same id."""
-    by_id = {entry.id: entry for entry in previous}
+    """Re-projection keeps the classification a human already gave the SAME resource (see
+    ``classification_identity``); a changed resource loses it."""
+    by_identity = {classification_identity(entry): entry for entry in previous}
     merged = []
     for entry in derived:
-        old = by_id.get(entry.id)
+        old = by_identity.get(classification_identity(entry))
         if old is not None:
             if hasattr(entry, "risk_class") and getattr(old, "risk_class", "unclassified") != "unclassified":
                 entry = entry.model_copy(update={"risk_class": old.risk_class})

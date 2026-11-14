@@ -18,7 +18,9 @@ Rules, one small function each (so a mutation that disables one rule breaks exac
 * ``dataClasses``     -- every knowledge item's ``dataClass`` must be listed; ``unclassified`` never is.
 * ``channels``        -- every channel's ``type`` must be listed.
 * ``regions``         -- ``spec.deployment.region`` must be listed when the spec names one.
-* ``budget``          -- ``spec.policy.budget.monthlyUsd`` may not exceed ``perWorkspaceMonthlyUsd``.
+* ``budget``          -- the agent's effective monthly budget (its declaration, else the workspace's per-agent
+                         default) may not exceed ``maxAgentMonthlyUsd``; ``perWorkspaceMonthlyUsd`` is a
+                         workspace-wide figure for run-time metering and is NOT enforced here.
 
 An EMPTY allow-list is unconstrained on that axis (``schemas/workspace_policy.py``). The
 ``unclassified`` handling is the one asymmetry: on an axis the workspace constrains, an item that

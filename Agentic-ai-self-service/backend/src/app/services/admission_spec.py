@@ -16,13 +16,13 @@ Pure: no I/O. The deployment handler loads the flow (after proving ownership) an
 
 from __future__ import annotations
 
-import json
+import hashlib
 from typing import Any
 
 from app.models.deployment_models import DeployRequest
 from app.schemas.agent_spec_v2 import AgentSpecV2, KnowledgeSpec, ToolSpec
 from app.services.spec_compiler import CONNECTOR_TOOL_PREFIX
-from app.services.spec_service import KNOWLEDGE_GATEWAY_TOOLS, _spec_safe_id
+from app.services.spec_service import KNOWLEDGE_GATEWAY_TOOLS, _merge_classified, _spec_safe_id
 
 
 def _model(request: DeployRequest) -> dict[str, Any] | None:
@@ -84,8 +84,11 @@ def _custom_tools(request: DeployRequest) -> tuple[list[ToolSpec], dict[str, Any
     for index, custom in enumerate(request.custom_tools or []):
         tool_name = str(getattr(custom, "tool_name", "") or f"custom-{index}")
         safe_id = _spec_safe_id(tool_name, f"custom-{index}")
-        tools.append(ToolSpec(id=safe_id, type="lambda", ref=tool_name, auth={"custom": True}))
-        custom_nodes[safe_id] = {"language": "python", "sourceRef": f"inline:{tool_name}", "sha256": "0" * 64}
+        # The code's real hash is part of the tool's identity: a classification given to one body of
+        # code must not survive the code changing under the same name.
+        code_hash = hashlib.sha256(str(getattr(custom, "lambda_code", "") or "").encode("utf-8")).hexdigest()
+        tools.append(ToolSpec(id=safe_id, type="lambda", ref=tool_name, auth={"custom": True, "sha256": code_hash}))
+        custom_nodes[safe_id] = {"language": "python", "sourceRef": f"inline:{tool_name}", "sha256": code_hash}
     return tools, custom_nodes
 
 
@@ -96,14 +99,13 @@ def _external_mcp(request: DeployRequest) -> list[ToolSpec]:
             continue
         ref = str(server.get("server_id") or server.get("serverId") or server.get("endpoint") or f"mcp-{index}")
         auth_type = server.get("auth_type") or server.get("authType")
-        tools.append(
-            ToolSpec(
-                id=_spec_safe_id(f"mcp-{index}-{ref}", f"mcp-{index}"),
-                type="mcp",
-                ref=ref,
-                auth={"type": auth_type} if auth_type else {},
-            )
-        )
+        endpoint = server.get("endpoint") or server.get("url")
+        # The endpoint is part of the server's identity: a stable server_id pointed at a new host is a
+        # different resource and must not inherit the old one's classification.
+        auth: dict[str, Any] = {"type": auth_type} if auth_type else {}
+        if endpoint:
+            auth["endpoint"] = str(endpoint)
+        tools.append(ToolSpec(id=_spec_safe_id(f"mcp-{index}-{ref}", f"mcp-{index}"), type="mcp", ref=ref, auth=auth))
     return tools
 
 
@@ -112,6 +114,20 @@ def _mcp_server_runtime(request: DeployRequest) -> list[ToolSpec]:
         return []
     name = str(request.mcp_server_config.get("name") or "mcp-server")
     return [ToolSpec(id="mcp-server-runtime", type="agent", ref=name)]
+
+
+def _channels(request: DeployRequest) -> list[dict[str, Any]]:
+    """The channels this deployment exposes, from the request's authoritative configuration: the runtime
+    protocol (``api`` for HTTP, ``mcp`` / ``a2a`` for the protocol servers) and an A2A configuration. The
+    channel allow-list judges these; Slack/Teams channels are attached by their own routes after
+    deployment and are judged there."""
+    channels: list[dict[str, Any]] = []
+    protocol = str(getattr(request.config, "protocol", "HTTP") or "HTTP").upper()
+    channel_type = {"HTTP": "api", "MCP": "mcp", "A2A": "a2a"}.get(protocol, "api")
+    channels.append({"id": f"channel-{channel_type}", "type": channel_type, "config": {"protocol": protocol}})
+    if request.a2a_config and channel_type != "a2a":
+        channels.append({"id": "channel-a2a", "type": "a2a", "config": dict(request.a2a_config)})
+    return channels
 
 
 #: ``connectedTools`` kinds that give the agent an executable capability of their own (a sandbox
@@ -137,37 +153,10 @@ def _knowledge_base(request: DeployRequest) -> list[KnowledgeSpec]:
     return [KnowledgeSpec(id="knowledge-base", type="customKb" if existing else "managedKb", config=dict(kb))]
 
 
-def _classification_identity(entry: ToolSpec | KnowledgeSpec) -> tuple:
-    """What a carried-over classification is bound to: the entry's type, reference and configuration.
-
-    A human classified a PARTICULAR resource. Carrying that class to an entry that merely shares the
-    id (``knowledge-base`` is every knowledge base's id; a connector id is stable while its scopes or
-    auth change) would let a reviewed ``public`` label travel to a different, sensitive source. So
-    the class travels only when the resource is the same one: same type, same ref, same auth/scopes
-    (tools) or same config (knowledge). Anything else is a new resource and starts unclassified.
-    """
-    if isinstance(entry, ToolSpec):
-        return ("tool", entry.type, entry.ref, _canonical(entry.auth), tuple(entry.scopes))
-    return ("knowledge", entry.type, _canonical(entry.config))
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-
-
 def _carry_classifications(previous: list, derived: list) -> list:
-    """``spec_service._merge_classified`` bound to resource identity, not id alone."""
-    by_identity = {_classification_identity(entry): entry for entry in previous}
-    merged = []
-    for entry in derived:
-        old = by_identity.get(_classification_identity(entry))
-        if old is not None:
-            if hasattr(entry, "risk_class") and getattr(old, "risk_class", "unclassified") != "unclassified":
-                entry = entry.model_copy(update={"risk_class": old.risk_class})
-            if hasattr(entry, "data_class") and getattr(old, "data_class", "unclassified") != "unclassified":
-                entry = entry.model_copy(update={"data_class": old.data_class})
-        merged.append(entry)
-    return merged
+    """The projection stage's identity-bound merge (``spec_service._merge_classified``), applied between
+    the saved flow's entries and the request-derived ones."""
+    return _merge_classified(previous, derived)
 
 
 def spec_for_deploy_request(
@@ -219,6 +208,7 @@ def spec_for_deploy_request(
             "model": _model(request),
             "tools": [tool.model_dump(by_alias=True) for tool in tools],
             "knowledge": [item.model_dump(by_alias=True) for item in knowledge],
+            "channels": _channels(request),
             "deployment": {
                 "region": request.target_region or home_region,
                 "mode": request.deployment_mode or "runtime",

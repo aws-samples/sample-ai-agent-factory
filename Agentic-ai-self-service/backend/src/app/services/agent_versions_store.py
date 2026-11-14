@@ -871,7 +871,7 @@ class AgentVersionsStore:
             )
         stored_approvals = current.admission_approvals
         existing = list(stored_approvals or [])
-        if group in approved_groups(existing):
+        if group in approved_groups(existing, owner_sub=expected_owner_sub):
             return current
 
         updated = existing + [approval_record(group, approver_sub, approved_at)]
@@ -906,7 +906,7 @@ class AgentVersionsStore:
             if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
             after = self.get(runtime_name, version_id, consistent=True)
-            if _same_row(after) and group in approved_groups(after.admission_approvals):
+            if _same_row(after) and group in approved_groups(after.admission_approvals, owner_sub=expected_owner_sub):
                 return after
             raise AdmissionApprovalConflict(
                 f"admission approval for {runtime_name}/{version_id} was not recorded; "
@@ -914,7 +914,9 @@ class AgentVersionsStore:
             ) from None
 
         after = self.get(runtime_name, version_id, consistent=True)
-        if not _same_row(after) or group not in approved_groups(after.admission_approvals):
+        if not _same_row(after) or group not in approved_groups(
+            after.admission_approvals, owner_sub=expected_owner_sub
+        ):
             raise AdmissionApprovalConflict(
                 f"admission approval for {runtime_name}/{version_id} could not be read after it was recorded"
             )

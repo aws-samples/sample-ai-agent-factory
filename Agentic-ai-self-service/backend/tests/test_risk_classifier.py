@@ -356,29 +356,48 @@ def test_in_a_trusting_workspace_a_builder_can_raise_a_connectors_class_but_neve
 @pytest.mark.parametrize(
     ("connector_id", "asserted", "effective"),
     [
-        ("jira", "read", "write"),  # the catalog floor still applies
-        ("jira", "pay", "write"),  # ...and a RAISED assertion no longer counts: the catalog is the only source
+        ("jira", "read", "write"),  # the catalog floor still applies: a risk-LOWERING label is discarded
+        ("jira", "pay", "pay"),  # a risk-RAISING label still counts: a builder declaring more risk is believed
         ("stripe", "read", "pay"),
-        ("google_drive", "write", "read"),
-        ("acme-crm-not-in-catalog", "read", "unclassified"),  # no catalog, no trust: unclassified
+        ("google_drive", "write", "write"),  # raised above the catalog's read: believed
+        ("google_drive", "read", "read"),  # the catalog vouches for read
+        (
+            "acme-crm-not-in-catalog",
+            "read",
+            "unclassified",
+        ),  # no catalog, no trust: an unverifiable read is unclassified
+        ("acme-crm-not-in-catalog", "write", "write"),  # ...but a declared write still counts
     ],
 )
-def test_by_default_only_the_catalog_classifies_a_connector(connector_id, asserted, effective):
+def test_by_default_a_label_can_only_make_a_connector_stricter(connector_id, asserted, effective):
     from app.services.risk_classifier import effective_risk_class
 
     assert effective_risk_class(_connector(connector_id, asserted), _LOCKED_POLICY) == effective
     assert effective_risk_class(_connector(connector_id, asserted)) == effective  # no policy = untrusted
 
 
-def test_non_connector_tools_keep_the_asserted_class_only_where_builders_are_trusted():
+def test_non_connector_labels_count_only_when_trusted_or_when_they_raise_risk():
     from app.services.risk_classifier import effective_data_class, effective_risk_class
 
     assert effective_risk_class(_tool(risk="read", type_="lambda"), _EMPTY_POLICY) == "read"
     assert effective_risk_class(_tool(risk="read", type_="lambda"), _LOCKED_POLICY) == "unclassified"
+    assert effective_risk_class(_tool(risk="write", type_="lambda"), _LOCKED_POLICY) == "write"
+    assert effective_risk_class(_tool(risk="pay", type_="mcp"), _LOCKED_POLICY) == "pay"
     assert effective_risk_class(_tool(risk="unclassified", type_="mcp"), _EMPTY_POLICY) == "unclassified"
     assert effective_data_class(_knowledge(data="public"), _EMPTY_POLICY) == "public"
     assert effective_data_class(_knowledge(data="public"), _LOCKED_POLICY) == "unclassified"
-    assert effective_data_class(_knowledge(data="pii"), _LOCKED_POLICY) == "unclassified"
+    assert effective_data_class(_knowledge(data="internal"), _LOCKED_POLICY) == "unclassified"
+    assert effective_data_class(_knowledge(data="pii"), _LOCKED_POLICY) == "pii"
+    assert effective_data_class(_knowledge(data="confidential"), _LOCKED_POLICY) == "confidential"
+
+
+def test_by_default_a_declared_pay_tool_or_pii_source_keeps_its_high_tier():
+    """Finding 13: discarding RAISED labels would let a payment Lambda or a PII source fall to the
+    medium unclassified tier and skip the security review a high tier routes to."""
+    result = classify(_spec(tools=[_tool(risk="pay", type_="lambda")]), _LOCKED_POLICY)
+    assert (result.tier, _codes(result)) == ("high", ["pay_tool"])
+    result = classify(_spec(knowledge=[_knowledge(data="pii")]), _LOCKED_POLICY)
+    assert (result.tier, _codes(result)) == ("high", ["sensitive_data_class"])
 
 
 def test_by_default_a_builders_read_or_public_labels_do_not_lower_risk():
