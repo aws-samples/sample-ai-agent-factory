@@ -264,6 +264,11 @@ class DeploymentState(BaseModel):
     # runtime from a V1 one without a control-plane read; ``GetAgentRuntime`` stays the
     # ground truth for what actually runs.
     runtime_platform_version: Literal["V1", "V2"] | None = None
+    # Workspace admission (plan §3.B): the risk tier, its reasons and the approver groups the
+    # agent must clear before production, as ``AdmissionDecision.model_dump(by_alias=True)``.
+    # Public: it is what the UI's tier badge and the deployer's "what happens next" read. None when
+    # the ``workspacePolicy`` flag was off at admission.
+    admission: dict | None = None
     gateway_url: str | None = None
     gateway_result: dict | None = None  # Full gateway deployment result for cleanup
     policy_result: dict | None = None  # Policy engine result for cleanup

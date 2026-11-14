@@ -40,7 +40,7 @@ from pydantic.alias_generators import to_camel
 
 from app.schemas.agent_spec_v2 import AgentSpecV2
 from app.schemas.workspace_policy import RiskTier, WorkspacePolicy
-from app.services.risk_classifier import RiskReason, RiskResult, classify
+from app.services.risk_classifier import RiskReason, RiskResult, classify, effective_data_class, effective_risk_class
 
 #: Wire-level ``code`` of a denied decision; tests assert the exact value.
 POLICY_DENIED = "policy_denied"
@@ -137,7 +137,11 @@ def _check_tool_risk_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list
         return []
     violations = []
     for index, tool in enumerate(spec.tools):
-        if tool.risk_class == "unclassified":
+        # The class judged is the EFFECTIVE one (builder assertion raised to the connector catalog's
+        # floor), the same value the classifier tiers on, so a builder cannot label a write
+        # connector ``read`` to pass a read-only workspace.
+        risk_class = effective_risk_class(tool, policy)
+        if risk_class == "unclassified":
             violations.append(
                 PolicyViolation(
                     code="tool_unclassified",
@@ -148,12 +152,12 @@ def _check_tool_risk_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list
                     ),
                 )
             )
-        elif tool.risk_class not in allowed:
+        elif risk_class not in allowed:
             violations.append(
                 PolicyViolation(
                     code="tool_risk_class_not_allowed",
                     path=f"/tools/{index}/riskClass",
-                    message=f"tool {tool.id!r} is a {tool.risk_class!r} tool; this workspace allows {sorted(allowed)}",
+                    message=f"tool {tool.id!r} is a {risk_class!r} tool; this workspace allows {sorted(allowed)}",
                 )
             )
     return violations
@@ -165,7 +169,8 @@ def _check_data_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list[Poli
         return []
     violations = []
     for index, item in enumerate(spec.knowledge):
-        if item.data_class == "unclassified":
+        data_class = effective_data_class(item, policy)
+        if data_class == "unclassified":
             violations.append(
                 PolicyViolation(
                     code="knowledge_unclassified",
@@ -176,12 +181,12 @@ def _check_data_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list[Poli
                     ),
                 )
             )
-        elif item.data_class not in allowed:
+        elif data_class not in allowed:
             violations.append(
                 PolicyViolation(
                     code="data_class_not_allowed",
                     path=f"/knowledge/{index}/dataClass",
-                    message=f"knowledge {item.id!r} is {item.data_class!r} data; this workspace allows {sorted(allowed)}",
+                    message=f"knowledge {item.id!r} is {data_class!r} data; this workspace allows {sorted(allowed)}",
                 )
             )
     return violations
@@ -220,15 +225,37 @@ def _check_region(spec: AgentSpecV2, policy: WorkspacePolicy) -> list[PolicyViol
 
 
 def _check_budget_ceiling(spec: AgentSpecV2, policy: WorkspacePolicy) -> list[PolicyViolation]:
-    ceiling = policy.budgets.per_workspace_monthly_usd
+    """An agent's EFFECTIVE monthly budget may not exceed ``budgets.maxAgentMonthlyUsd``. A spec that
+    declares no budget gets the workspace's per-agent default, so omitting the field is not a way
+    around the cap: when the cap is set and neither the spec nor the policy supplies a figure, the agent
+    is refused until one does. This caps one agent's declaration; the workspace-wide figure
+    (``perWorkspaceMonthlyUsd``) is enforced by run-time metering, not here (see ``WorkspaceBudgets``)."""
+    ceiling = policy.budgets.max_agent_monthly_usd
+    if ceiling is None:
+        return []
     requested = spec.policy.budget.monthly_usd
-    if ceiling is None or requested is None or requested <= ceiling:
+    effective = requested if requested is not None else policy.budgets.per_agent_monthly_usd
+    if effective is None:
+        return [
+            PolicyViolation(
+                code="budget_undeclared",
+                path="/policy/budget/monthlyUsd",
+                message=(
+                    f"this workspace caps an agent's monthly budget at {ceiling} USD and sets no per-agent default, "
+                    "so the agent must declare a monthly budget"
+                ),
+            )
+        ]
+    if effective <= ceiling:
         return []
     return [
         PolicyViolation(
             code="budget_exceeds_workspace",
             path="/policy/budget/monthlyUsd",
-            message=f"monthly budget {requested} USD exceeds the workspace ceiling of {ceiling} USD",
+            message=(
+                f"monthly budget {effective} USD{'' if requested is not None else ' (the workspace per-agent default)'} "
+                f"exceeds the workspace's per-agent cap of {ceiling} USD"
+            ),
         )
     ]
 
@@ -291,5 +318,47 @@ def denial_detail(decision: AdmissionDecision) -> dict[str, object]:
         "message": (
             f"This agent uses {len(decision.violations)} thing(s) workspace {decision.workspace_id!r} "
             "does not allow. Nothing was created."
+        ),
+    }
+
+
+def membership_denial_detail(workspace_id: str) -> dict[str, object]:
+    """The ``403 policy_denied`` body for an agent that names a workspace its deployer is not in.
+
+    Same envelope as ``denial_detail`` so clients handle one shape; the single violation names the
+    field. No tier: nothing was classified, because no policy governs an agent in a workspace the
+    deployer cannot use.
+    """
+    return {
+        "code": POLICY_DENIED,
+        "workspaceId": workspace_id,
+        "tier": None,
+        "violations": [
+            {
+                "code": "workspace_not_member",
+                "path": "/workspaceId",
+                "message": f"you are not a member of workspace {workspace_id!r}, so its policy cannot govern this agent",
+            }
+        ],
+        "message": f"This agent names workspace {workspace_id!r}, which you are not a member of. Nothing was created.",
+    }
+
+
+def selection_required_detail(choices: list[str]) -> dict[str, object]:
+    """The ``403 policy_denied`` body for a deployer in several workspaces whose agent names none."""
+    return {
+        "code": POLICY_DENIED,
+        "workspaceId": None,
+        "tier": None,
+        "violations": [
+            {
+                "code": "workspace_selection_required",
+                "path": "/workspaceId",
+                "message": f"you belong to several workspaces; the agent must name one of {choices}",
+            }
+        ],
+        "message": (
+            f"You belong to several workspaces ({', '.join(choices)}) and this agent names none of them, so no single "
+            "policy governs it. Save the canvas in one of your workspaces and deploy again. Nothing was created."
         ),
     }

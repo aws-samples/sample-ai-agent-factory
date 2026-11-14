@@ -66,7 +66,13 @@ def _spec(**overrides: Any) -> AgentSpecV2:
 
 
 def _policy(**overrides: Any) -> WorkspacePolicy:
-    document: dict[str, Any] = {"workspaceId": "finance", "name": "Finance"}
+    """A workspace that trusts builder classifications, so allow-list tests judge asserted classes;
+    the untrusted default has its own tests (``test_by_default_...``)."""
+    document: dict[str, Any] = {
+        "workspaceId": "finance",
+        "name": "Finance",
+        "defaults": {"trustBuilderClassifications": True},
+    }
     document.update(overrides)
     return WorkspacePolicy.model_validate(document)
 
@@ -177,18 +183,29 @@ def test_permitted_or_unconstrained_use_passes(overrides, allowed):
 
 
 @pytest.mark.parametrize(
-    ("requested", "ceiling", "expected"),
-    [(50, 100, []), (100, 100, []), (100.01, 100, ["budget_exceeds_workspace"]), (None, 100, []), (500, None, [])],
+    ("requested", "ceiling", "per_agent_default", "expected"),
+    [
+        (50, 100, None, []),
+        (100, 100, None, []),
+        (100.01, 100, None, ["budget_exceeds_workspace"]),
+        (500, None, None, []),
+        # Omitting the budget is not a way around the cap: the workspace default applies, and with
+        # no default either the agent must declare one.
+        (None, 100, 80, []),
+        (None, 100, 120, ["budget_exceeds_workspace"]),
+        (None, 100, None, ["budget_undeclared"]),
+    ],
 )
-def test_the_workspace_budget_ceiling(requested, ceiling, expected):
+def test_the_workspace_budget_ceiling(requested, ceiling, per_agent_default, expected):
     spec = _spec(policy={"budget": {"monthlyUsd": requested}})
-    assert _codes(spec, _policy(budgets={"perWorkspaceMonthlyUsd": ceiling})) == expected
+    budgets = {"maxAgentMonthlyUsd": ceiling, "perAgentMonthlyUsd": per_agent_default}
+    assert _codes(spec, _policy(budgets=budgets)) == expected
 
 
 def test_violations_are_reported_in_rule_order_one_per_offending_item():
     spec = _spec(
         model={"provider": "openai", "modelId": "gpt"},
-        tools=[_tool("jira", "write", kind="connector"), _tool("github", "unclassified", kind="connector")],
+        tools=[_tool("jira", "write", kind="connector"), _tool("acme-crm", "unclassified", kind="connector")],
         knowledge=[{"id": "k", "type": "customKb", "dataClass": "pii"}],
         channels=[{"id": "c", "type": "slack"}],
         deployment={"region": "eu-west-1"},
@@ -204,7 +221,7 @@ def test_violations_are_reported_in_rule_order_one_per_offending_item():
             "channels": ["teams"],
             "regions": ["us-east-1"],
         },
-        budgets={"perWorkspaceMonthlyUsd": 100},
+        budgets={"maxAgentMonthlyUsd": 100},
     )
     assert _codes(spec, policy) == [
         "provider_not_allowed",
@@ -377,13 +394,52 @@ def test_list_paginates_sorts_and_skips_foreign_items(table):
     assert [p.workspace_id for p in table.store.list("default")] == ["alpha", "zeta"]
 
 
-def test_resolution_prefers_the_named_workspace_then_falls_back_to_default(table):
+def test_resolution_follows_the_deployers_memberships_not_the_spec(table):
+    """A member of exactly one workspace is governed by it however the spec is written (named,
+    unnamed, naming an unconfigured workspace, or naming ``default``), so dropping the flow or clearing
+    ``workspaceId`` is not an escape to the org default; a caller in no workspace gets the default."""
     table.store.put("default", _policy(workspaceId="default", name="Org default"))
-    table.store.put("default", _policy(workspaceId="finance", name="Finance"))
-    assert wps.resolve_policy(table.store, "default", "finance") == (table.store.get("default", "finance"), False)
-    assert wps.resolve_policy(table.store, "default", "marketing")[0].workspace_id == "default"
-    assert wps.resolve_policy(table.store, "default", "marketing")[1] is True
-    assert wps.resolve_policy(table.store, "default", None)[0].workspace_id == "default"
+    table.store.put("default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]))
+    finance = table.store.get("default", "finance")
+    member = ["g-users-default", "g-finance"]
+    for named in ("finance", "marketing", "default", None):
+        assert wps.resolve_policy(table.store, "default", named, member) == (finance, False), named
+    for named in ("marketing", "default", None):
+        policy, fell_back = wps.resolve_policy(table.store, "default", named, ["g-users-default"])
+        assert (policy.workspace_id, fell_back) == ("default", True), named
+
+
+def test_a_member_of_several_workspaces_must_name_one_of_them(table):
+    table.store.put("default", _policy(workspaceId="default", name="Org default"))
+    table.store.put("default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]))
+    table.store.put("default", _policy(workspaceId="hr", name="HR", memberGroups=["g-hr"]))
+    both = ["g-finance", "g-hr"]
+    assert wps.resolve_policy(table.store, "default", "hr", both)[0].workspace_id == "hr"
+    assert wps.resolve_policy(table.store, "default", "finance", both)[0].workspace_id == "finance"
+    with pytest.raises(wps.WorkspaceSelectionRequiredError) as excinfo:
+        wps.resolve_policy(table.store, "default", None, both)
+    assert excinfo.value.choices == ["finance", "hr"]
+    with pytest.raises(wps.WorkspaceSelectionRequiredError):
+        wps.resolve_policy(table.store, "default", "default", both)
+
+
+def test_a_spec_cannot_select_a_workspace_its_deployer_is_not_a_member_of(table):
+    """The spec's workspaceId is deployer-controlled, so it can only pick a policy the deployer
+    is entitled to: naming a permissive workspace one is not in is refused, never re-routed."""
+    table.store.put("default", _policy(workspaceId="default", name="Locked", allowed={"providers": ["bedrock"]}))
+    table.store.put("default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]))
+    with pytest.raises(wps.WorkspaceMembershipError) as excinfo:
+        wps.resolve_policy(table.store, "default", "devs", ["g-users-default"])
+    assert excinfo.value.workspace_id == "devs"
+    # A workspace with no member groups at all admits nobody by name (only default is open to all).
+    table.store.put("default", _policy(workspaceId="closed", name="Closed"))
+    with pytest.raises(wps.WorkspaceMembershipError):
+        wps.resolve_policy(table.store, "default", "closed", ["g-admins-super"])
+    assert wps.is_member(table.store.get("default", "default"), []) is True
+    # Nothing is admitted when no default exists and the caller belongs nowhere.
+    table.store.delete("default", "default")
+    with pytest.raises(wps.WorkspacePolicyUnavailableError):
+        wps.resolve_policy(table.store, "default", None, ["g-users-default"])
 
 
 def test_resolution_is_unavailable_without_a_default_policy_or_with_a_failing_store(table):
@@ -404,6 +460,17 @@ def _flags(monkeypatch, flags: dict[str, bool]) -> None:
 
     monkeypatch.setenv(ff.LOCAL_ENV_VAR, json.dumps(flags))
     monkeypatch.setenv("ENVIRONMENT", "local")
+    ff.reset_feature_flag_cache()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_flag_cache():
+    """The resolved flag set is cached for its TTL. Without this, a test that turned the flag ON would
+    leave it on for every later test in the process, including other files' deploy-path suites."""
+    from app.services import feature_flags as ff
+
+    ff.reset_feature_flag_cache()
+    yield
     ff.reset_feature_flag_cache()
 
 
@@ -460,8 +527,14 @@ def owned_flow(monkeypatch):
     return flow
 
 
-def _deploy_body() -> dict:
-    return _body(flowId=FLOW_ID)
+#: The connector the business canvas carries, as the deploy panel sends it in the REQUEST BODY. Admission
+#: judges the body (what is deployed), so the body must carry the connector for it to be judged; the
+#: saved flow only supplies the classification a human gave it.
+JIRA = {"connectorId": "jira", "authMethod": "api_key"}
+
+
+def _deploy_body(**extra) -> dict:
+    return _body(flowId=FLOW_ID, connectors=[JIRA], **extra)
 
 
 def test_the_migrated_business_canvas_carries_the_jira_connector(owned_flow):
@@ -513,6 +586,7 @@ def test_the_same_attempt_through_the_raw_api_is_the_same_403(spy, owned_flow, t
         "nodeId": "node-1",
         "flowId": FLOW_ID,
         "config": {"name": "rawapi", "model": {"modelId": "us.anthropic.claude-sonnet-5"}},
+        "connectors": [JIRA],
     }
 
     response = _client().post("/api/deploy", json=raw)
@@ -525,12 +599,18 @@ def test_the_same_attempt_through_the_raw_api_is_the_same_403(spy, owned_flow, t
 def test_an_unclassified_tool_in_a_risk_constrained_workspace_is_refused_with_its_own_code(
     spy, owned_flow, table, monkeypatch
 ):
+    """A connector the catalog has no entry for (generic_openapi is accepted by the request model but
+    not catalogued) has no floor, so it stays unclassified; a workspace that constrains tool classes
+    refuses it with the code that tells the builder to classify it."""
     _flags(monkeypatch, {"workspacePolicy": True})
     table.store.put(
         "default", _policy(workspaceId="default", name="Classified only", allowed={"toolRiskClasses": ["read"]})
     )
 
-    response = _client().post("/api/deploy", json=_deploy_body())
+    response = _client().post(
+        "/api/deploy",
+        json=_body(flowId=FLOW_ID, connectors=[{"connectorId": "generic_openapi", "authMethod": "api_key"}]),
+    )
 
     assert response.status_code == 403
     codes = {v["code"] for v in response.json()["detail"]["violations"]}
@@ -552,8 +632,8 @@ def test_an_admitted_canvas_deploys_and_carries_its_tier(spy, owned_flow, table,
     seen: list[dict | None] = []
     original = dh._reject_workspace_policy_violation
 
-    def _capture(request, caller_sub):
-        original(request, caller_sub)
+    def _capture(request, caller_sub, raw_request=None):
+        original(request, caller_sub, raw_request)
         seen.append(request.admission_decision)
 
     monkeypatch.setattr(dh, "_reject_workspace_policy_violation", _capture)
@@ -564,8 +644,12 @@ def test_an_admitted_canvas_deploys_and_carries_its_tier(spy, owned_flow, table,
     assert spy.calls.count("StartExecution") == 1
     assert seen and seen[0]["outcome"] == "admitted"
     assert seen[0]["workspaceId"] == "default"
-    assert seen[0]["tier"] == "low"  # a read-only-looking connector classified nowhere: no floor fires
-    assert seen[0]["approvers"] == []
+    # Jira is a write connector by its catalog operations (create_ticket), whatever the canvas says,
+    # so the agent is medium and routes to the policy's medium approvers.
+    assert seen[0]["tier"] == "medium"
+    assert [r["code"] for r in seen[0]["reasons"]] == ["write_tool"]
+    assert seen[0]["approvers"] == ["g-approvers"]
+    assert spy.store.create.call_args[0][0].deployment_slot == "staging"
 
 
 def test_without_a_default_policy_admission_fails_closed_with_zero_side_effects(spy, owned_flow, table, monkeypatch):
@@ -712,3 +796,487 @@ def test_a_failing_store_is_503_and_writes_nothing(table, monkeypatch):
     assert response.status_code == 503
     assert "tenant-sensitive" not in response.text
     assert table.items == {}
+
+
+# --------------------------------------------------------------------------- review findings, pinned
+# Codex (SOL/ultra) security review of the branch before push. Each test here is one finding.
+
+
+def test_admission_judges_the_request_body_not_the_saved_flow(spy, monkeypatch, table):
+    """Finding 1: naming a benign owned flow while submitting a body with a forbidden connector gains
+    nothing -- the body is what gets deployed, so the body is what is judged."""
+    import importlib
+    from datetime import UTC, datetime
+
+    from app.models.enums import DeploymentStatus
+    from app.models.flow import Flow
+
+    module = importlib.import_module("app.services.flow_storage")
+    store = module.FlowStorage()
+    now = datetime.now(UTC)
+    benign = Flow(
+        id=FLOW_ID,
+        name="Plain web search",
+        workflow=json.loads((FIXTURES / "web-search-agent.flow.json").read_text()),  # no connector at all
+        deployment_status=DeploymentStatus.NOT_DEPLOYED,
+        created_at=now,
+        updated_at=now,
+        owner_sub=OWNER,
+    )
+    store._flows[benign.id] = benign
+    monkeypatch.setattr(module, "_active_storage", store)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Read-only", allowed={"connectors": ["slack"]}))
+
+    response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+
+    assert response.status_code == 403, response.text
+    assert [v["code"] for v in response.json()["detail"]["violations"]] == ["connector_not_allowed"]
+    assert spy.side_effects == []
+
+
+def test_a_flow_less_body_is_judged_on_everything_it_carries(spy, table, monkeypatch):
+    """Finding 1, second half: without a flowId the body's connectors, custom tools, MCP servers and
+    knowledge are all judged, not just model and Region."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="default",
+            name="Locked",
+            allowed={"connectors": ["slack"], "toolRiskClasses": ["read"], "dataClasses": ["public"]},
+        ),
+    )
+    body = _body(
+        connectors=[JIRA],
+        customTools=[{"toolName": "wipe_db", "lambdaCode": "def handler(e, c): return 1"}],
+        externalMcpServers=[{"server_id": "corp-mcp", "endpoint": "https://mcp.example.com/sse", "auth_type": "none"}],
+        knowledgeBaseConfig={"kbMode": "existing", "knowledgeBaseId": "ABCDEFGHIJ"},
+    )
+
+    response = _client().post("/api/deploy", json=body)
+
+    assert response.status_code == 403, response.text
+    codes = sorted(v["code"] for v in response.json()["detail"]["violations"])
+    assert "connector_not_allowed" in codes  # jira is not slack
+    assert "tool_risk_class_not_allowed" in codes  # jira's catalog floor is write; workspace allows read only
+    assert "tool_unclassified" in codes  # the custom tool and the MCP server carry no class
+    assert "knowledge_unclassified" in codes  # the KB carries no data class
+    assert spy.side_effects == []
+
+
+def test_a_write_connector_labelled_read_on_the_canvas_is_still_refused_by_a_read_only_workspace(
+    spy, monkeypatch, table
+):
+    """Finding 3: the catalog floor, through the whole deploy path."""
+    import importlib
+    from datetime import UTC, datetime
+
+    from app.models.enums import DeploymentStatus
+    from app.models.flow import Flow
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    spec = spec_service.normalize(migrate_v1_flow(_business_canvas(), spec_id=FLOW_ID, name="S", owner_sub=OWNER))
+    spec = spec.model_copy(
+        update={
+            "tools": [t.model_copy(update={"risk_class": "read"}) if t.type == "connector" else t for t in spec.tools]
+        }
+    )
+    module = importlib.import_module("app.services.flow_storage")
+    store = module.FlowStorage()
+    now = datetime.now(UTC)
+    flow = Flow(
+        id=FLOW_ID,
+        name="Mislabelled",
+        workflow=spec.model_dump(by_alias=True, mode="json"),
+        deployment_status=DeploymentStatus.NOT_DEPLOYED,
+        created_at=now,
+        updated_at=now,
+        owner_sub=OWNER,
+    )
+    store._flows[flow.id] = flow
+    monkeypatch.setattr(module, "_active_storage", store)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put(
+        "default", _policy(workspaceId="default", name="Read tools only", allowed={"toolRiskClasses": ["read"]})
+    )
+
+    response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+
+    assert response.status_code == 403, response.text
+    (violation,) = response.json()["detail"]["violations"]
+    assert violation["code"] == "tool_risk_class_not_allowed"
+    assert "'write' tool" in violation["message"]
+    assert spy.side_effects == []
+
+
+def test_a_canvas_cannot_pick_a_workspace_its_deployer_is_not_in(spy, monkeypatch, table):
+    """Finding 2: the spec's workspaceId is deployer-controlled; naming a permissive workspace one is
+    not a member of is the exact 403 workspace_not_member, never a silent re-route."""
+    import importlib
+    from datetime import UTC, datetime
+
+    from app.models.enums import DeploymentStatus
+    from app.models.flow import Flow
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    spec = spec_service.normalize(
+        migrate_v1_flow(_business_canvas(), spec_id=FLOW_ID, name="S", owner_sub=OWNER, workspace_id="devs")
+    )
+    module = importlib.import_module("app.services.flow_storage")
+    store = module.FlowStorage()
+    now = datetime.now(UTC)
+    flow = Flow(
+        id=FLOW_ID,
+        name="Escapee",
+        workflow=spec.model_dump(by_alias=True, mode="json"),
+        deployment_status=DeploymentStatus.NOT_DEPLOYED,
+        created_at=now,
+        updated_at=now,
+        owner_sub=OWNER,
+    )
+    store._flows[flow.id] = flow
+    monkeypatch.setattr(module, "_active_storage", store)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Locked", allowed={"connectors": ["slack"]}))
+    table.store.put("default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]))
+
+    response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "policy_denied" and detail["workspaceId"] == "devs" and detail["tier"] is None
+    assert [v["code"] for v in detail["violations"]] == ["workspace_not_member"]
+    assert spy.side_effects == []
+
+
+def test_a_member_is_governed_by_their_workspace_policy(spy, monkeypatch, table):
+    """Finding 2, positive twin: a deployer who IS a member of the named workspace gets its policy
+    (the permissive Developers policy admits the Jira connector the locked default forbids)."""
+    import importlib
+    from datetime import UTC, datetime
+
+    from app.models.enums import DeploymentStatus
+    from app.models.flow import Flow
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    spec = spec_service.normalize(
+        migrate_v1_flow(_business_canvas(), spec_id=FLOW_ID, name="S", owner_sub=OWNER, workspace_id="devs")
+    )
+    module = importlib.import_module("app.services.flow_storage")
+    store = module.FlowStorage()
+    now = datetime.now(UTC)
+    flow = Flow(
+        id=FLOW_ID,
+        name="Dev agent",
+        workflow=spec.model_dump(by_alias=True, mode="json"),
+        deployment_status=DeploymentStatus.NOT_DEPLOYED,
+        created_at=now,
+        updated_at=now,
+        owner_sub=OWNER,
+    )
+    store._flows[flow.id] = flow
+    monkeypatch.setattr(module, "_active_storage", store)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Locked", allowed={"connectors": ["slack"]}))
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="devs",
+            name="Developers",
+            memberGroups=["g-users-default"],
+            defaults={"unclassifiedRiskTier": "low"},
+        ),
+    )
+
+    response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+
+    assert response.status_code == 202, response.text
+    assert spy.store.create.call_args[0][0].admission["workspaceId"] == "devs"
+
+
+def test_a_budget_bearing_policy_writes_and_reads_through_the_real_dynamodb_serializer():
+    """Finding 7: floats must become Decimal on write (boto3 refuses floats) and numbers again on read."""
+    import boto3
+
+    pytest.importorskip("moto")
+    from moto import mock_aws
+
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-east-1")
+        ddb.create_table(
+            TableName="OrgConfig",
+            KeySchema=[{"AttributeName": "org_id", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+            AttributeDefinitions=[
+                {"AttributeName": "org_id", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        store = wps.WorkspacePolicyStore(table_name="OrgConfig", region="us-east-1")
+        policy = _policy(budgets={"perAgentMonthlyUsd": 12.5, "perWorkspaceMonthlyUsd": 1000})
+        store.put("default", policy)
+        read = store.get("default", "finance")
+        assert read == policy
+        assert read.budgets.per_agent_monthly_usd == 12.5 and read.budgets.per_workspace_monthly_usd == 1000
+        assert [p.workspace_id for p in store.list("default")] == ["finance"]
+        store.delete("default", "finance")
+        assert store.get("default", "finance") is None
+
+
+def test_a_policy_filed_under_another_workspaces_key_is_refused_on_read(table):
+    """Finding 4: a document whose workspaceId disagrees with its key governs nothing."""
+    item = wps.policy_to_item("default", _policy(workspaceId="finance", name="F"))
+    item["sk"] = "WORKSPACE#marketing#POLICY"
+    table.items[("default", item["sk"])] = item
+    with pytest.raises(wps.WorkspacePolicyError):
+        table.store.get("default", "marketing")
+
+
+def test_empty_or_malformed_group_names_are_refused_at_the_policy_schema():
+    """Finding 5: an approver list of [""] must not validate (it would silently remove the gate)."""
+    for bad in ([""], ["g-ok", ""], ["has space"], ["#hash"]):
+        with pytest.raises(ValueError):
+            _policy(approval={"high": bad})
+        with pytest.raises(ValueError):
+            _policy(memberGroups=bad)
+
+
+# --------------------------------------------------------------------------- re-review findings, pinned
+
+
+def _flow_with(monkeypatch, workflow: dict, *, owner_sub: str = OWNER):
+    import importlib
+    from datetime import UTC, datetime
+
+    from app.models.enums import DeploymentStatus
+    from app.models.flow import Flow
+
+    module = importlib.import_module("app.services.flow_storage")
+    store = module.FlowStorage()
+    now = datetime.now(UTC)
+    flow = Flow(
+        id=FLOW_ID,
+        name="probe",
+        workflow=workflow,
+        deployment_status=DeploymentStatus.NOT_DEPLOYED,
+        created_at=now,
+        updated_at=now,
+        owner_sub=owner_sub,
+    )
+    store._flows[flow.id] = flow
+    monkeypatch.setattr(module, "_active_storage", store)
+    monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
+    return flow
+
+
+def _v2_document(monkeypatch, **spec_overrides):
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    spec = spec_service.normalize(migrate_v1_flow(_business_canvas(), spec_id=FLOW_ID, name="S", owner_sub=OWNER))
+    spec = spec.model_copy(update=spec_overrides)
+    return spec.model_dump(by_alias=True, mode="json")
+
+
+def test_an_omitted_target_region_is_judged_as_the_home_region(spy, table, monkeypatch):
+    """Finding 1 (residual): a Region allow-list that excludes the platform's home Region refuses a
+    request that simply omits targetRegion, instead of passing it as 'no Region'."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="EU only", allowed={"regions": ["eu-west-1"]}))
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 403, response.text
+    (violation,) = response.json()["detail"]["violations"]
+    assert violation["code"] == "region_not_allowed"
+    assert "'us-east-1'" in violation["message"]
+    assert spy.side_effects == []
+
+
+def test_connected_code_interpreter_and_browser_are_judged_as_tools(spy, table, monkeypatch):
+    """Finding 1 (residual): connectedTools carries executable capabilities, not only infrastructure."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Read only", allowed={"toolRiskClasses": ["read"]}))
+
+    response = _client().post("/api/deploy", json=_body(connectedTools=["gateway", "code_interpreter", "browser"]))
+
+    assert response.status_code == 403, response.text
+    paths = sorted(v["path"] for v in response.json()["detail"]["violations"])
+    codes = {v["code"] for v in response.json()["detail"]["violations"]}
+    assert codes == {"tool_unclassified"} and len(paths) == 2  # the two capabilities; gateway is not a tool
+    assert spy.side_effects == []
+
+
+def test_a_member_cannot_escape_their_workspace_by_deploying_without_a_flow(spy, table, monkeypatch):
+    """Finding 2 (residual): the governing workspace follows the deployer's membership. A member of a
+    locked workspace who drops flowId (or saves a canvas with no workspaceId) is still judged by it."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Permissive"))
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="finance",
+            name="Finance (locked)",
+            memberGroups=["g-users-default"],
+            allowed={"connectors": ["slack"]},
+        ),
+    )
+
+    response = _client().post("/api/deploy", json=_body(connectors=[JIRA]))
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["workspaceId"] == "finance"
+    assert [v["code"] for v in detail["violations"]] == ["connector_not_allowed"]
+    assert spy.side_effects == []
+
+
+def test_a_member_of_two_workspaces_whose_canvas_names_neither_is_refused_with_selection_required(
+    spy, table, monkeypatch
+):
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put("default", _policy(workspaceId="default", name="Default"))
+    table.store.put("default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-users-default"]))
+    table.store.put("default", _policy(workspaceId="hr", name="HR", memberGroups=["g-users-default"]))
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "policy_denied" and detail["workspaceId"] is None and detail["tier"] is None
+    assert [v["code"] for v in detail["violations"]] == ["workspace_selection_required"]
+    assert "finance" in detail["message"] and "hr" in detail["message"]
+    assert spy.side_effects == []
+
+
+def _canvas_with_kb(kb_id: str) -> dict:
+    """The business canvas plus a knowledge-base tool node on its Gateway, exactly as the deploy panel
+    saves it (snake_case data; the compiler sends the camelCase node configuration verbatim)."""
+    document = _business_canvas()
+    gateway = next(node for node in document["nodes"] if node["data"].get("component_type") == "gateway")
+    document["nodes"].append(
+        {
+            "id": "tool-kb",
+            "type": "tool",
+            "data": {
+                "name": "Knowledge base",
+                "tool_id": "knowledge_base",
+                "is_knowledge_base": True,
+                "kb_mode": "existing",
+                "knowledge_base_id": kb_id,
+                "enabled": True,
+                "component_type": "tool",
+            },
+            "position": {"x": 0, "y": 0},
+        }
+    )
+    document["edges"].append({"id": "e-kb", "source": gateway["id"], "target": "tool-kb"})
+    return document
+
+
+def _kb_request_config(flow_document: dict) -> dict:
+    """What the deploy panel sends as knowledgeBaseConfig for that canvas: the compiled request's value."""
+    from app.services.spec_compiler import compile_deploy_request
+    from app.services.spec_migration import migrate_v1_flow
+
+    return compile_deploy_request(migrate_v1_flow(flow_document, spec_id=FLOW_ID, name="S", owner_sub=OWNER))[
+        "knowledgeBaseConfig"
+    ]
+
+
+def test_a_classification_does_not_travel_to_a_different_resource_with_the_same_id(spy, table, monkeypatch):
+    """Finding 10: a reviewed 'public' label on one knowledge base must not carry to another knowledge
+    base deployed under the same entry id; the class is bound to the resource's configuration."""
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    canvas = _canvas_with_kb("PUBLICKB01")
+    spec = spec_service.normalize(migrate_v1_flow(canvas, spec_id=FLOW_ID, name="S", owner_sub=OWNER))
+    knowledge = [k.model_copy(update={"data_class": "public"}) if k.type == "customKb" else k for k in spec.knowledge]
+    assert any(k.data_class == "public" for k in knowledge)
+    _flow_with(monkeypatch, spec.model_copy(update={"knowledge": knowledge}).model_dump(by_alias=True, mode="json"))
+    _flags(monkeypatch, {"workspacePolicy": True})
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="default", name="Public data only", allowed={"dataClasses": ["public"], "connectors": ["jira"]}
+        ),
+    )
+
+    same = _client().post(
+        "/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA], knowledgeBaseConfig=_kb_request_config(canvas))
+    )
+    assert same.status_code == 202, same.text  # the SAME knowledge base: the reviewed class carries
+
+    spy.calls.clear()
+    other = _client().post(
+        "/api/deploy",
+        json=_body(
+            flowId=FLOW_ID, connectors=[JIRA], knowledgeBaseConfig=_kb_request_config(_canvas_with_kb("SECRETKB99"))
+        ),
+    )
+    assert other.status_code == 403, other.text  # a DIFFERENT knowledge base: unclassified, not public
+    assert [v["code"] for v in other.json()["detail"]["violations"]] == ["knowledge_unclassified"]
+    assert spy.side_effects == []
+
+
+def test_the_flows_budget_declaration_reaches_admission(spy, table, monkeypatch):
+    """Finding 11: the saved canvas's monthly budget is what the budget rules judge."""
+    from app.schemas.agent_spec_v2 import BudgetSpec, PolicySpec
+
+    _flow_with(monkeypatch, _v2_document(monkeypatch, policy=PolicySpec(budget=BudgetSpec(monthly_usd=80))))
+    _flags(monkeypatch, {"workspacePolicy": True})
+
+    # A cap with no per-agent default: the flow's own declaration (80) satisfies it.
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="default", name="Capped", budgets={"maxAgentMonthlyUsd": 100}, allowed={"connectors": ["jira"]}
+        ),
+    )
+    assert _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA])).status_code == 202
+
+    # A tighter cap refuses that same declaration.
+    spy.calls.clear()
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="default", name="Tighter", budgets={"maxAgentMonthlyUsd": 50}, allowed={"connectors": ["jira"]}
+        ),
+    )
+    refused = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+    assert refused.status_code == 403, refused.text
+    assert [v["code"] for v in refused.json()["detail"]["violations"]] == ["budget_exceeds_workspace"]
+    assert spy.side_effects == []
+
+    # The budget-above-default modifier fires on the declared figure: 80 > default 40 raises the tier.
+    table.store.put(
+        "default",
+        _policy(
+            workspaceId="default",
+            name="Low default",
+            budgets={"perAgentMonthlyUsd": 40},
+            allowed={"connectors": ["jira"]},
+            approval={"high": ["g-admins-security"]},
+        ),
+    )
+    seen: list[dict | None] = []
+    original = dh._reject_workspace_policy_violation
+
+    def _capture(request, caller_sub, raw_request=None):
+        original(request, caller_sub, raw_request)
+        seen.append(request.admission_decision)
+
+    monkeypatch.setattr(dh, "_reject_workspace_policy_violation", _capture)
+    assert _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA])).status_code == 202
+    assert seen[-1]["tier"] == "high"  # jira write (medium) + budget above default -> high
+    assert [r["code"] for r in seen[-1]["reasons"]] == ["write_tool", "budget_above_default"]
+    assert seen[-1]["approvers"] == ["g-admins-security"]

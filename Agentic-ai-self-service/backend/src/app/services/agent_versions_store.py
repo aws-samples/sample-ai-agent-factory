@@ -287,6 +287,14 @@ class AgentVersion:
     # Written once, conditionally, after AgentCore returns a complete passing
     # batch evaluation. It is never accepted from a deploy or promote request.
     promotion_evidence: dict | None = None
+    #: Workspace admission (plan §3.B): ``AdmissionDecision.model_dump(by_alias=True)`` -- the risk
+    #: tier, its reasons and the approver groups this version must clear before production. None
+    #: for versions deployed with the ``workspacePolicy`` flag off; they promote as before.
+    admission: dict | None = None
+    #: One ``{group, approverSub, approvedAt}`` record per approver group that has approved, written
+    #: by ``record_admission_approval``. Promotion to production requires every group in
+    #: ``admission.approvers`` to appear here.
+    admission_approvals: list[dict] | None = None
 
     def to_item(self) -> dict:
         item = {
@@ -311,6 +319,8 @@ class AgentVersion:
             "promotion_policy",
             "evaluation_kms_key_arn",
             "promotion_evidence",
+            "admission",
+            "admission_approvals",
         ):
             val = getattr(self, fld)
             if val is not None:
@@ -343,6 +353,8 @@ class AgentVersion:
             promotion_policy=item.get("promotion_policy"),
             evaluation_kms_key_arn=item.get("evaluation_kms_key_arn"),
             promotion_evidence=item.get("promotion_evidence"),
+            admission=item.get("admission"),
+            admission_approvals=item.get("admission_approvals"),
         )
 
 
@@ -798,6 +810,115 @@ class AgentVersionsStore:
                 f"promotion evidence for {runtime_name}/{version_id} could not be read after it was recorded"
             )
         return current
+
+    def record_admission_approval(
+        self,
+        runtime_name: str,
+        version_id: str,
+        *,
+        expected_owner_sub: str,
+        expected_deployment_id: str,
+        expected_admission: dict,
+        group: str,
+        approver_sub: str,
+        approved_at: str,
+    ) -> AgentVersion:
+        """Record that ``group`` approved this version's workspace admission (plan §3.B).
+
+        Fenced like ``record_promotion_evidence`` on the identity the ROUTE validated, not on whatever
+        the store re-reads: the row must still belong to ``expected_owner_sub``, still be the deploy
+        ``expected_deployment_id`` produced (a version re-created by a retry keeps its id, not its
+        deploy), and still carry exactly ``expected_admission`` -- the decision the approver was shown
+        and is approving. The write is also a compare-and-set on the approvals list as read, so two
+        approvers of the same group racing each other cannot duplicate or drop a record: the loser
+        re-reads, and only if the SAME row (owner, deploy, admission) now has the group approved is the
+        call idempotent; anything else is a conflict.
+
+        The approver's identity is checked by the route (group membership, never the owner); the store
+        guarantees the record is attached to the right, unmoved decision.
+        """
+        from app.services.workspace_approval import approval_record, approved_groups, required_approver_groups
+
+        if not runtime_name or version_id == NAME_CLAIM_VERSION_ID:
+            raise ValueError("a real runtime version is required")
+        if not expected_owner_sub or not expected_deployment_id or not group or not approver_sub or not approved_at:
+            raise ValueError(
+                "an admission approval needs the owner, the deploy, the group, the approver and a timestamp"
+            )
+        if approver_sub == expected_owner_sub:
+            raise ValueError("a version's owner cannot approve their own version")
+        if group not in required_approver_groups(expected_admission):
+            raise ValueError(f"{group!r} is not an approver group of the admission being approved")
+
+        def _same_row(row: AgentVersion | None) -> bool:
+            return (
+                row is not None
+                and row.owner_sub == expected_owner_sub
+                and row.deployment_id == expected_deployment_id
+                and row.admission == expected_admission
+            )
+
+        current = self.get(runtime_name, version_id, consistent=True)
+        if not _same_row(current):
+            raise AdmissionApprovalConflict(
+                f"admission approval for {runtime_name}/{version_id} was not recorded; "
+                "the version is absent, moved, or no longer carries the admission being approved"
+            )
+        if group not in required_approver_groups(current.admission):
+            raise AdmissionApprovalConflict(
+                f"admission approval for {runtime_name}/{version_id} was not recorded; "
+                f"{group!r} is not an approver group for this version"
+            )
+        stored_approvals = current.admission_approvals
+        existing = list(stored_approvals or [])
+        if group in approved_groups(existing):
+            return current
+
+        updated = existing + [approval_record(group, approver_sub, approved_at)]
+        names = {"#approvals": "admission_approvals", "#admission": "admission"}
+        # Fenced on the exact admission document the approver saw, so an approval can never attach
+        # to a different decision, and on the approvals list as READ: a stored empty list and an
+        # absent attribute are different states, and both are compared exactly.
+        values: dict = {
+            ":approvals": updated,
+            ":owner": expected_owner_sub,
+            ":deployment": expected_deployment_id,
+            ":admission": expected_admission,
+        }
+        condition = (
+            "attribute_exists(version_id) AND owner_sub = :owner AND deployment_id = :deployment "
+            "AND #admission = :admission"
+        )
+        if stored_approvals is None:
+            condition += " AND attribute_not_exists(#approvals)"
+        else:
+            condition += " AND #approvals = :expected"
+            values[":expected"] = existing
+        try:
+            self._table.update_item(
+                Key={"runtime_name": runtime_name, "version_id": version_id},
+                UpdateExpression="SET #approvals = :approvals",
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=_floats_to_decimals(values),
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            after = self.get(runtime_name, version_id, consistent=True)
+            if _same_row(after) and group in approved_groups(after.admission_approvals):
+                return after
+            raise AdmissionApprovalConflict(
+                f"admission approval for {runtime_name}/{version_id} was not recorded; "
+                "the version moved while the approval was in flight"
+            ) from None
+
+        after = self.get(runtime_name, version_id, consistent=True)
+        if not _same_row(after) or group not in approved_groups(after.admission_approvals):
+            raise AdmissionApprovalConflict(
+                f"admission approval for {runtime_name}/{version_id} could not be read after it was recorded"
+            )
+        return after
 
     def delete(self, runtime_name: str, version_id: str) -> None:
         if version_id == NAME_CLAIM_VERSION_ID:
@@ -1320,6 +1441,10 @@ class PromotionEvidenceConflict(RuntimeError):
     """A version changed or already carries a different immutable attestation."""
 
 
+class AdmissionApprovalConflict(RuntimeError):
+    """An admission approval was not recorded: the version is absent, moved, or does not route to that group."""
+
+
 class SlotWriteConflict(RuntimeError):
     """The slot row moved between the caller's read and its write, so nothing was written.
 
@@ -1388,6 +1513,15 @@ class VersionFence:
     promotion_evidence_digest: str | None = None
     promotion_policy_digest: str | None = None
     minimum_promotion_evidence_expiry_epoch: int | None = None
+    #: Workspace admission (plan §3.B). ``admission_fenced`` says the caller validated the version's
+    #: admission and approvals and wants the slot write conditioned on them being EXACTLY what it
+    #: validated: ``admission`` (None = the row must carry no admission) and ``admission_approvals``
+    #: (None = the row must carry no approvals). A promotion authorized against a satisfied approval
+    #: requirement then cannot land on a row whose requirement was tightened, or whose approvals were
+    #: replaced, between the route's read and the transaction.
+    admission_fenced: bool = False
+    admission: dict | None = None
+    admission_approvals: list | None = None
 
 
 def _slot_mutable_pairs(slot: RuntimeSlots) -> tuple[tuple[str, str | None], ...]:
@@ -1690,6 +1824,18 @@ def set_slot_pointers_atomically(
             # A legacy row genuinely has no created_at; an equality against "" would compare with an
             # absent attribute, never match, and make that row permanently un-promotable.
             v_conditions.append("attribute_not_exists(created_at)")
+        if fence.admission_fenced:
+            v_names.update({"#admission": "admission", "#approvals": "admission_approvals"})
+            if fence.admission is None:
+                v_conditions.append("attribute_not_exists(#admission)")
+            else:
+                v_conditions.append("#admission = :v_admission")
+                v_values[":v_admission"] = _floats_to_decimals(fence.admission)
+            if fence.admission_approvals is None:
+                v_conditions.append("attribute_not_exists(#approvals)")
+            else:
+                v_conditions.append("#approvals = :v_approvals")
+                v_values[":v_approvals"] = _floats_to_decimals(fence.admission_approvals)
         items.append(
             {
                 "ConditionCheck": {

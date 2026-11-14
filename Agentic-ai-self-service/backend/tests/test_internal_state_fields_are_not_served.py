@@ -85,6 +85,9 @@ PUBLIC_STATE_FIELDS = frozenset(
         # changes what they observe: create/update take minutes while the snapshot is
         # prepared, and cold starts differ. ``GetAgentRuntime`` stays the ground truth.
         "runtime_platform_version",
+        # Workspace admission (plan §3.B): the tier, reasons and approver groups. The UI badge and
+        # the deployer's "what happens next" read it; it names no ARN, account or platform principal.
+        "admission",
         "gateway_url",
         "gateway_result",
         "policy_result",

@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -82,25 +83,55 @@ def workspace_id_from_sort_key(sort_key: str) -> str | None:
 
 
 def policy_to_item(org_id: str, policy: WorkspacePolicy) -> dict[str, Any]:
-    """The DynamoDB item for a policy: the camelCase document plus the table keys."""
+    """The DynamoDB item for a policy: the camelCase document plus the table keys. Floats become
+    ``Decimal`` because boto3's DynamoDB serializer refuses Python floats (a budget-bearing policy
+    would otherwise fail to write)."""
     item: dict[str, Any] = {
         "org_id": org_id,
         "sk": policy_sort_key(policy.workspace_id),
-        "policy": policy.model_dump(by_alias=True, mode="json"),
+        "policy": _floats_to_decimals(policy.model_dump(by_alias=True, mode="json")),
     }
     return item
 
 
 def policy_from_item(item: dict[str, Any]) -> WorkspacePolicy:
     """Rebuild a policy from its item. Strict: a corrupt or hand-edited item raises rather than
-    yielding a policy that silently allows (or denies) more than the admin wrote."""
+    yielding a policy that silently allows (or denies) more than the admin wrote, and the document's
+    ``workspaceId`` must be the one the sort key was built from (a policy filed under another key
+    governs nothing)."""
     document = item.get("policy")
     if not isinstance(document, dict):
         raise WorkspacePolicyError("workspace policy item has no policy document")
     try:
-        return WorkspacePolicy.model_validate(document)
+        policy = WorkspacePolicy.model_validate(_decimals_to_numbers(document))
     except ValidationError as exc:
         raise WorkspacePolicyError(f"stored workspace policy is invalid: {exc.error_count()} error(s)") from exc
+    keyed = workspace_id_from_sort_key(str(item.get("sk", "")))
+    if keyed is not None and keyed != policy.workspace_id:
+        raise WorkspacePolicyError(
+            f"stored workspace policy for key {keyed!r} names workspace {policy.workspace_id!r}; refusing to use it"
+        )
+    return policy
+
+
+def _floats_to_decimals(value: Any) -> Any:
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {key: _floats_to_decimals(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_floats_to_decimals(item) for item in value]
+    return value
+
+
+def _decimals_to_numbers(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, dict):
+        return {key: _decimals_to_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decimals_to_numbers(item) for item in value]
+    return value
 
 
 class WorkspacePolicyStore:
@@ -157,29 +188,83 @@ class WorkspacePolicyStore:
         return sorted(policies, key=lambda policy: policy.workspace_id)
 
 
-def resolve_policy(store: WorkspacePolicyStore, org_id: str, workspace_id: str | None) -> tuple[WorkspacePolicy, bool]:
-    """The policy that governs an agent in ``workspace_id`` and whether it fell back to ``default``.
+class WorkspaceMembershipError(WorkspacePolicyError):
+    """The agent names a workspace its deployer is not a member of."""
 
-    Lookup order: the named workspace's policy, then the ``default`` workspace's policy. A named
-    workspace with no policy falls back (an admin has not configured it yet, so the org default
-    governs); a missing default is ``WorkspacePolicyUnavailableError`` so the caller fails closed.
-    An unparseable stored policy is also unavailable: never admit on a policy we could not read.
+    def __init__(self, workspace_id: str) -> None:
+        self.workspace_id = workspace_id
+        super().__init__(f"the deployer is not a member of workspace {workspace_id!r}")
+
+
+class WorkspaceSelectionRequiredError(WorkspacePolicyError):
+    """The deployer belongs to several workspaces and the agent names none of them."""
+
+    def __init__(self, choices: list[str]) -> None:
+        self.choices = list(choices)
+        super().__init__(f"the agent must name one of the deployer's workspaces: {', '.join(choices)}")
+
+
+def is_member(policy: WorkspacePolicy, caller_groups: list[str] | tuple[str, ...] | set[str]) -> bool:
+    """Whether a caller holding ``caller_groups`` (the JWT's ``cognito:groups``) belongs to the
+    workspace. The ``default`` workspace has no membership: it governs everyone else."""
+    if policy.workspace_id == DEFAULT_WORKSPACE_ID:
+        return True
+    return bool(set(policy.member_groups) & set(caller_groups))
+
+
+def resolve_policy(
+    store: WorkspacePolicyStore,
+    org_id: str,
+    workspace_id: str | None,
+    caller_groups: list[str] | tuple[str, ...] | set[str] = (),
+) -> tuple[WorkspacePolicy, bool]:
+    """The policy that governs an agent deployed by a caller holding ``caller_groups``, and whether it
+    is the org ``default``.
+
+    The governing workspace is resolved from the CALLER'S MEMBERSHIPS (``member_groups`` against the
+    IdP-asserted ``cognito:groups``), not from what the agent's spec says, because the spec is the
+    deployer's own document:
+
+    * the caller is a member of no configured workspace -> the org ``default`` policy governs, whatever
+      the spec names (an unconfigured name is a canvas saved before its workspace existed);
+    * the caller is a member of exactly one -> that workspace governs, named or not, so a member cannot
+      escape their workspace by omitting ``flowId`` or clearing ``workspaceId``;
+    * the caller is a member of several -> the spec must name one of them
+      (``WorkspaceSelectionRequiredError`` otherwise);
+    * a spec that names a configured workspace the caller is not a member of is
+      ``WorkspaceMembershipError`` in every case. Neither error falls back to the default: the refusal
+      is visible, never a re-route.
+
+    A missing ``default`` policy (when it is what governs) or an unreadable store is
+    ``WorkspacePolicyUnavailableError`` so the caller fails closed. An unparseable stored policy is also
+    unavailable: never admit on a policy we could not read.
     """
     try:
-        if workspace_id and workspace_id != DEFAULT_WORKSPACE_ID:
-            named = store.get(org_id, workspace_id)
-            if named is not None:
-                return named, False
-        default = store.get(org_id, DEFAULT_WORKSPACE_ID)
-    except WorkspacePolicyUnavailableError:
-        raise
+        policies = store.list(org_id)
     except WorkspacePolicyError as exc:
-        # A stored policy that no longer parses: the admin's intent is unknown, so it is unavailable.
-        logger.error("Workspace policy for %r is unreadable (%s)", workspace_id or DEFAULT_WORKSPACE_ID, exc)
+        logger.error("A stored workspace policy is unreadable (%s)", exc)
         raise WorkspacePolicyUnavailableError("stored workspace policy is invalid") from exc
     except Exception as exc:  # noqa: BLE001 - any store failure is "unavailable"; type only in logs
-        logger.error("Workspace policy could not be read (%s)", type(exc).__name__)
+        logger.error("Workspace policies could not be read (%s)", type(exc).__name__)
         raise WorkspacePolicyUnavailableError("workspace policy store unavailable") from exc
+
+    by_id = {policy.workspace_id: policy for policy in policies}
+    default = by_id.get(DEFAULT_WORKSPACE_ID)
+    memberships = [
+        policy
+        for policy in policies
+        if policy.workspace_id != DEFAULT_WORKSPACE_ID and is_member(policy, caller_groups)
+    ]
+    named = by_id.get(workspace_id) if workspace_id and workspace_id != DEFAULT_WORKSPACE_ID else None
+
+    if named is not None:
+        if named not in memberships:
+            raise WorkspaceMembershipError(named.workspace_id)
+        return named, False
+    if len(memberships) == 1:
+        return memberships[0], False
+    if len(memberships) > 1:
+        raise WorkspaceSelectionRequiredError(sorted(policy.workspace_id for policy in memberships))
     if default is None:
         raise WorkspacePolicyUnavailableError(
             f"no policy is stored for workspace {workspace_id or DEFAULT_WORKSPACE_ID!r} "

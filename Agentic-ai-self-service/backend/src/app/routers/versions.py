@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.deployment_models import TestRequest, TestResponse
 from app.services.agent_versions_store import (
+    AdmissionApprovalConflict,
     AgentVersion,
     RuntimeSlots,
     SlotWriteConflict,
@@ -29,7 +30,7 @@ from app.services.agent_versions_store import (
     get_versions_store,
     set_slot_pointers_atomically,
 )
-from app.services.auth import assert_owner, get_caller_sub
+from app.services.auth import assert_owner, extract_cognito_groups, get_caller_sub
 from app.services.delegated_identity import (
     DelegatedIdentityError,
     deployment_requires_obo,
@@ -56,6 +57,13 @@ from app.services.runtime_invocation import (
 from app.services.runtime_target_context import (
     get_deployment_store,
     resolve_owned_runtime_slot_target,
+)
+from app.services.workspace_approval import (
+    MalformedAdmissionError,
+    admission_tier,
+    pending_groups,
+    promotion_blocked_message,
+    required_approver_groups,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +114,8 @@ class VersionResponse(BaseModel):
     production_gate_required: bool | None = None
     promotion_policy: dict | None = None
     promotion_evidence: dict | None = None
+    admission: dict | None = None
+    admission_approvals: list[dict] | None = None
 
     @classmethod
     def from_model(cls, v: AgentVersion) -> VersionResponse:
@@ -124,6 +134,8 @@ class VersionResponse(BaseModel):
             production_gate_required=v.production_gate_required,
             promotion_policy=v.promotion_policy,
             promotion_evidence=v.promotion_evidence,
+            admission=v.admission,
+            admission_approvals=v.admission_approvals,
         )
 
 
@@ -146,6 +158,18 @@ class PromoteResponse(BaseModel):
 
 class PromoteRequest(BaseModel):
     slot: Literal["staging", "production"] = Field(default="production")
+
+
+class ApproveRequest(BaseModel):
+    """One approver group's approval of a version's workspace admission (plan §3.B).
+
+    Explicit on purpose: a caller who belongs to several approver groups approves for ONE of them
+    per call, so an approval record always names the group it was given under.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    group: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
 
 
 class SlotHistoryMessage(BaseModel):
@@ -374,6 +398,28 @@ async def promote_version(
     promotion_authority = "deployment"
     promotion_evidence = None
     promotion_policy = None
+    if body.slot == "production":
+        # Workspace admission (plan §3.B): a medium/high version is promotable only once every
+        # approver group its policy named has approved. Read from the ROW, so a flag flipped off
+        # after admission releases nothing; versions admitted without a requirement pass through.
+        # A present-but-malformed record stays blocked: a requirement that cannot be read cannot
+        # be shown to be satisfied.
+        try:
+            pending = pending_groups(target.admission, target.admission_approvals)
+        except MalformedAdmissionError as exc:
+            logger.error("Version %s/%s has a malformed admission record (%s)", runtime_name, version_id, exc)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot promote version {version_id} to production: its workspace admission record is "
+                    "malformed, so its approval requirement cannot be verified. An administrator must review it."
+                ),
+            ) from None
+        if pending:
+            raise HTTPException(
+                status_code=409,
+                detail=promotion_blocked_message(version_id, admission_tier(target.admission), pending),
+            )
     if body.slot == "production" and target.production_gate_required:
         try:
             promotion_policy = validate_frozen_promotion_policy(target.promotion_policy)
@@ -437,6 +483,12 @@ async def promote_version(
                 minimum_promotion_evidence_expiry_epoch=(
                     int(promotion_evidence["expires_at_epoch"]) if promotion_evidence is not None else None
                 ),
+                # Workspace admission: the production pointer is conditioned on exactly the admission
+                # and approvals this route validated above (or their absence), so a requirement
+                # tightened or an approval replaced after the read cannot be promoted past.
+                admission_fenced=body.slot == "production",
+                admission=target.admission,
+                admission_approvals=target.admission_approvals,
             ),
         )
     except SlotWriteConflict:
@@ -468,6 +520,126 @@ async def promote_version(
         previous_version_id=previous,
         message=f"Promoted version {version_id} to {body.slot}",
     )
+
+
+@router.post(
+    "/{runtime_name}/versions/{version_id}/approve",
+    response_model=VersionResponse,
+    dependencies=[Depends(require_scopes("hitl:write"))],
+)
+async def approve_version(
+    runtime_name: str,
+    version_id: str,
+    body: ApproveRequest,
+    request: Request,
+    caller_sub: str = Depends(get_caller_sub),
+) -> VersionResponse:
+    """Record one approver group's approval of a version's workspace admission (plan §3.B).
+
+    Who may call this: a member of ``body.group`` (from the caller's ``cognito:groups`` claim) where
+    that group is one the version's admission routed to, holding the existing HITL approval scope
+    ``hitl:write``. The version's OWNER is refused whatever groups they hold (403): an approval is a
+    second person's decision. The owner check runs before the membership check so a self-approval
+    is always named as such.
+
+    Existence non-disclosure: a caller who is neither the owner nor a member of ANY group the version
+    routes to gets the same 404 as a missing version, so a ``hitl:write`` holder cannot enumerate
+    other tenants' versions or learn their approval routing. Only a member of some required group
+    sees the 409s that explain which group is wrong or what is still pending.
+
+    Idempotent per group: a repeated approval returns the current row unchanged.
+    """
+    from app.services.resource_ownership import owner_sub_hash
+
+    runtime_name = _validate_runtime_name(runtime_name)
+    version_id = _validate_version_id(version_id)
+    versions_store = get_versions_store()
+    target = versions_store.get(runtime_name, version_id, consistent=True)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    caller_groups = set(extract_cognito_groups(request))
+    # Parse the admission record tolerantly FIRST so that a malformed record is not an existence
+    # oracle: an unrelated caller must get the same 404 whether the record is sound or broken.
+    try:
+        required = required_approver_groups(target.admission)
+        malformed = False
+    except MalformedAdmissionError as exc:
+        logger.error("Version %s/%s has a malformed admission record (%s)", runtime_name, version_id, exc)
+        required, malformed = [], True
+    is_owner = caller_sub == target.owner_sub
+    # Only an owner, or a member of a group the record names, learns anything beyond 404. For a
+    # malformed record nobody but the owner is a named approver, so the owner is told to call an admin.
+    if not is_owner and not (caller_groups & set(required)):
+        logger.warning(
+            "Admission approval denied: caller %s is not an approver of version %s/%s",
+            owner_sub_hash(caller_sub),
+            runtime_name,
+            version_id,
+        )
+        raise HTTPException(status_code=404, detail="Not found")
+    if malformed:
+        raise HTTPException(
+            status_code=409,
+            detail="This version's workspace admission record is malformed; an administrator must review it.",
+        )
+    if is_owner:
+        if not required:
+            raise HTTPException(
+                status_code=409, detail=f"Version {version_id} does not require workspace admission approval."
+            )
+        logger.warning(
+            "Admission approval denied: owner %s tried to approve their own version %s/%s",
+            owner_sub_hash(caller_sub),
+            runtime_name,
+            version_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="A version's owner cannot approve their own version; approval is a second person's decision.",
+        )
+    if body.group not in required:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{body.group!r} is not an approver group for version {version_id}; "
+                f"its admission routes to {', '.join(required)}."
+            ),
+        )
+    if body.group not in caller_groups:
+        logger.warning(
+            "Admission approval denied: caller %s is not a member of %s (version %s/%s)",
+            owner_sub_hash(caller_sub),
+            body.group,
+            runtime_name,
+            version_id,
+        )
+        raise HTTPException(status_code=403, detail=f"You are not a member of the approver group {body.group!r}.")
+
+    try:
+        updated = versions_store.record_admission_approval(
+            runtime_name,
+            version_id,
+            expected_owner_sub=target.owner_sub,
+            expected_deployment_id=target.deployment_id,
+            expected_admission=target.admission,
+            group=body.group,
+            approver_sub=caller_sub,
+            approved_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except AdmissionApprovalConflict:
+        raise HTTPException(
+            status_code=409,
+            detail="This version changed while the approval was in flight, so nothing was recorded. Re-read and retry.",
+        ) from None
+    logger.info(
+        "Admission approval recorded: version %s/%s group %s by %s (pending: %s)",
+        runtime_name,
+        version_id,
+        body.group,
+        owner_sub_hash(caller_sub),
+        pending_groups(updated.admission, updated.admission_approvals),
+    )
+    return VersionResponse.from_model(updated)
 
 
 @router.post(

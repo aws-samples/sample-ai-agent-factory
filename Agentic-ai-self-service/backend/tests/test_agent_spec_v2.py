@@ -551,3 +551,27 @@ def test_compile_route_returns_the_recorded_deploy_request_for_the_flow(monkeypa
     # memory only), so the compiled body is the recorded one without templateId.
     recorded.pop("templateId")
     assert response.json() == recorded
+
+
+def test_a_flow_that_already_stores_spec_v2_reads_back_despite_the_flow_governance_envelope(monkeypatch, owned_flow):
+    """``Flow`` stamps ``governance`` on every stored document. A v2 document is strict and owns its
+    governance under ``deployment.governance``, so the read path must strip the envelope rather than
+    422 on every v2 flow. The classification a human gave a tool must survive the round trip."""
+    from app.models.flow import Flow
+    from app.services.spec_migration import without_flow_envelope
+
+    client = _app(monkeypatch, flags='{"specV2Read": true}')
+    migrated = client.get(f"/api/specs/{owned_flow.id}").json()
+    assert "governance" not in migrated
+    stored = Flow.model_validate({**owned_flow.model_dump(), "workflow": migrated})
+    assert "governance" in stored.workflow  # the envelope the Flow model adds
+    assert without_flow_envelope(stored.workflow) == migrated
+    assert without_flow_envelope(owned_flow.workflow) is owned_flow.workflow  # a v1 document is untouched
+
+    import importlib
+
+    module = importlib.import_module("app.services.flow_storage")
+    module._active_storage._flows[owned_flow.id] = stored
+    response = client.get(f"/api/specs/{owned_flow.id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["meta"]["contentHash"] == migrated["meta"]["contentHash"]

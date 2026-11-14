@@ -49,12 +49,20 @@ def _code(node_id: str = "node1") -> CodeSpec:
 
 
 def _policy(**overrides) -> WorkspacePolicy:
-    base: dict = {"workspace_id": "ws_test", "name": "Test Workspace"}
+    """A workspace that trusts builder classifications: the rule tests judge the classes a builder
+    ASSERTED. The platform default does not trust them; see ``_LOCKED_POLICY`` and the trust-model
+    tests at the end."""
+    base: dict = {
+        "workspace_id": "ws_test",
+        "name": "Test Workspace",
+        "defaults": {"trust_builder_classifications": True},
+    }
     base.update(overrides)
     return WorkspacePolicy(**base)
 
 
 _EMPTY_POLICY = _policy()
+_LOCKED_POLICY = WorkspacePolicy(workspace_id="ws_locked", name="Locked")
 
 
 def _codes(result) -> list[str]:
@@ -86,11 +94,24 @@ def test_write_tool_is_medium():
     assert _codes(result) == ["write_tool"]
 
 
-@pytest.mark.parametrize("risk", ["read", "unclassified"])
-def test_read_or_unclassified_tool_is_low(risk):
-    result = classify(_spec(tools=[_tool(risk=risk)]), _EMPTY_POLICY)
+def test_read_tool_is_low():
+    result = classify(_spec(tools=[_tool(risk="read")]), _EMPTY_POLICY)
     assert result.tier == "low"
     assert result.reasons == []
+
+
+def test_unclassified_tool_floors_at_the_policys_unclassified_tier():
+    """A class nobody gave cannot be shown to be harmless: medium by default, high if the admin says
+    so, and low only where the admin explicitly chose it (a prototyping workspace)."""
+    spec = _spec(tools=[_tool(risk="unclassified")])
+    default = classify(spec, _EMPTY_POLICY)
+    assert default.tier == "medium"
+    assert _codes(default) == ["unclassified"]
+    assert default.reasons[0].message.startswith("unclassified tool(s) ['tool1']")
+    high = classify(spec, _policy(defaults={"unclassified_risk_tier": "high"}))
+    assert (high.tier, _codes(high)) == ("high", ["unclassified"])
+    low = classify(spec, _policy(defaults={"unclassified_risk_tier": "low"}))
+    assert (low.tier, low.reasons) == ("low", [])
 
 
 # --------------------------------------------------------------------------- provider rule
@@ -124,11 +145,23 @@ def test_sensitive_data_is_high(data_class):
     assert _codes(result) == ["sensitive_data_class"]
 
 
-@pytest.mark.parametrize("data_class", ["public", "internal", "unclassified"])
+@pytest.mark.parametrize("data_class", ["public", "internal"])
 def test_non_sensitive_data_is_low(data_class):
     result = classify(_spec(knowledge=[_knowledge(data=data_class)]), _EMPTY_POLICY)
     assert result.tier == "low"
     assert result.reasons == []
+
+
+def test_unclassified_knowledge_floors_at_the_policys_unclassified_tier():
+    result = classify(_spec(knowledge=[_knowledge(data="unclassified")]), _EMPTY_POLICY)
+    assert (result.tier, _codes(result)) == ("medium", ["unclassified"])
+    assert "knowledge ['kb1']" in result.reasons[0].message
+    assert (
+        classify(
+            _spec(knowledge=[_knowledge(data="unclassified")]), _policy(defaults={"unclassified_risk_tier": "low"})
+        ).tier
+        == "low"
+    )
 
 
 # --------------------------------------------------------------------------- public ingress rule
@@ -277,3 +310,99 @@ def test_workspace_policy_rejects_unknown_key():
 
     with pytest.raises(pydantic.ValidationError):
         WorkspacePolicy(workspace_id="ws_test", name="W", bogus=True)
+
+
+# --------------------------------------------------------------------------- catalog floor (trust model)
+
+
+def _connector(connector_id: str, risk: str = "unclassified") -> ToolSpec:
+    return ToolSpec(id=f"connector-{connector_id}", type="connector", ref=connector_id, risk_class=risk)
+
+
+def test_the_catalog_floor_reads_what_each_connectors_operations_imply():
+    from app.services.connectors_catalog import list_connectors
+    from app.services.risk_classifier import catalog_risk_floor
+
+    floors = {entry["id"]: catalog_risk_floor(entry["id"]) for entry in list_connectors()}
+    assert floors["stripe"] == "pay"  # Payments category
+    assert floors["jira"] == "write"  # create_ticket
+    assert floors["slack"] == "write"  # send_message
+    assert floors["google_drive"] == "read"  # list_files, download_file only
+    assert set(floors.values()) <= {"read", "write", "pay"}
+    assert catalog_risk_floor("acme-crm-not-in-catalog") is None
+
+
+@pytest.mark.parametrize(
+    ("connector_id", "asserted", "effective"),
+    [
+        ("jira", "read", "write"),  # a builder cannot label a write connector read
+        ("jira", "unclassified", "write"),  # ...nor leave it unclassified
+        ("jira", "pay", "pay"),  # ...but may raise it (in a workspace that trusts builder classes)
+        ("stripe", "read", "pay"),  # payments are always pay
+        ("google_drive", "unclassified", "read"),  # a read-only connector is read without a human
+        ("google_drive", "write", "write"),  # raising stands
+        ("acme-crm-not-in-catalog", "read", "read"),  # unknown to the catalog: the assertion stands
+        ("acme-crm-not-in-catalog", "unclassified", "unclassified"),
+    ],
+)
+def test_in_a_trusting_workspace_a_builder_can_raise_a_connectors_class_but_never_lower_it(
+    connector_id, asserted, effective
+):
+    from app.services.risk_classifier import effective_risk_class
+
+    assert effective_risk_class(_connector(connector_id, asserted), _EMPTY_POLICY) == effective
+
+
+@pytest.mark.parametrize(
+    ("connector_id", "asserted", "effective"),
+    [
+        ("jira", "read", "write"),  # the catalog floor still applies
+        ("jira", "pay", "write"),  # ...and a RAISED assertion no longer counts: the catalog is the only source
+        ("stripe", "read", "pay"),
+        ("google_drive", "write", "read"),
+        ("acme-crm-not-in-catalog", "read", "unclassified"),  # no catalog, no trust: unclassified
+    ],
+)
+def test_by_default_only_the_catalog_classifies_a_connector(connector_id, asserted, effective):
+    from app.services.risk_classifier import effective_risk_class
+
+    assert effective_risk_class(_connector(connector_id, asserted), _LOCKED_POLICY) == effective
+    assert effective_risk_class(_connector(connector_id, asserted)) == effective  # no policy = untrusted
+
+
+def test_non_connector_tools_keep_the_asserted_class_only_where_builders_are_trusted():
+    from app.services.risk_classifier import effective_data_class, effective_risk_class
+
+    assert effective_risk_class(_tool(risk="read", type_="lambda"), _EMPTY_POLICY) == "read"
+    assert effective_risk_class(_tool(risk="read", type_="lambda"), _LOCKED_POLICY) == "unclassified"
+    assert effective_risk_class(_tool(risk="unclassified", type_="mcp"), _EMPTY_POLICY) == "unclassified"
+    assert effective_data_class(_knowledge(data="public"), _EMPTY_POLICY) == "public"
+    assert effective_data_class(_knowledge(data="public"), _LOCKED_POLICY) == "unclassified"
+    assert effective_data_class(_knowledge(data="pii"), _LOCKED_POLICY) == "unclassified"
+
+
+def test_by_default_a_builders_read_or_public_labels_do_not_lower_risk():
+    """A mutating Lambda labelled ``read`` and a sensitive source labelled ``public`` are judged as
+    unclassified (medium by default) in a workspace that does not trust builder classifications."""
+    spec = _spec(tools=[_tool(risk="read", type_="lambda")], knowledge=[_knowledge(data="public")])
+    locked = classify(spec, _LOCKED_POLICY)
+    assert (locked.tier, _codes(locked)) == ("medium", ["unclassified"])
+    trusting = classify(spec, _EMPTY_POLICY)
+    assert (trusting.tier, trusting.reasons) == ("low", [])
+
+
+def test_a_write_connector_labelled_read_still_classifies_medium():
+    result = classify(_spec(tools=[_connector("jira", "read")]), _EMPTY_POLICY)
+    assert (result.tier, _codes(result)) == ("medium", ["write_tool"])
+
+
+def test_a_payments_connector_labelled_read_still_classifies_high():
+    result = classify(_spec(tools=[_connector("stripe", "read")]), _EMPTY_POLICY)
+    assert result.tier == "high"
+    assert "pay_tool" in _codes(result)
+
+
+def test_public_ingress_with_a_catalog_write_connector_is_high_whatever_the_label():
+    result = classify(_spec(tools=[_connector("slack", "read")], triggers=[_trigger("webhook")]), _EMPTY_POLICY)
+    assert result.tier == "high"
+    assert "public_ingress_with_write" in _codes(result)

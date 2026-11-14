@@ -23,7 +23,7 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state). `config.platformVersion` (`"V1"` \| `"V2"`, default absent = V1) selects the AgentCore Runtime platform version; `"V2"` is refused with 400 (422 for an explicit `targetRegion`) where AWS does not document it (London, Paris). `gatewayTools: ["web_answer"]` adds the AWS-managed Web Answer connector and is refused the same way outside `us-east-1`. `policyConfig.guardrails.profile` (`"off"` \| `"standard"` \| `"strict"`, default absent = off) adds Bedrock Guardrails evaluated by Policy in AgentCore on every tool call's string arguments; refused the same way where AWS lacks guardrails in policies (Ireland, Frankfurt, Paris), for an unknown profile, for a disabled policy engine, and (`strict`) for a canvas with a tool that cannot be screened |
+| `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state). `config.platformVersion` (`"V1"` \| `"V2"`, default absent = V1) selects the AgentCore Runtime platform version; `"V2"` is refused with 400 (422 for an explicit `targetRegion`) where AWS does not document it (London, Paris). `gatewayTools: ["web_answer"]` adds the AWS-managed Web Answer connector and is refused the same way outside `us-east-1`. `policyConfig.guardrails.profile` (`"off"` \| `"standard"` \| `"strict"`, default absent = off) adds Bedrock Guardrails evaluated by Policy in AgentCore on every tool call's string arguments; refused the same way where AWS lacks guardrails in policies (Ireland, Frankfurt, Paris), for an unknown profile, for a disabled policy engine, and (`strict`) for a canvas with a tool that cannot be screened. With the `workspacePolicy` flag on, the body is also admitted against the deployer's workspace policy (exact `403 policy_denied` with one reason code per offending item, `503` when no policy can be read, nothing created either way); a medium/high-risk agent lands in `staging` and needs approval before promotion, an explicit `deploymentSlot: "production"` for one is `409`. See [docs/WORKSPACES.md](WORKSPACES.md) |
 | `GET` | `/api/deploy/{deployment_id}` | Get the caller-owned deployment status; includes derived public `runtime_name` and excludes internal authority/credential leaves |
 | `GET` | `/api/deployments` | List caller-owned deployments with the same public shape and derived `runtime_name` used by production-slot chat |
 | `POST` | `/api/test-runtime` | Test a deployed agent with a prompt (supports session_id for conversation context). Also the invoke path for an **adopted** runtime (`runtimeId` from `POST /api/runtime/import`); the slot routes answer 404 for one |
@@ -169,7 +169,8 @@ Operators flip a flag with `aws ssm put-parameter --name /agentcore-workflow/<en
 | `POST` | `/api/runtimes/{name}/invoke` | Stable external client alias; invokes only the owner-checked production slot and rejects target/slot authority in the body |
 | `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first), including its frozen release policy and attested evidence |
 | `GET` | `/api/runtimes/{name}/slots` | Get the production / staging slot pointers |
-| `POST` | `/api/runtimes/{name}/versions/{version_id}/promote` | Promote to staging, or to production only when required evidence is fresh and valid |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promote` | Promote to staging, or to production only when required evidence is fresh and valid **and** every approver group the version's workspace admission routed to has approved (`409` naming the pending groups otherwise; a present-but-malformed admission record also blocks) |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/approve` | Record one approver group's approval of a version's workspace admission: `{"group": "<cognito group>"}`. Requires `hitl:write`, membership in `group`, and `group` being one the admission routed to; the version's owner is always `403`; a caller in none of the required groups gets the same `404` as a missing version. Idempotent per group. See [docs/WORKSPACES.md](WORKSPACES.md). |
 | `POST` | `/api/runtimes/{name}/rollback` | Restore the exact previous production version (the emergency rollback path does not depend on a new evaluation) |
 
 ### Evaluation, Cost & Observability (runtime-scoped)
@@ -307,6 +308,10 @@ cannot be read, deploys referencing an integration return `503`.
 | `POST` | `/api/workflows/{id}/share` | Share a workflow (viewer/editor; owner only) |
 | `DELETE` | `/api/workflows/{id}/share/{sub}` | Revoke a share |
 | `GET` | `/api/workspaces` | List workspace-visible workflows with effective role |
+| `GET` | `/api/workspaces/policies` | Every workspace policy in the org (flag `workspacePolicy`; `admin` scope; exact `404` while the flag is off). See [docs/WORKSPACES.md](WORKSPACES.md). |
+| `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored) |
+| `PUT` | `/api/workspaces/{workspaceId}/policy` | Create or replace a policy; strict schema (`422` on unknown keys or `unclassified` in an allow-list), the body's `workspaceId` must equal the path's (`400`) |
+| `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete a policy (`204`, idempotent) |
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
 
