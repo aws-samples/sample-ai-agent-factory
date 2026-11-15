@@ -17,6 +17,7 @@ Pure: no I/O. The deployment handler loads the flow (after proving ownership) an
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 from app.models.deployment_models import DeployRequest
@@ -110,10 +111,16 @@ def _external_mcp(request: DeployRequest) -> list[ToolSpec]:
 
 
 def _mcp_server_runtime(request: DeployRequest) -> list[ToolSpec]:
+    """The standalone MCP server runtime, with its COMPLETE configuration as identity: a server kept
+    under the same name but given different tools or settings is a different resource."""
     if not request.mcp_server_config:
         return []
-    name = str(request.mcp_server_config.get("name") or "mcp-server")
-    return [ToolSpec(id="mcp-server-runtime", type="agent", ref=name)]
+    config = dict(request.mcp_server_config)
+    name = str(config.get("name") or "mcp-server")
+    digest = hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return [ToolSpec(id="mcp-server-runtime", type="agent", ref=name, auth={"configSha256": digest})]
 
 
 def _channels(request: DeployRequest) -> list[dict[str, Any]]:

@@ -35,6 +35,11 @@ _GROUP_RE = re.compile(GROUP_NAME_PATTERN)
 ADMISSION_FIELD = "admission"
 APPROVALS_FIELD = "admission_approvals"
 
+#: Document versions this build can read. A record carrying any other value was written by code this
+#: build does not know, so its meaning cannot be relied on: it blocks rather than releases.
+SUPPORTED_ADMISSION_VERSIONS = frozenset({1})
+SUPPORTED_CLASSIFIER_VERSIONS = frozenset({1, 2})
+
 
 class MalformedAdmissionError(ValueError):
     """A persisted admission or approval document is present but not well-formed.
@@ -69,6 +74,13 @@ def required_approver_groups(admission: dict[str, Any] | None) -> list[str]:
         raise MalformedAdmissionError(f"admission is not a well-formed decision ({type(exc).__name__})") from exc
     if decision.outcome != "admitted":
         raise MalformedAdmissionError(f"admission outcome is {decision.outcome!r}, not 'admitted'")
+    # The version markers must be PRESENT (not defaulted) and ones this build knows how to read.
+    if "admissionVersion" not in admission or "classifierVersion" not in admission:
+        raise MalformedAdmissionError("admission does not name its admission/classifier versions")
+    if decision.admission_version not in SUPPORTED_ADMISSION_VERSIONS:
+        raise MalformedAdmissionError(f"unsupported admissionVersion {decision.admission_version!r}")
+    if decision.classifier_version not in SUPPORTED_CLASSIFIER_VERSIONS:
+        raise MalformedAdmissionError(f"unsupported classifierVersion {decision.classifier_version!r}")
     if not all(_well_formed_group(group) for group in decision.approvers):
         raise MalformedAdmissionError("admission.approvers is not a list of group names")
     return list(decision.approvers)

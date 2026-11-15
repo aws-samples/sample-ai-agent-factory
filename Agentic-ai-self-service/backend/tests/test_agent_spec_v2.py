@@ -575,3 +575,28 @@ def test_a_flow_that_already_stores_spec_v2_reads_back_despite_the_flow_governan
     response = client.get(f"/api/specs/{owned_flow.id}")
     assert response.status_code == 200, response.text
     assert response.json()["meta"]["contentHash"] == migrated["meta"]["contentHash"]
+
+
+def test_conflicting_classifications_for_one_resource_keep_the_strictest():
+    """Round 4 (finding 15): two previous entries with the same resource identity but different labels
+    (a PII label and a public label for one knowledge base) must not resolve last-wins; the PII label is
+    the one that governs."""
+    from app.schemas.agent_spec_v2 import KnowledgeSpec, ToolSpec
+    from app.services.spec_service import _merge_classified
+
+    config = {"kbMode": "existing", "knowledgeBaseId": "KB1"}
+    previous = [
+        KnowledgeSpec(id="k-pii", type="customKb", config=config, data_class="pii"),
+        KnowledgeSpec(id="k-public", type="customKb", config=config, data_class="public"),
+    ]
+    derived = [KnowledgeSpec(id="knowledge-base", type="customKb", config=config)]
+    assert [k.data_class for k in _merge_classified(previous, derived)] == ["pii"]
+    assert [k.data_class for k in _merge_classified(list(reversed(previous)), derived)] == ["pii"]  # order-independent
+
+    tools_previous = [
+        ToolSpec(id="t-read", type="lambda", ref="lookup", risk_class="read"),
+        ToolSpec(id="t-pay", type="lambda", ref="lookup", risk_class="pay"),
+    ]
+    tools_derived = [ToolSpec(id="lookup", type="lambda", ref="lookup")]
+    assert [t.risk_class for t in _merge_classified(tools_previous, tools_derived)] == ["pay"]
+    assert [t.risk_class for t in _merge_classified(list(reversed(tools_previous)), tools_derived)] == ["pay"]

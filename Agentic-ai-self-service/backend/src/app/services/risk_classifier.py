@@ -13,9 +13,11 @@ Rules (plan §3.B). Each is a *floor* (it raises the tier to at least X) unless 
   * ``confidential`` or ``pii`` knowledge            -> High
   * public ingress (webhook/email trigger) AND a write tool -> High
   * custom code (ejected nodes)                      -> Medium
-  * an UNCLASSIFIED tool or knowledge item           -> the policy's ``defaults.unclassifiedRiskTier``
+  * a tool or knowledge item nothing VERIFIES        -> the policy's ``defaults.unclassifiedRiskTier``
                                                         (medium unless the admin lowers it): a class
-                                                        nobody gave cannot be shown to be harmless
+                                                        nobody the platform trusts gave cannot be shown
+                                                        to be harmless; a builder's stricter label adds
+                                                        its own floor on top, it never replaces this one
   * a per-agent budget above the workspace default   -> one tier higher (modifier, applied last)
 
 Trust model for classes. ``riskClass``/``dataClass`` are asserted by the builder on the spec, so the
@@ -76,36 +78,69 @@ def catalog_risk_floor(connector_id: str) -> RiskClass | None:
     return "read"
 
 
+def verified_risk_class(tool: ToolSpec) -> RiskClass | None:
+    """The risk class the PLATFORM can vouch for: the connector catalog's floor, or None when nothing
+    verifies this tool (Lambda, MCP, custom, unknown connectors)."""
+    return catalog_risk_floor(tool.ref) if tool.type == "connector" else None
+
+
 def effective_risk_class(tool: ToolSpec, policy: WorkspacePolicy | None = None) -> RiskClass:
-    """The class the classifier judges a tool by.
+    """The class the classifier TIERS a tool by.
 
     Trusted first: a connector's class is floored at what its catalog operations imply, whatever the
     builder wrote. Then the builder's own assertion: in a workspace that trusts builder classifications
     (``defaults.trustBuilderClassifications``) it counts as written; elsewhere it may only make the agent
-    STRICTER -- a ``write`` or ``pay`` label still counts (a builder declaring more risk is believed),
-    while a ``read`` label is unverifiable and reads as ``unclassified`` (so it floors at the workspace's
-    unclassified tier and is refused on a constrained axis). Nobody can lower a class below the catalog
-    floor anywhere.
+    STRICTER -- a ``write`` or ``pay`` label still raises the tier (a builder declaring more risk is
+    believed), while a ``read`` label is unverifiable and reads as ``unclassified``. Nobody can lower a
+    class below the catalog floor anywhere.
+
+    Tiering and ADMISSION read labels differently on purpose: for an allow-list, use
+    ``admissible_risk_class``.
     """
     trusted = policy is not None and policy.defaults.trust_builder_classifications
     asserted: RiskClass = tool.risk_class
     if not trusted and asserted not in ("write", "pay"):
         asserted = "unclassified"
-    if tool.type != "connector":
-        return asserted
-    floor = catalog_risk_floor(tool.ref)
+    floor = verified_risk_class(tool)
     if floor is None:
         return asserted
     return floor if _CLASS_RANK[floor] > _CLASS_RANK[asserted] else asserted
 
 
+def admissible_risk_class(tool: ToolSpec, policy: WorkspacePolicy) -> RiskClass:
+    """The class an ALLOW-LIST judges a tool by.
+
+    An allow-list is a permission, so only a class the platform (or a trusting workspace) can vouch
+    for may satisfy it. A builder's unverified label never does, in either direction: a ``read`` label
+    cannot pass a read-only list, and a ``write`` label cannot pass a ``[write]`` list in a workspace
+    whose admin never meant builders to classify (it would let a builder choose the class that happens
+    to be listed). Outside a trusting workspace, anything the catalog cannot verify is therefore
+    ``unclassified`` for admission -- refused on a constrained axis -- even though the same ``write``
+    label still raises the TIER (``effective_risk_class``): a label can make the agent stricter but can
+    never make it admissible.
+    """
+    if policy.defaults.trust_builder_classifications:
+        return effective_risk_class(tool, policy)
+    return verified_risk_class(tool) or "unclassified"
+
+
 def effective_data_class(item: KnowledgeSpec, policy: WorkspacePolicy | None = None) -> DataClass:
-    """The data class the classifier judges knowledge by. There is no trusted source for data classes
+    """The data class the classifier TIERS knowledge by. There is no trusted source for data classes
     yet, so outside a workspace that trusts builder classifications only a label that RAISES risk
     counts (``confidential``, ``pii``); ``public`` and ``internal`` are unverifiable and read as
     ``unclassified``."""
     trusted = policy is not None and policy.defaults.trust_builder_classifications
     if trusted or item.data_class in ("confidential", "pii"):
+        return item.data_class
+    return "unclassified"
+
+
+def admissible_data_class(item: KnowledgeSpec, policy: WorkspacePolicy) -> DataClass:
+    """The data class an ALLOW-LIST judges knowledge by: the builder's label only in a trusting
+    workspace; otherwise ``unclassified`` (nothing verifies knowledge yet), whatever the label says.
+    A ``pii`` label still raises the tier through ``effective_data_class``; it cannot satisfy a
+    ``[pii]`` allow-list on a builder's word alone."""
+    if policy.defaults.trust_builder_classifications:
         return item.data_class
     return "unclassified"
 
@@ -212,8 +247,11 @@ def _rule_custom_code(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason 
 def _rule_unclassified(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason | None:
     """A tool or knowledge item nobody classified floors the agent to the policy's unclassified tier.
     ``low`` is an admin's explicit choice for a workspace (prototyping); it is never the default."""
-    tools = [tool.id for tool in spec.tools if effective_risk_class(tool, policy) == "unclassified"]
-    knowledge = [item.id for item in spec.knowledge if effective_data_class(item, policy) == "unclassified"]
+    # Judged by the ADMISSIBLE class: a resource nothing verifies keeps the unknown-resource floor even
+    # when a builder's label raises its tier elsewhere (the floors combine as a maximum), so an admin's
+    # "unknown tools are high risk" cannot be lowered to medium by labelling the tool ``write``.
+    tools = [tool.id for tool in spec.tools if admissible_risk_class(tool, policy) == "unclassified"]
+    knowledge = [item.id for item in spec.knowledge if admissible_data_class(item, policy) == "unclassified"]
     if not tools and not knowledge:
         return None
     tier = policy.defaults.unclassified_risk_tier

@@ -1374,3 +1374,56 @@ def test_a_truncated_stored_policy_is_corruption_not_an_unconstrained_workspace(
     with pytest.raises(wps.WorkspacePolicyError) as excinfo:
         table.store.get("default", "default")
     assert "approval.high" in str(excinfo.value)
+
+
+def test_in_a_locked_workspace_a_write_label_cannot_pick_the_listed_class(spy, table, monkeypatch):
+    """Round 4: allowed.toolRiskClasses=[write] with trustBuilderClassifications off. A Lambda the builder
+    labelled ``write`` is still refused as unclassified (nothing verifies it), while the Jira connector the
+    catalog verifies as write is admitted -- and the agent still tiers medium from the label."""
+    from app.services import spec_service
+    from app.services.spec_migration import migrate_v1_flow
+
+    spec = spec_service.normalize(migrate_v1_flow(_business_canvas(), spec_id=FLOW_ID, name="S", owner_sub=OWNER))
+    _flow_with(monkeypatch, spec.model_dump(by_alias=True, mode="json"))
+    _flags(monkeypatch, {"workspacePolicy": True})
+    locked = WorkspacePolicy.model_validate(
+        {
+            "workspaceId": "default",
+            "name": "Locked",
+            "allowed": {"toolRiskClasses": ["write"]},
+            "defaults": {"unclassifiedRiskTier": "low"},
+        }
+    )
+    assert locked.defaults.trust_builder_classifications is False
+    table.store.put("default", locked)
+
+    verified = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
+    assert verified.status_code == 202, verified.text  # jira: catalog-verified write
+
+    spy.calls.clear()
+    labelled = _client().post(
+        "/api/deploy",
+        json=_body(
+            flowId=FLOW_ID, customTools=[{"toolName": "mutate_db", "lambdaCode": "def handler(e, c): return 1"}]
+        ),
+    )
+    assert labelled.status_code == 403, labelled.text  # the custom tool carries no verifiable class
+    assert {v["code"] for v in labelled.json()["detail"]["violations"]} == {"tool_unclassified"}
+    assert spy.side_effects == []
+
+
+def test_an_mcp_server_runtimes_classification_dies_when_its_configuration_changes():
+    """Round 4 (finding 10): the standalone MCP server runtime binds to its whole configuration."""
+    from app.services.admission_spec import spec_for_deploy_request
+
+    def request_for(tools):
+        return dh.DeployRequest.model_validate(_body(mcpServerConfig={"name": "corp-tools", "tools": tools}))
+
+    judged = spec_for_deploy_request(request_for(["lookup"]), OWNER, home_region="us-east-1")
+    reviewed = judged.model_copy(update={"tools": [t.model_copy(update={"risk_class": "read"}) for t in judged.tools]})
+    same = spec_for_deploy_request(request_for(["lookup"]), OWNER, classified_from=reviewed, home_region="us-east-1")
+    assert [t.risk_class for t in same.tools] == ["read"]
+    changed = spec_for_deploy_request(
+        request_for(["lookup", "wipe"]), OWNER, classified_from=reviewed, home_region="us-east-1"
+    )
+    assert [t.risk_class for t in changed.tools] == ["unclassified"]

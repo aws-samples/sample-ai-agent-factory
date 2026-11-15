@@ -395,9 +395,23 @@ def test_by_default_a_declared_pay_tool_or_pii_source_keeps_its_high_tier():
     """Finding 13: discarding RAISED labels would let a payment Lambda or a PII source fall to the
     medium unclassified tier and skip the security review a high tier routes to."""
     result = classify(_spec(tools=[_tool(risk="pay", type_="lambda")]), _LOCKED_POLICY)
-    assert (result.tier, _codes(result)) == ("high", ["pay_tool"])
+    assert (result.tier, _codes(result)) == ("high", ["pay_tool", "unclassified"])  # both floors fire
     result = classify(_spec(knowledge=[_knowledge(data="pii")]), _LOCKED_POLICY)
-    assert (result.tier, _codes(result)) == ("high", ["sensitive_data_class"])
+    assert (result.tier, _codes(result)) == ("high", ["sensitive_data_class", "unclassified"])
+
+
+def test_a_write_label_cannot_lower_an_admins_high_floor_for_unknown_tools():
+    """Round 4 (finding 14): with unknown resources configured HIGH, labelling an unverified Lambda
+    ``write`` adds the write floor (medium) but keeps the unknown-resource floor (high): maximum wins."""
+    high_unknown = WorkspacePolicy(workspace_id="ws_strict", name="Strict", defaults={"unclassified_risk_tier": "high"})
+    labelled = classify(_spec(tools=[_tool(risk="write", type_="lambda")]), high_unknown)
+    assert labelled.tier == "high"
+    assert _codes(labelled) == ["write_tool", "unclassified"]
+    verified = classify(_spec(tools=[_connector("jira", "read")]), high_unknown)
+    assert (verified.tier, _codes(verified)) == (
+        "medium",
+        ["write_tool"],
+    )  # the catalog verifies jira: no unknown floor
 
 
 def test_by_default_a_builders_read_or_public_labels_do_not_lower_risk():
@@ -425,3 +439,35 @@ def test_public_ingress_with_a_catalog_write_connector_is_high_whatever_the_labe
     result = classify(_spec(tools=[_connector("slack", "read")], triggers=[_trigger("webhook")]), _EMPTY_POLICY)
     assert result.tier == "high"
     assert "public_ingress_with_write" in _codes(result)
+
+
+# --------------------------------------------------------------------------- tiering vs admission
+
+
+def test_a_label_can_make_an_agent_stricter_but_never_admissible():
+    """Round 4: an unverified ``write`` label must RAISE the tier (effective class) yet must NOT satisfy a
+    ``[write]`` allow-list (admissible class) in a workspace that does not trust builders; otherwise a
+    builder picks whichever class the admin happened to list. Same for a ``pii`` label and a ``[pii]`` list."""
+    from app.services.risk_classifier import (
+        admissible_data_class,
+        admissible_risk_class,
+        effective_data_class,
+        effective_risk_class,
+        verified_risk_class,
+    )
+
+    lambda_write = _tool(risk="write", type_="lambda")
+    assert effective_risk_class(lambda_write, _LOCKED_POLICY) == "write"  # tiers as medium
+    assert admissible_risk_class(lambda_write, _LOCKED_POLICY) == "unclassified"  # cannot pass [write]
+    assert admissible_risk_class(lambda_write, _EMPTY_POLICY) == "write"  # a trusting workspace believes it
+    assert verified_risk_class(lambda_write) is None
+
+    jira_read = _connector("jira", "read")
+    assert admissible_risk_class(jira_read, _LOCKED_POLICY) == "write"  # the catalog vouches for write
+    assert admissible_risk_class(_connector("google_drive", "write"), _LOCKED_POLICY) == "read"  # catalog says read
+    assert admissible_risk_class(_connector("google_drive", "write"), _EMPTY_POLICY) == "write"
+
+    pii = _knowledge(data="pii")
+    assert effective_data_class(pii, _LOCKED_POLICY) == "pii"  # tiers as high
+    assert admissible_data_class(pii, _LOCKED_POLICY) == "unclassified"  # cannot pass [pii]
+    assert admissible_data_class(pii, _EMPTY_POLICY) == "pii"

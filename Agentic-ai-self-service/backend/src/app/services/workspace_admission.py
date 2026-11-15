@@ -42,7 +42,7 @@ from pydantic.alias_generators import to_camel
 
 from app.schemas.agent_spec_v2 import AgentSpecV2
 from app.schemas.workspace_policy import RiskTier, WorkspacePolicy
-from app.services.risk_classifier import RiskReason, RiskResult, classify, effective_data_class, effective_risk_class
+from app.services.risk_classifier import RiskReason, RiskResult, admissible_data_class, admissible_risk_class, classify
 
 #: Wire-level ``code`` of a denied decision; tests assert the exact value.
 POLICY_DENIED = "policy_denied"
@@ -139,10 +139,10 @@ def _check_tool_risk_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list
         return []
     violations = []
     for index, tool in enumerate(spec.tools):
-        # The class judged is the EFFECTIVE one (builder assertion raised to the connector catalog's
-        # floor), the same value the classifier tiers on, so a builder cannot label a write
-        # connector ``read`` to pass a read-only workspace.
-        risk_class = effective_risk_class(tool, policy)
+        # The class judged is the ADMISSIBLE one: what the catalog (or a trusting workspace) can vouch
+        # for. A builder's own label never satisfies an allow-list in either direction, so neither
+        # labelling a write connector ``read`` nor labelling a Lambda ``write`` picks the listed class.
+        risk_class = admissible_risk_class(tool, policy)
         if risk_class == "unclassified":
             violations.append(
                 PolicyViolation(
@@ -171,7 +171,7 @@ def _check_data_classes(spec: AgentSpecV2, policy: WorkspacePolicy) -> list[Poli
         return []
     violations = []
     for index, item in enumerate(spec.knowledge):
-        data_class = effective_data_class(item, policy)
+        data_class = admissible_data_class(item, policy)
         if data_class == "unclassified":
             violations.append(
                 PolicyViolation(

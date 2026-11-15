@@ -108,6 +108,9 @@ def test_no_approver_groups_means_no_approval_requirement(admission):
         {"approvers": []},  # an incomplete decision: no outcome, tier, workspace or reasons
         {**_admission(["g-approvers"]), "outcome": "denied"},  # a denied decision is never persisted
         {**_admission(["g-approvers"]), "admissionVersion": "x"},  # a corrupt version marker
+        {**_admission(["g-approvers"]), "admissionVersion": 999},  # a version this build does not know
+        {**_admission(["g-approvers"]), "classifierVersion": 999},
+        {k: v for k, v in _admission(["g-approvers"]).items() if k != "admissionVersion"},  # marker omitted
         "not-an-object",
     ],
 )

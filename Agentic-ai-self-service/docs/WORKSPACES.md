@@ -74,9 +74,10 @@ Web Answer knowledge tools, the channels the deployment exposes (its runtime pro
 `a2a`, plus an A2A configuration), and the Region the deployment will run in (the explicit
 `targetRegion`, else the platform's home Region). The saved flow the request names contributes exactly
 two things: its budget declaration, and the `riskClass` / `dataClass` a human gave an entry that is
-**the same resource** (same type, reference and configuration: a custom tool's code hash, an MCP
-server's endpoint, a connector's auth and scopes, a knowledge base's configuration; never the id alone,
-so a label reviewed for one resource cannot travel to a changed one). It can never add or remove a
+**the same resource** (same type, reference and configuration: a custom tool's code hash, an external
+MCP server's endpoint, the standalone MCP server runtime's whole configuration, a connector's auth and
+scopes, a knowledge base's configuration; never the id alone, so a label reviewed for one resource
+cannot travel to a changed one; when two labels name one resource the stricter governs). It can never add or remove a
 capability, so naming a benign flow while submitting a different body gains nothing. A request that
 names no flow carries no classifications.
 
@@ -87,14 +88,18 @@ names no flow carries no classifications.
 - A **connector's** class comes from its catalog (`services/connectors_catalog.py`): any
   `create_*`/`send_*`/`update_*`/`delete_*` operation makes it `write`; the Payments category makes it
   `pay`; a connector with only read operations is `read`. Nobody can lower it below that floor.
-- Outside a workspace with `trustBuilderClassifications: true`, a builder's label counts only when it
-  makes the agent **stricter**: `write` and `pay` on a tool, `confidential` and `pii` on knowledge are
-  believed (a builder declaring more risk is never argued with). A label that would *lower* risk
-  (`read`, `public`, `internal`) is unverifiable and reads as `unclassified`, so the item floors the
-  agent at `unclassifiedRiskTier` and is refused on a constrained axis with `tool_unclassified` /
-  `knowledge_unclassified`.
+- Outside a workspace with `trustBuilderClassifications: true`, a builder's label can only make the
+  agent **stricter**, never admissible. For **tiering**, `write` / `pay` on a tool and `confidential` /
+  `pii` on knowledge add their floor (a builder declaring more risk is never argued with), and a
+  resource nothing verifies keeps the `unclassifiedRiskTier` floor as well: the floors combine as a
+  maximum, so labelling an unknown tool `write` cannot pull it down from an admin's "unknown tools are
+  high". For **allow-lists**, only a class the catalog verifies counts; every other label, in either
+  direction, is `unclassified`, so a `[write]` list admits the catalog-verified Jira connector and
+  refuses a Lambda the builder merely labelled `write` (`tool_unclassified`), and a `[pii]` list is not
+  satisfied by a `pii` label (`knowledge_unclassified`).
 - A workspace with `trustBuilderClassifications: true` (its builders are its reviewers) uses the
-  builder's labels as written, still floored at the catalog's class for connectors.
+  builder's labels as written for both tiering and allow-lists, still floored at the catalog's class
+  for connectors.
 
 ## The risk classifier
 
@@ -149,9 +154,9 @@ to production."`
 The requirement is read from the **version row**, not from the flag at promote time: turning the
 flag off later does not release a version admitted with an approval requirement. A present but
 malformed record keeps the version blocked (`409`) until an administrator looks: an admission that is
-not a complete `admitted` decision, an approval record missing its group, approver or timestamp, or
-one naming the version's owner as approver (the store never writes such a record, so its presence is
-tampering). Versions deployed while the flag was off carry no admission and promote as before. The
+not a complete `admitted` decision carrying admission/classifier versions this build knows, an
+approval record missing its group, approver or timestamp, or one naming the version's owner as
+approver (the store never writes such a record, so its presence is tampering). Versions deployed while the flag was off carry no admission and promote as before. The
 versions table is the trust root here, as it already is for ownership and status: a principal who can
 edit it directly is outside this control's threat model.
 
