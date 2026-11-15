@@ -173,17 +173,50 @@ def project(spec: AgentSpecV2) -> AgentSpecV2:
     return updated
 
 
+def classification_identity(entry: ToolSpec | KnowledgeSpec) -> tuple:
+    """What a classification is bound to: the entry's type, reference and configuration -- never its id
+    alone. A human classified a PARTICULAR resource; an entry that merely shares the id (a connector whose
+    scopes or auth changed, a knowledge base swapped under the fixed ``knowledge-base`` id) is a different
+    resource and starts unclassified."""
+    if isinstance(entry, ToolSpec):
+        return ("tool", entry.type, entry.ref, _canonical_fragment(entry.auth), tuple(entry.scopes))
+    return ("knowledge", entry.type, _canonical_fragment(entry.config))
+
+
+def _canonical_fragment(value: Any) -> str:
+    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), default=str)
+
+
+_RISK_SEVERITY = {"unclassified": 0, "read": 1, "write": 2, "pay": 3}
+_DATA_SEVERITY = {"unclassified": 0, "public": 1, "internal": 2, "confidential": 3, "pii": 4}
+
+
+def _stricter(a: str, b: str, severity: dict[str, int]) -> str:
+    return a if severity.get(a, 0) >= severity.get(b, 0) else b
+
+
 def _merge_classified(previous: list, derived: list) -> list:
-    """Re-projection keeps the classification a human already gave an entry with the same id."""
-    by_id = {entry.id: entry for entry in previous}
+    """Re-projection keeps the classification a human already gave the SAME resource (see
+    ``classification_identity``); a changed resource loses it. When several previous entries share one
+    identity with conflicting classifications, the STRICTEST wins (a PII label next to a public label for
+    the same source is a PII source), never the last one written."""
+    risk_by_identity: dict[tuple, str] = {}
+    data_by_identity: dict[tuple, str] = {}
+    for old in previous:
+        identity = classification_identity(old)
+        risk = getattr(old, "risk_class", None)
+        if risk is not None:
+            risk_by_identity[identity] = _stricter(risk_by_identity.get(identity, "unclassified"), risk, _RISK_SEVERITY)
+        data = getattr(old, "data_class", None)
+        if data is not None:
+            data_by_identity[identity] = _stricter(data_by_identity.get(identity, "unclassified"), data, _DATA_SEVERITY)
     merged = []
     for entry in derived:
-        old = by_id.get(entry.id)
-        if old is not None:
-            if hasattr(entry, "risk_class") and getattr(old, "risk_class", "unclassified") != "unclassified":
-                entry = entry.model_copy(update={"risk_class": old.risk_class})
-            if hasattr(entry, "data_class") and getattr(old, "data_class", "unclassified") != "unclassified":
-                entry = entry.model_copy(update={"data_class": old.data_class})
+        identity = classification_identity(entry)
+        if hasattr(entry, "risk_class") and risk_by_identity.get(identity, "unclassified") != "unclassified":
+            entry = entry.model_copy(update={"risk_class": risk_by_identity[identity]})
+        if hasattr(entry, "data_class") and data_by_identity.get(identity, "unclassified") != "unclassified":
+            entry = entry.model_copy(update={"data_class": data_by_identity[identity]})
         merged.append(entry)
     return merged
 

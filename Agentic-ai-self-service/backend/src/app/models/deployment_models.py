@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from .components import ConnectorConfig
 from .template_composition import template_composition_refusal, template_implied_capabilities
@@ -264,6 +264,11 @@ class DeploymentState(BaseModel):
     # runtime from a V1 one without a control-plane read; ``GetAgentRuntime`` stays the
     # ground truth for what actually runs.
     runtime_platform_version: Literal["V1", "V2"] | None = None
+    # Workspace admission (plan §3.B): the risk tier, its reasons and the approver groups the
+    # agent must clear before production, as ``AdmissionDecision.model_dump(by_alias=True)``.
+    # Public: it is what the UI's tier badge and the deployer's "what happens next" read. None when
+    # the ``workspacePolicy`` flag was off at admission.
+    admission: dict | None = None
     gateway_url: str | None = None
     gateway_result: dict | None = None  # Full gateway deployment result for cleanup
     policy_result: dict | None = None  # Policy engine result for cleanup
@@ -726,6 +731,18 @@ class DeployRequest(BaseModel):
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    #: Workspace admission decision (plan §3.B), set by the deploy handler after the agent is
+    #: admitted. Private so it is never part of the wire schema (``extra="forbid"`` above) and
+    #: never serialized back to a caller; read by the registry record downstream.
+    _admission_decision: dict | None = PrivateAttr(default=None)
+
+    def set_admission_decision(self, decision: dict | None) -> None:
+        self._admission_decision = decision
+
+    @property
+    def admission_decision(self) -> dict | None:
+        return self._admission_decision
 
     @model_validator(mode="before")
     @classmethod

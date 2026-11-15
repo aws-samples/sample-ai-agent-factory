@@ -551,3 +551,52 @@ def test_compile_route_returns_the_recorded_deploy_request_for_the_flow(monkeypa
     # memory only), so the compiled body is the recorded one without templateId.
     recorded.pop("templateId")
     assert response.json() == recorded
+
+
+def test_a_flow_that_already_stores_spec_v2_reads_back_despite_the_flow_governance_envelope(monkeypatch, owned_flow):
+    """``Flow`` stamps ``governance`` on every stored document. A v2 document is strict and owns its
+    governance under ``deployment.governance``, so the read path must strip the envelope rather than
+    422 on every v2 flow. The classification a human gave a tool must survive the round trip."""
+    from app.models.flow import Flow
+    from app.services.spec_migration import without_flow_envelope
+
+    client = _app(monkeypatch, flags='{"specV2Read": true}')
+    migrated = client.get(f"/api/specs/{owned_flow.id}").json()
+    assert "governance" not in migrated
+    stored = Flow.model_validate({**owned_flow.model_dump(), "workflow": migrated})
+    assert "governance" in stored.workflow  # the envelope the Flow model adds
+    assert without_flow_envelope(stored.workflow) == migrated
+    assert without_flow_envelope(owned_flow.workflow) is owned_flow.workflow  # a v1 document is untouched
+
+    import importlib
+
+    module = importlib.import_module("app.services.flow_storage")
+    module._active_storage._flows[owned_flow.id] = stored
+    response = client.get(f"/api/specs/{owned_flow.id}")
+    assert response.status_code == 200, response.text
+    assert response.json()["meta"]["contentHash"] == migrated["meta"]["contentHash"]
+
+
+def test_conflicting_classifications_for_one_resource_keep_the_strictest():
+    """Round 4 (finding 15): two previous entries with the same resource identity but different labels
+    (a PII label and a public label for one knowledge base) must not resolve last-wins; the PII label is
+    the one that governs."""
+    from app.schemas.agent_spec_v2 import KnowledgeSpec, ToolSpec
+    from app.services.spec_service import _merge_classified
+
+    config = {"kbMode": "existing", "knowledgeBaseId": "KB1"}
+    previous = [
+        KnowledgeSpec(id="k-pii", type="customKb", config=config, data_class="pii"),
+        KnowledgeSpec(id="k-public", type="customKb", config=config, data_class="public"),
+    ]
+    derived = [KnowledgeSpec(id="knowledge-base", type="customKb", config=config)]
+    assert [k.data_class for k in _merge_classified(previous, derived)] == ["pii"]
+    assert [k.data_class for k in _merge_classified(list(reversed(previous)), derived)] == ["pii"]  # order-independent
+
+    tools_previous = [
+        ToolSpec(id="t-read", type="lambda", ref="lookup", risk_class="read"),
+        ToolSpec(id="t-pay", type="lambda", ref="lookup", risk_class="pay"),
+    ]
+    tools_derived = [ToolSpec(id="lookup", type="lambda", ref="lookup")]
+    assert [t.risk_class for t in _merge_classified(tools_previous, tools_derived)] == ["pay"]
+    assert [t.risk_class for t in _merge_classified(list(reversed(tools_previous)), tools_derived)] == ["pay"]

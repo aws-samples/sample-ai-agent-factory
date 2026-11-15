@@ -167,6 +167,30 @@ def test_a_standard_user_can_build_deploy_invoke_and_schedule_but_not_administer
     assert mounted[("deployment", "GET", "/api/admin/audit")] - held
 
 
+# Admin-only surfaces: a route here decides what OTHER people may do, so it needs the ``admin``
+# scope exactly, and a standard user must not reach it through the UI or the raw API alike.
+ADMIN_ONLY = {
+    # Workspace policy admin surface (plan §3.B; flag workspacePolicy, exact 404 while off).
+    ("deployment", "GET", "/api/workspaces/policies"): {"admin"},
+    ("deployment", "GET", "/api/workspaces/{workspace_id}/policy"): {"admin"},
+    ("deployment", "PUT", "/api/workspaces/{workspace_id}/policy"): {"admin"},
+    ("deployment", "DELETE", "/api/workspaces/{workspace_id}/policy"): {"admin"},
+}
+
+
+@pytest.mark.parametrize("key", sorted(ADMIN_ONLY), ids=lambda k: f"{k[1]} {k[2]}")
+def test_admin_only_routes_require_exactly_admin(mounted, key):
+    assert mounted[key] == ADMIN_ONLY[key]
+
+
+@pytest.mark.parametrize("key", sorted(ADMIN_ONLY), ids=lambda k: f"{k[1]} {k[2]}")
+def test_a_standard_user_cannot_reach_admin_only_routes(mounted, key):
+    """The raw-API twin of the UI hiding the admin surface: the scope check, not the UI, denies."""
+    held = rbac.GROUP_SCOPES["g-users-default"]
+    assert mounted[key] - held, key
+    assert mounted[key] <= rbac.GROUP_SCOPES["g-admins-super"], key
+
+
 def test_a_type_group_alone_cannot_manage_runtime_triggers(mounted):
     """A UI type label grants no capability without a resource-scope group."""
     held = rbac.GROUP_SCOPES.get("t-user", set())

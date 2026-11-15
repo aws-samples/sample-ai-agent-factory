@@ -37,7 +37,7 @@ from app.services.feature_flags import require_feature
 from app.services.flow_storage import get_flow_storage
 from app.services.rbac import require_scopes
 from app.services.spec_compiler import SpecCompileError, compile_deploy_request
-from app.services.spec_migration import SpecMigrationError, is_spec_v2, migrate_v1_flow
+from app.services.spec_migration import SpecMigrationError, is_spec_v2, migrate_v1_flow, without_flow_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,9 @@ def spec_for_flow(flow, caller_sub: str) -> AgentSpecV2:
     document = flow.workflow if isinstance(flow.workflow, dict) else {}
     try:
         if is_spec_v2(document):
-            spec = spec_service.load(document)
+            # The Flow row stamps a governance envelope on every stored document; a v2 document
+            # carries its own under deployment.governance, so the envelope is stripped here.
+            spec = spec_service.load(without_flow_envelope(document))
         else:
             spec = migrate_v1_flow(
                 document, spec_id=flow.id, name=flow.name, owner_sub=getattr(flow, "owner_sub", None) or caller_sub

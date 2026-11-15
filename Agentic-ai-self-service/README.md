@@ -40,6 +40,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning with AgentCore batch-evaluation-gated production promotion and emergency rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
 - **Manifest-driven teardown with live ownership proof** — Every deploy records the sub-resources it creates; delete re-validates live ownership, confirms asynchronous removal, and reports retained or failed resources instead of claiming they were removed.
 - **OpenAI Agent Builder exit** — Agent Builder shuts down on 2026-11-30. `scripts/import/openai_agents_sdk.py` takes its *Code → Agents SDK (Python)* export unchanged, refuses what cannot run headless on AWS with the replacement named, packages it for the AgentCore Runtime (hash-locked, ARM64-verified, deterministic), runs it on OpenAI GPT models served by Amazon Bedrock with a short-term API key from the runtime's own role (or on OpenAI with a key from Secrets Manager), and adopts it as a caller-owned runtime with tool receipts and clean guardrail refusals. See [Migrate from OpenAI Agent Builder](docs/MIGRATE_FROM_OPENAI_AGENT_BUILDER.md).
+- **Workspaces & risk-tiered admission** (flag `workspacePolicy`) — An administrator declares per workspace what business users may use (providers, models, connectors, tool risk classes, data classes, channels, Regions, budgets) and which approver groups each risk tier must clear. Every deploy is admitted against the deployer's workspace policy before anything is created (exact `403 policy_denied` with reason codes); a pure, versioned classifier tiers the agent and floors connector classes at what their catalog operations imply; medium/high agents land in staging and need every named group's approval before promotion. See [Workspaces](docs/WORKSPACES.md).
 
 ## Prerequisites
 
@@ -946,6 +947,7 @@ Integration tests run against a real deployed stack — see [Development](docs/D
 | [Deployment Internals](docs/DEPLOYMENT_INTERNALS.md) | Infrastructure & agent deploy flows, gateway tool pipeline, code architecture, CFN export, packaging, templates, project structure |
 | [API Reference](docs/API_REFERENCE.md) | Every API endpoint, configuration variables, SSM parameters |
 | [Registry & RBAC](docs/REGISTRY_AND_RBAC.md) | Agent registry roles, approval workflow, persona assignment |
+| [Workspaces](docs/WORKSPACES.md) | Workspace policy, the risk classifier and its trust model, tier routing to staging + approvals, the `policy_denied` contract (flag `workspacePolicy`) |
 | [Personas](docs/PERSONAS.md) | Platform-wide group → scope model |
 | [RBAC Rollout](docs/RBAC_ROLLOUT.md) | Enforcement, the advisory escape hatch, and upgrading an existing pool |
 | [Costs](docs/COSTS.md) | AWS resources created + infrastructure pricing estimates |

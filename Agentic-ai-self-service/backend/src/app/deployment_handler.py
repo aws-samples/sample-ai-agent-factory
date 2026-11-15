@@ -1137,6 +1137,7 @@ from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.triggers import webhook_router  # noqa: E402
 from app.routers.versions import router as versions_router  # noqa: E402
 from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
+from app.routers.workspace_policies import router as workspace_policies_router  # noqa: E402  # plan §3.B
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -1216,6 +1217,10 @@ deployment_app.include_router(deploy_targets_router)
 # Phase 5 (Loom) audit dashboard — /api/admin/audit (admin scope). Reads the
 # audit store the middleware writes to.
 deployment_app.include_router(admin_router)
+# Workspace policy admin surface (plan §3.B): /api/workspaces/{id}/policy and
+# /api/workspaces/policies, flag workspacePolicy then admin scope. Lives HERE because the
+# policies share the org-config table this Lambda already reads for tag governance.
+deployment_app.include_router(workspace_policies_router)
 
 
 @deployment_app.get("/health")
@@ -1308,6 +1313,125 @@ def _reject_unowned_flow(flow_id: str | None, caller_sub: str) -> None:
             "flow not found" if flow is None else "not the owner",
         )
         raise
+
+
+def _reject_workspace_policy_violation(
+    request: DeployRequest, caller_sub: str, raw_request: Request | None = None
+) -> None:
+    """Workspace policy and risk-tiered admission (plan §3.B, step 3). Flag-gated, fail closed.
+
+    Behind the ``workspacePolicy`` feature flag: off, this function returns before reading anything
+    and admission is exactly what it was. On, it runs AFTER ``_reject_unowned_flow`` (ownership is
+    proven first, so this never reads a flow the caller may not see) and BEFORE any persistence,
+    like the regional gates around it: a refusal costs no row, secret, execution or AWS resource.
+
+    What it does: builds the spec admission judges FROM THE REQUEST BODY that is about to be deployed
+    (``services/admission_spec``): model, connectors, Gateway tools, custom tools, external MCP
+    servers, knowledge and Region. The flow the request names (already proven owned) contributes only
+    the ``riskClass``/``dataClass`` a human gave matching entries and the workspace it belongs to;
+    it can never add or remove a capability, so naming a benign flow while submitting a different
+    body gains nothing. The governing policy is the named workspace's when the deployer is a member
+    of it (``memberGroups`` against the JWT's ``cognito:groups``), else the org ``default``; naming a
+    workspace one is not a member of is refused as ``policy_denied`` / ``workspace_not_member``. A
+    violation is the exact ``403 policy_denied`` with one reason code per offending item. An admitted
+    agent's tier and approver routing are recorded on the request for the rows written downstream.
+
+    Fail closed: when the policy store cannot be read, or no ``default`` policy exists, the deploy
+    is refused with 503 rather than admitted unclassified -- the same posture as tag governance
+    above. The failure TYPE is logged, never the request content.
+    """
+    from app.services.feature_flags import get_feature_flags
+
+    if not get_feature_flags().enabled("workspacePolicy"):
+        return
+
+    from app.services.auth import extract_cognito_groups
+    from app.services.workspace_admission import (
+        admit,
+        denial_detail,
+        membership_denial_detail,
+        selection_required_detail,
+    )
+    from app.services.workspace_policy_service import (
+        DEFAULT_ORG_ID,
+        WorkspaceMembershipError,
+        WorkspacePolicyUnavailableError,
+        WorkspaceSelectionRequiredError,
+        get_workspace_policy_store,
+        resolve_policy,
+    )
+
+    spec = _spec_for_admission(request, caller_sub)
+    caller_groups = extract_cognito_groups(raw_request) if raw_request is not None else []
+    try:
+        policy, fell_back = resolve_policy(
+            get_workspace_policy_store(), DEFAULT_ORG_ID, spec.workspace_id, caller_groups
+        )
+    except WorkspaceMembershipError as exc:
+        logger.warning("Deploy refused: deployer is not a member of workspace %s", exc.workspace_id)
+        raise HTTPException(status_code=403, detail=membership_denial_detail(exc.workspace_id)) from exc
+    except WorkspaceSelectionRequiredError as exc:
+        logger.warning("Deploy refused: deployer belongs to several workspaces and the agent names none")
+        raise HTTPException(status_code=403, detail=selection_required_detail(exc.choices)) from exc
+    except WorkspacePolicyUnavailableError as exc:
+        logger.error("Deploy refused: workspace policy unavailable (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The workspace policy could not be read, so this deployment was refused rather than "
+                "admitted unclassified. Nothing was created. An administrator must store a policy for "
+                "the 'default' workspace before agents can be deployed with workspace admission on."
+            ),
+        ) from exc
+
+    decision = admit(spec, policy)
+    logger.info(
+        "Workspace admission: workspace=%s fallback=%s tier=%s outcome=%s violations=%d",
+        decision.workspace_id,
+        fell_back,
+        decision.tier,
+        decision.outcome,
+        len(decision.violations),
+    )
+    if decision.outcome == "denied":
+        raise HTTPException(status_code=403, detail=denial_detail(decision))
+    request.set_admission_decision(decision.model_dump(by_alias=True))
+
+
+def _route_slot_by_admission(request: DeployRequest, effective_slot: str) -> str:
+    """Apply the admitted tier to the deployment slot (``services/workspace_approval``).
+
+    No admission decision (flag off, or the agent is low risk) leaves the slot exactly as the
+    production gate above computed it. An approval-requiring tier forces ``staging`` and refuses an
+    explicit ``production`` request with 409, mirroring the existing direct-production refusal.
+    """
+    from app.services.workspace_approval import ProductionRequiresApprovalError, route_deployment_slot
+
+    try:
+        return route_deployment_slot(request.deployment_slot, effective_slot, request.admission_decision)
+    except ProductionRequiresApprovalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _spec_for_admission(request: DeployRequest, caller_sub: str):
+    """The Spec v2 document admission judges: the REQUEST's capabilities, classified by the named flow.
+
+    The flow (ownership already proven by ``_reject_unowned_flow``) is read as Spec v2 with the same
+    lazy, no-write migration ``GET /api/specs/{id}`` uses, and contributes only classifications and
+    its workspace; see ``services/admission_spec``.
+    """
+    from app.routers.specs import spec_for_flow
+    from app.services.admission_spec import spec_for_deploy_request
+
+    classified_from = None
+    if request.flow_id:
+        store = _flow_store_for_ownership()
+        flow = store.get(request.flow_id) if store is not None else None
+        if flow is None:
+            # Ownership passed a moment ago, so this is a race with a delete; same 404 as that gate.
+            raise HTTPException(status_code=404, detail=f"Flow '{request.flow_id}' not found")
+        classified_from = spec_for_flow(flow, caller_sub)
+    return spec_for_deploy_request(request, caller_sub, classified_from=classified_from, home_region=config.aws_region)
 
 
 def _reject_cfn_only_naming_profile(request: DeployRequest, operation: str) -> None:
@@ -1871,6 +1995,12 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # gates, because cnt_jljdNeOwgPnFx2 requires the authorization decision be enforced outside
     # and ahead of the side-effecting path, not compensated for afterwards.
     _reject_unowned_flow(request.flow_id, user_id)
+    # Workspace policy + risk tier (plan §3.B), flag-gated: ownership is proven above, so the flow
+    # this reads is one the caller may see; nothing below has persisted anything yet.
+    _reject_workspace_policy_violation(request, user_id, raw_request)
+    # Tier routing: a medium/high agent may only land in staging and needs approval before
+    # promotion; an explicit production request for one is a 409 here, still before any side effect.
+    effective_deployment_slot = _route_slot_by_admission(request, effective_deployment_slot)
 
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
     _reject_unsupported_release_region(request)
@@ -2219,6 +2349,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # browser claim. Legacy rows default to HTTP (see DeploymentState.runtime_protocol).
         runtime_protocol=request.config.protocol,
         runtime_platform_version=request.config.platform_version,
+        # Workspace admission (plan §3.B): the tier, its reasons and the approver groups the
+        # version must clear before production. None when the flag is off.
+        admission=request.admission_decision,
     )
 
     store = _get_state_store()
@@ -2244,6 +2377,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 production_gate_required=production_gate_required,
                 promotion_policy=promotion_policy,
                 evaluation_kms_key_arn=evaluation_kms_key_arn,
+                admission=request.admission_decision,
             )
         )
     except NameClaimConflict as exc:
@@ -2720,7 +2854,21 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     return DeployResponse(
         deployment_id=deployment_id,
         status=DeploymentStatusEnum.PENDING,
-        message="Deployment started",
+        message=_deploy_started_message(request, effective_deployment_slot),
+    )
+
+
+def _deploy_started_message(request: DeployRequest, effective_slot: str) -> str:
+    """ "Deployment started", plus the approval route when the admitted tier imposes one."""
+    from app.services.workspace_approval import admission_tier, required_approver_groups
+
+    groups = required_approver_groups(request.admission_decision)
+    if not groups:
+        return "Deployment started"
+    return (
+        f"Deployment started in the {effective_slot} slot. Workspace admission classified this agent "
+        f"{admission_tier(request.admission_decision)} risk: approval from {', '.join(groups)} is required "
+        "before it can be promoted to production."
     )
 
 

@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — workspaces, policy and risk-tiered admission (flag `workspacePolicy`)
+
+- A **workspace policy** (`PUT /api/workspaces/{id}/policy`, `admin` scope) declares what a
+  workspace may use (providers, models, connectors, tool risk classes, data classes, channels,
+  Regions), its budget declarations, which approver groups each risk tier must clear, and its
+  members (`memberGroups`, Cognito groups). Policies live in the existing org-config table
+  (`WORKSPACE#<id>#POLICY`); no new table or grant. Strict schema: unknown keys, `unclassified`
+  in an allow-list and empty group names are `422`. The admin routes are the exact `404` of a
+  nonexistent route while the flag is off. [docs/WORKSPACES.md](docs/WORKSPACES.md).
+- **Admission** runs in `POST /api/deploy` after flow ownership and before any row, secret,
+  execution or AWS resource. It judges the **request body** (what is deployed): model, connectors,
+  Gateway and custom tools, external MCP servers, knowledge and Region; the saved flow contributes
+  only the `riskClass` / `dataClass` a human gave matching entries. The governing policy is the
+  named workspace's when the deployer is a member of it, else the org `default`; naming a workspace
+  one is not in is refused. A violation is the exact `403 policy_denied` with one reason code per
+  offending item; an unreadable or missing `default` policy is `503`. Nothing is created either way.
+- **Risk classifier** (`services/risk_classifier.py`, version 2): pure rules for pay/write tools,
+  non-Bedrock providers, confidential/PII knowledge, public ingress with a write tool, custom code,
+  unclassified items (floor from `defaults.unclassifiedRiskTier`, medium by default) and a budget
+  above the workspace default. A connector's class is floored at what its catalog operations imply,
+  so a builder can raise a class but never label a write connector `read`.
+- **Tier routing.** An agent whose tier routes to approver groups may only land in `staging`
+  (an explicit production slot is `409`); its version row carries the admission; promotion to
+  production is `409` until every group has approved through the new
+  `POST /api/runtimes/{name}/versions/{id}/approve` (`hitl:write` + group membership; the owner can
+  never approve their own version; non-approvers see the same `404` as a missing version). The
+  requirement is read from the version row, so flipping the flag off releases nothing, and a
+  malformed admission record keeps a version blocked. `GET /api/deploy/{id}` and the versions list
+  serve the admission for the UI's tier badge.
+- Trust model: builder `riskClass` / `dataClass` labels count only in a workspace with
+  `defaults.trustBuilderClassifications: true`; elsewhere everything the connector catalog cannot
+  vouch for is unclassified. The governing workspace follows the deployer's memberships, not the
+  agent's document. Carried-over classifications are bound to the resource (type, ref,
+  configuration), not to an entry id. Known limits, stated in the guide: `maxAgentMonthlyUsd` caps one
+  declaration (`perWorkspaceMonthlyUsd` is recorded, not enforced at admission); Cedar sets, the Admin
+  Workspaces UI and trigger-time gating follow.
+- Fixed in passing: a flow whose stored document was already Spec v2 could not be read back by
+  `GET /api/specs/{id}` because `Flow` stamps a `governance` envelope the strict document refuses;
+  the read path now strips the envelope (`spec_migration.without_flow_envelope`).
+
 ### Security — OpenTelemetry 1.45.1 / ADOT 0.22.0 in every runtime bundle, `mcp` 1.30.0 in the test environment, `minimatch` 11 and `fast-xml-parser` 5.12 in the frontend lock
 
 - Closes the four medium/low Dependabot alerts left open by the certifi fix below, in the places

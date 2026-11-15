@@ -57,6 +57,25 @@ def is_spec_v2(document: dict[str, Any]) -> bool:
     return document.get("specVersion") == SPEC_VERSION or document.get("spec_version") == SPEC_VERSION
 
 
+#: Keys the ``Flow`` model stamps on EVERY stored ``workflow`` document (``models/flow.py``,
+#: ``validate_nested_governance`` normalizes ``governance`` to a V1 envelope on read). A v1 canvas
+#: owns them; a Spec v2 document carries the same authority under ``deployment.governance``, so on a
+#: v2 document they are the storage envelope, not the spec.
+_FLOW_ENVELOPE_KEYS = frozenset({"governance"})
+
+
+def without_flow_envelope(document: dict[str, Any]) -> dict[str, Any]:
+    """A Spec v2 document as read from a ``Flow`` row, with the row's envelope keys removed.
+
+    Pure, shallow: the spec is strict (``extra=forbid``), so the envelope would otherwise refuse
+    every v2 document stored through ``Flow``. A v1 document is returned unchanged -- its
+    ``governance`` is real input to ``migrate_v1_flow``.
+    """
+    if not is_spec_v2(document):
+        return document
+    return {key: value for key, value in document.items() if key not in _FLOW_ENVELOPE_KEYS}
+
+
 def _node(raw: dict[str, Any]) -> LogicNode:
     known = {key: raw[key] for key in NODE_KEYS if key in raw}
     legacy = {key: copy.deepcopy(raw[key]) for key in raw if key not in NODE_KEYS}
