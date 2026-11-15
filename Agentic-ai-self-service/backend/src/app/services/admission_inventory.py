@@ -9,6 +9,12 @@ label, never the effective class), so a re-admission applies the current policy'
 
 ``to_spec`` rebuilds a spec the admission functions accept; a test pins that admitting the rebuilt spec
 gives the same tier, reasons, violations and ingress-sensitive capabilities as admitting the original.
+
+Every field is REQUIRED TO BE PRESENT (an explicit empty list or ``null`` where the agent has none):
+``from_spec`` always writes the complete record, so an absent key is truncation or tampering, and a
+truncated inventory must not reconstruct an agent with fewer capabilities than the one that was judged
+(a writer whose ``tools`` went missing would re-admit as a toolless, low-risk agent and get its webhook
+without the security approval). Validation therefore fails and the attachment blocks (409) instead.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
 from app.schemas.agent_spec_v2 import (
@@ -72,17 +78,20 @@ class InventoryCode(_Record):
 
 
 class AdmissionInventory(_Record):
+    """No field has a default: a key the writer always produces but the reader cannot find is an
+    incomplete record, never "none of these"."""
+
     id: str
     name: str
-    workspace_id: str | None = None
-    model: InventoryModel | None = None
-    tools: list[InventoryTool] = Field(default_factory=list)
-    knowledge: list[InventoryKnowledge] = Field(default_factory=list)
-    channels: list[InventoryChannel] = Field(default_factory=list)
-    triggers: list[InventoryTrigger] = Field(default_factory=list)
-    custom_code: list[InventoryCode] = Field(default_factory=list)
-    region: str | None = None
-    monthly_budget_usd: float | None = None
+    workspace_id: str | None
+    model: InventoryModel | None
+    tools: list[InventoryTool]
+    knowledge: list[InventoryKnowledge]
+    channels: list[InventoryChannel]
+    triggers: list[InventoryTrigger]
+    custom_code: list[InventoryCode]
+    region: str | None
+    monthly_budget_usd: float | None
 
     @classmethod
     def from_spec(cls, spec: AgentSpecV2) -> AdmissionInventory:

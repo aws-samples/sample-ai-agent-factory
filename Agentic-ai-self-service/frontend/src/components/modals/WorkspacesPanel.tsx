@@ -7,6 +7,13 @@
  * strict schema (422), the id guard (400) or the scope gate (403) is shown verbatim, never
  * reinterpreted. It also warns when no `default` policy exists, because with the flag on every
  * deploy is refused (503) until one does.
+ *
+ * Saving is never a blind replacement. Editing fetches the policy as the server holds it NOW, with its
+ * revision (`ETag`), and the save names that revision (`If-Match`); a new policy is created only if none
+ * exists (`If-None-Match: *`). When a colleague saved first, the backend answers `412`: the panel shows
+ * that refusal verbatim, keeps the admin's form, and offers to reload the current version so the change
+ * can be reapplied on top of it rather than over it (a tightened approver routing cannot be undone by a
+ * stale form).
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
@@ -19,8 +26,10 @@ import {
   DEFAULT_WORKSPACE_ID,
   GUARDRAIL_PROFILES,
   RISK_TIERS,
+  isRevisionConflict,
   type GuardrailProfile,
   type PlatformVersion,
+  type PutPrecondition,
   type RiskTier,
   type WorkspacePolicyDocument,
 } from '../../services/api/workspacePolicies';
@@ -121,6 +130,10 @@ function WorkspacesPanelBody() {
   const [notice, setNotice] = useState<string | null>(null);
   const [form, setForm] = useState<WorkspacePolicyForm | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
+  /** The revision the open form was loaded from; the save names it. `null` while creating. */
+  const [revision, setRevision] = useState<number | null>(null);
+  /** The workspace whose save was refused as stale (412); offers "Reload current version". */
+  const [conflict, setConflict] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
@@ -157,6 +170,8 @@ function WorkspacesPanelBody() {
       : emptyPolicy(workspaceId, name);
     setForm({ ...formFromDocument(document), workspaceId, name });
     setEditingExisting(false);
+    setRevision(null);
+    setConflict(null);
     setNotice(
       preset
         ? 'Started from the Standard preset. Enter the approver and security groups before saving: a policy with no reviewers auto-approves.'
@@ -185,11 +200,25 @@ function WorkspacesPanelBody() {
     });
   };
 
-  const startEdit = (policy: WorkspacePolicyDocument) => {
-    setForm(formFromDocument(policy));
-    setEditingExisting(true);
-    setNotice(null);
+  /**
+   * Edit what the server holds NOW, not the list's snapshot: the fetch also yields the revision the
+   * save must name, so a colleague's change made since the list loaded is seen rather than overwritten.
+   */
+  const startEdit = async (workspaceId: string) => {
+    setBusy(true);
     setError(null);
+    setConflict(null);
+    setNotice(null);
+    try {
+      const stored = await getApiClient().getWorkspacePolicy(workspaceId);
+      setForm(formFromDocument(stored.policy));
+      setRevision(stored.revision);
+      setEditingExisting(true);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const applyPresetToForm = (id: WorkspacePresetId) => {
@@ -217,16 +246,28 @@ function WorkspacesPanelBody() {
 
   const save = async () => {
     if (!form) return;
+    if (editingExisting && revision === null) {
+      // Cannot happen through the UI (editing always starts from a fetch); refuse rather than save blind.
+      setError('The revision of this policy is unknown, so it cannot be saved safely. Reload it and try again.');
+      return;
+    }
     setBusy(true);
     setError(null);
+    setConflict(null);
     try {
       const document = documentFromForm(form);
-      const stored = await getApiClient().putWorkspacePolicy(document);
-      setNotice(`Saved the policy for workspace "${stored.workspaceId}".`);
+      const precondition: PutPrecondition = editingExisting && revision !== null ? { revision } : 'create';
+      const stored = await getApiClient().putWorkspacePolicy(document, precondition);
+      setNotice(`Saved the policy for workspace "${stored.policy.workspaceId}".`);
       setForm(null);
+      setRevision(null);
       await load();
     } catch (e) {
+      // A 412 is a colleague's save, not a defect in the form: say so verbatim and offer the current version.
       setError(getErrorMessage(e));
+      if (isRevisionConflict(e)) {
+        setConflict(form.workspaceId.trim());
+      }
     } finally {
       setBusy(false);
     }
@@ -276,8 +317,19 @@ function WorkspacesPanelBody() {
       </p>
 
       {error && (
-        <div role="alert" className="text-xs text-red-400">
-          {error}
+        <div role="alert" className="text-xs text-red-400 flex items-start justify-between gap-2">
+          <span>{error}</span>
+          {conflict && (
+            <button
+              type="button"
+              className={`${BUTTON} shrink-0`}
+              onClick={() => void startEdit(conflict)}
+              disabled={busy}
+              title="Fetch the policy as it is now; your unsaved edits are discarded and can be reapplied."
+            >
+              Reload current version
+            </button>
+          )}
         </div>
       )}
       {notice && (
@@ -318,7 +370,12 @@ function WorkspacesPanelBody() {
                   <span className="font-mono text-[10px] text-gray-500">{policy.workspaceId}</span>
                 </div>
                 <div className="flex gap-1">
-                  <button type="button" className={BUTTON} onClick={() => startEdit(policy)} disabled={busy}>
+                  <button
+                    type="button"
+                    className={BUTTON}
+                    onClick={() => void startEdit(policy.workspaceId)}
+                    disabled={busy}
+                  >
                     Edit
                   </button>
                   {confirmingDelete === policy.workspaceId ? (
@@ -364,6 +421,12 @@ function WorkspacesPanelBody() {
             void save();
           }}
         >
+          {editingExisting && revision !== null && (
+            <p className="text-[10px] text-gray-500" data-testid="workspace-policy-revision">
+              Editing revision {revision} of this policy. Saving replaces exactly that revision; if someone
+              else saves first, the save is refused and you can reload their version.
+            </p>
+          )}
           <div className="flex flex-wrap gap-1 items-center">
             <span className="text-[11px] font-medium">Preset:</span>
             {WORKSPACE_PRESETS.map((preset) => (

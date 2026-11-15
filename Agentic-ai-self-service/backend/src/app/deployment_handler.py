@@ -1092,7 +1092,10 @@ deployment_app.add_middleware(
     CORSMiddleware,
     allow_origins=config.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    # PUT and the two precondition headers: the workspace policy admin routes (routers/workspace_policies)
+    # replace a policy only against the revision the admin read (If-Match) or when none exists yet
+    # (If-None-Match: *); ETag is exposed so a cross-origin UI can read that revision back.
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=[
         "Content-Type",
         "Authorization",
@@ -1101,7 +1104,10 @@ deployment_app.add_middleware(
         "X-AgentCore-Timestamp",
         "X-AgentCore-Delivery-Id",
         "X-AgentCore-Signature",
+        "If-Match",
+        "If-None-Match",
     ],
+    expose_headers=["ETag"],
 )
 
 

@@ -18,6 +18,13 @@ unguarded agent; when the ``default`` policy itself is absent, resolution raises
 governance read takes. The default workspace is never auto-created: an admin writes it, so an
 environment that has not been configured refuses rather than guesses.
 
+Revisions. Every item carries an integer ``revision`` the store increments on each write, and a write
+names the revision it was based on (``expected_revision``; ``None`` for "must not exist yet") as a
+DynamoDB condition. Two admins editing the same policy therefore cannot silently overwrite each other:
+the second save fails (``WorkspacePolicyRevisionConflict``) and has to be redone against the current
+document, so a tightened approver routing or allow-list is never undone by a stale form. Items written
+before revisions existed read as revision 0 and can be replaced exactly once as such.
+
 Only ``boto3`` DynamoDB Table calls are wrapped here; every other function is pure and testable
 without AWS.
 """
@@ -31,6 +38,7 @@ from decimal import Decimal
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 from pydantic import BaseModel, ValidationError
 
 from app.schemas.workspace_policy import WorkspacePolicy
@@ -62,6 +70,22 @@ class WorkspacePolicyUnavailableError(WorkspacePolicyError):
     """No policy can be resolved for an agent: the store failed or the default policy is absent."""
 
 
+class WorkspacePolicyRevisionConflict(WorkspacePolicyError):
+    """A write named a revision (or "none yet") that is not what the table holds now.
+
+    ``expected_revision`` is what the writer based its document on (``None``: it meant to create);
+    ``current_revision`` is what is stored now (``None``: nothing is). Nothing was written.
+    """
+
+    def __init__(self, workspace_id: str, expected_revision: int | None, current_revision: int | None) -> None:
+        self.workspace_id = workspace_id
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+        super().__init__(
+            f"workspace policy {workspace_id!r}: expected revision {expected_revision!r}, found {current_revision!r}"
+        )
+
+
 def validate_workspace_id(workspace_id: str) -> str:
     """Return ``workspace_id`` when it matches the id grammar, else raise ``InvalidWorkspaceIdError``."""
     if not isinstance(workspace_id, str) or not _WORKSPACE_ID_RE.match(workspace_id):
@@ -82,16 +106,41 @@ def workspace_id_from_sort_key(sort_key: str) -> str | None:
     return middle if _WORKSPACE_ID_RE.match(middle) else None
 
 
-def policy_to_item(org_id: str, policy: WorkspacePolicy) -> dict[str, Any]:
-    """The DynamoDB item for a policy: the camelCase document plus the table keys. Floats become
-    ``Decimal`` because boto3's DynamoDB serializer refuses Python floats (a budget-bearing policy
-    would otherwise fail to write)."""
+#: Item attribute holding the write counter; absent on items written before revisions existed.
+REVISION_ATTRIBUTE = "revision"
+
+
+def policy_to_item(org_id: str, policy: WorkspacePolicy, revision: int) -> dict[str, Any]:
+    """The DynamoDB item for a policy: the camelCase document plus the table keys and the revision this
+    write produces. Floats become ``Decimal`` because boto3's DynamoDB serializer refuses Python floats
+    (a budget-bearing policy would otherwise fail to write)."""
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise WorkspacePolicyError(f"a stored revision is a positive integer, not {revision!r}")
     item: dict[str, Any] = {
         "org_id": org_id,
         "sk": policy_sort_key(policy.workspace_id),
+        REVISION_ATTRIBUTE: revision,
         "policy": _floats_to_decimals(policy.model_dump(by_alias=True, mode="json")),
     }
     return item
+
+
+def revision_of(item: dict[str, Any]) -> int:
+    """The revision an item carries; 0 for an item written before revisions existed. Anything else
+    (a string, a fraction, a negative number) is corruption and raises rather than being guessed at."""
+    value = item.get(REVISION_ATTRIBUTE, 0)
+    if isinstance(value, bool) or not isinstance(value, int | Decimal):
+        raise WorkspacePolicyError(f"stored workspace policy revision is not a number: {type(value).__name__}")
+    if value != int(value) or value < 0:
+        raise WorkspacePolicyError(f"stored workspace policy revision is not a non-negative integer: {value!r}")
+    return int(value)
+
+
+class StoredPolicy(BaseModel):
+    """A policy as read from the table, with the revision a replacement must name."""
+
+    policy: WorkspacePolicy
+    revision: int
 
 
 def policy_from_item(item: dict[str, Any]) -> WorkspacePolicy:
@@ -188,8 +237,10 @@ class WorkspacePolicyStore:
 
     # -- boto3 wrappers (the only AWS calls in this module) -------------------------------------
 
-    def _put_item(self, item: dict[str, Any]) -> None:
-        self._table.put_item(Item=item)
+    def _put_item(self, item: dict[str, Any], condition: dict[str, Any]) -> None:
+        """``condition`` is the ``ConditionExpression`` (plus its attribute names/values) every policy
+        write carries; there is no unconditional write."""
+        self._table.put_item(Item=item, **condition)
 
     def _get_item(self, key: dict[str, str]) -> dict[str, Any] | None:
         response = self._table.get_item(Key=key, ConsistentRead=True)
@@ -217,13 +268,54 @@ class WorkspacePolicyStore:
 
     # -- public API ------------------------------------------------------------------------------
 
-    def put(self, org_id: str, policy: WorkspacePolicy) -> WorkspacePolicy:
-        self._put_item(policy_to_item(org_id, policy))
-        return policy
+    def put(self, org_id: str, policy: WorkspacePolicy, *, expected_revision: int | None) -> StoredPolicy:
+        """Create (``expected_revision=None``: the item must not exist) or replace (the item must carry
+        exactly ``expected_revision``; 0 names an item written before revisions existed) a policy, as
+        one conditional write. Any other state of the table is ``WorkspacePolicyRevisionConflict`` and
+        nothing is written. Returns the policy with the revision this write produced."""
+        if expected_revision is None:
+            condition: dict[str, Any] = {"ConditionExpression": "attribute_not_exists(sk)"}
+            revision = 1
+        elif isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise WorkspacePolicyError(
+                f"expected_revision must be None or a non-negative integer, not {expected_revision!r}"
+            )
+        elif expected_revision == 0:
+            condition = {
+                "ConditionExpression": "attribute_exists(sk) AND attribute_not_exists(#rev)",
+                "ExpressionAttributeNames": {"#rev": REVISION_ATTRIBUTE},
+            }
+            revision = 1
+        else:
+            condition = {
+                "ConditionExpression": "#rev = :expected",
+                "ExpressionAttributeNames": {"#rev": REVISION_ATTRIBUTE},
+                "ExpressionAttributeValues": {":expected": expected_revision},
+            }
+            revision = expected_revision + 1
+        try:
+            self._put_item(policy_to_item(org_id, policy, revision), condition)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            current = self._read_revision(org_id, policy.workspace_id)
+            raise WorkspacePolicyRevisionConflict(policy.workspace_id, expected_revision, current) from exc
+        return StoredPolicy(policy=policy, revision=revision)
+
+    def _read_revision(self, org_id: str, workspace_id: str) -> int | None:
+        item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
+        return revision_of(item) if item else None
+
+    def read(self, org_id: str, workspace_id: str) -> StoredPolicy | None:
+        """The policy and the revision a replacement must name (strongly consistent)."""
+        item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
+        if not item:
+            return None
+        return StoredPolicy(policy=policy_from_item(item), revision=revision_of(item))
 
     def get(self, org_id: str, workspace_id: str) -> WorkspacePolicy | None:
-        item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
-        return policy_from_item(item) if item else None
+        record = self.read(org_id, workspace_id)
+        return record.policy if record else None
 
     def get_snapshot(self, org_id: str, workspace_id: str) -> tuple[WorkspacePolicy, PolicyFence] | None:
         """The policy AND a fence on the exact item it was read from, for a write that must be

@@ -193,8 +193,11 @@ export {
 import type { LiteLLMRegistryConfig, LiteLLMServer } from './api/registry';
 import {
   deleteWorkspacePolicy,
+  getWorkspacePolicy,
   listWorkspacePolicies,
   putWorkspacePolicy,
+  type PutPrecondition,
+  type StoredWorkspacePolicy,
   type WorkspacePolicyDocument,
 } from './api/workspacePolicies';
 
@@ -271,6 +274,13 @@ export {
   getWorkspacePolicy,
   putWorkspacePolicy,
   deleteWorkspacePolicy,
+  isRevisionConflict,
+  currentRevisionOf,
+  revisionFromEtag,
+  preconditionHeaders,
+  POLICY_REVISION_CONFLICT_STATUS,
+  type PutPrecondition,
+  type StoredWorkspacePolicy,
   type WorkspacePolicyDocument,
 } from './api/workspacePolicies';
 
@@ -443,8 +453,14 @@ export class ApiClient {
     return listWorkspacePolicies(this.baseUrl);
   }
 
-  async putWorkspacePolicy(policy: WorkspacePolicyDocument): Promise<WorkspacePolicyDocument> {
-    return putWorkspacePolicy(policy, this.baseUrl);
+  /** The policy with the revision (`ETag`) a later save must name. */
+  async getWorkspacePolicy(workspaceId: string): Promise<StoredWorkspacePolicy> {
+    return getWorkspacePolicy(workspaceId, this.baseUrl);
+  }
+
+  /** `'create'` for a policy that must not exist yet; `{ revision }` to replace the one that was read. */
+  async putWorkspacePolicy(policy: WorkspacePolicyDocument, precondition: PutPrecondition): Promise<StoredWorkspacePolicy> {
+    return putWorkspacePolicy(policy, precondition, this.baseUrl);
   }
 
   async deleteWorkspacePolicy(workspaceId: string): Promise<void> {

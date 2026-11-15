@@ -309,8 +309,8 @@ cannot be read, deploys referencing an integration return `503`.
 | `DELETE` | `/api/workflows/{id}/share/{sub}` | Revoke a share |
 | `GET` | `/api/workspaces` | List workspace-visible workflows with effective role |
 | `GET` | `/api/workspaces/policies` | Every workspace policy in the org (flag `workspacePolicy`; `admin` scope; exact `404` while the flag is off). See [docs/WORKSPACES.md](WORKSPACES.md). |
-| `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored) |
-| `PUT` | `/api/workspaces/{workspaceId}/policy` | Create or replace a policy; strict schema (`422` on unknown keys or `unclassified` in an allow-list), the body's `workspaceId` must equal the path's (`400`) |
+| `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored); `ETag` is its revision (a quoted integer) |
+| `PUT` | `/api/workspaces/{workspaceId}/policy` | Create (`If-None-Match: *`) or replace (`If-Match: "<revision>"`, the `ETag` as read) a policy; never blind: neither header is `428 precondition_required`, a stale or misdirected one is `412 policy_revision_conflict` naming `currentRevision`, and nothing changes; `If-Match: *`, a weak validator or both headers is `400`. Strict schema (`422` on unknown keys or `unclassified` in an allow-list); the body's `workspaceId` must equal the path's (`400`). The response's `ETag` is the new revision |
 | `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete a policy (`204`, idempotent) |
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |

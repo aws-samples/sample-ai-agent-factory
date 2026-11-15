@@ -330,6 +330,66 @@ def test_a_malformed_admission_blocks_instead_of_being_read_as_no_requirement(co
         _judge(TYPE_WEBHOOK, admission)
 
 
+#: Every key the inventory writer produces. The reader requires each to be PRESENT (an explicit empty
+#: list or null is fine), so a record that lost one cannot re-admit as an agent with fewer capabilities.
+INVENTORY_KEYS = [
+    "id",
+    "name",
+    "workspaceId",
+    "model",
+    "tools",
+    "knowledge",
+    "channels",
+    "triggers",
+    "customCode",
+    "region",
+    "monthlyBudgetUsd",
+]
+
+
+def test_the_recorded_inventory_carries_every_key_the_reader_requires():
+    assert set(_admission(WRITER)["inventory"]) == set(INVENTORY_KEYS)
+
+
+@pytest.mark.parametrize("key", INVENTORY_KEYS)
+def test_an_inventory_missing_any_field_is_malformed_not_an_agent_with_fewer_capabilities(key):
+    """Codex round-3 finding 10: a version-3 record that lost ``inventory.tools`` kept its medium tier
+    and its ``ingressSensitiveCapabilities`` but rebuilt as a toolless agent, which a webhook made LOW
+    risk and the policy auto-approved. Absence is corruption, so the judgement is refused."""
+    admission = _admission(WRITER)
+    del admission["inventory"][key]
+    with pytest.raises(MalformedAdmissionError):
+        _judge(TYPE_WEBHOOK, admission)
+
+
+@pytest.mark.parametrize(
+    ("spec", "path"),
+    [
+        (WRITER, ("tools", 0, "riskClass")),
+        (WRITER, ("tools", 0, "ref")),
+        (CODER, ("customCode", 0, "sha256")),
+        (CONFIDENTIAL, ("knowledge", 0, "dataClass")),
+    ],
+    ids=["tool label", "tool ref", "code digest", "knowledge class"],
+)
+def test_an_inventory_entry_missing_a_field_is_malformed(spec, path):
+    admission = _admission(spec)
+    *parents, leaf = path
+    node = admission["inventory"]
+    for step in parents:
+        node = node[step]
+    del node[leaf]
+    with pytest.raises(MalformedAdmissionError):
+        _judge(TYPE_WEBHOOK, admission)
+
+
+def test_an_inventory_with_an_unknown_key_is_malformed():
+    admission = _admission(WRITER)
+    admission["inventory"]["toolsVerified"] = True
+    with pytest.raises(MalformedAdmissionError):
+        _judge(TYPE_WEBHOOK, admission)
+
+
 def test_a_missing_policy_for_the_admitted_workspace_is_unavailable_not_the_default():
     with pytest.raises(WorkspacePolicyUnavailableError):
         _judge(TYPE_WEBHOOK, _admission(WRITER), None, _lookup_of(None))
@@ -653,6 +713,28 @@ def test_a_malformed_admission_record_blocks_with_409_and_zero_side_effects(rout
     assert response.status_code == 409, response.text
     assert "cannot be read" in response.json()["detail"]
     _nothing_happened(route)
+
+
+@pytest.mark.parametrize(
+    ("spec", "key"),
+    [(WRITER, "tools"), (CODER, "customCode"), (CONFIDENTIAL, "knowledge")],
+    ids=["write connector", "custom code", "confidential knowledge"],
+)
+def test_a_version_3_record_whose_inventory_lost_a_list_blocks_with_409_not_a_lower_tier(route, monkeypatch, spec, key):
+    """Codex round-3 finding 10, end to end. The record still says medium/high and still names its
+    ingress-sensitive capabilities; only the inventory list that made it so is gone. Re-admitting what is
+    left would be a harmless-looking agent that a webhook makes LOW risk, which this policy auto-approves:
+    the attachment would succeed without g-security. It is a 409 with nothing created and no policy read."""
+    _flags(monkeypatch, {"workspacePolicy": True})
+    admission = _admission(spec)
+    assert admission["tier"] in ("medium", "high")
+    del admission["inventory"][key]
+    route.claim = _claim(admission=admission)
+    response = _post(route, WEBHOOK)
+    assert response.status_code == 409, response.text
+    assert "cannot be read" in response.json()["detail"]
+    _nothing_happened(route)
+    route.policy_store.get_snapshot.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["missing", "error"])

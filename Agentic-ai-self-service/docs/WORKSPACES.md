@@ -16,6 +16,17 @@ the same `404` as a nonexistent route.
 `PUT /api/workspaces/{workspaceId}/policy` (scope `admin`) stores one policy per workspace. The
 schema is strict: an unknown key is `422`, and so is `unclassified` inside an allow-list.
 
+A policy is **never replaced blind**. Every stored policy has a revision, served as the `ETag` of a
+`GET` or `PUT` (a quoted integer). A `PUT` says what it is based on: `If-Match: "<revision>"` to replace
+the policy as it was read, or `If-None-Match: *` to create one that does not exist yet. The store
+enforces the precondition in the same DynamoDB write, so two admins editing the same policy cannot
+overwrite each other: the second save is `412 policy_revision_conflict` (the body names
+`expectedRevision` and `currentRevision`) and nothing changes, which is what keeps a form opened before a
+colleague added `g-security` to the high routing from silently removing it again. A `PUT` with neither
+header is `428 precondition_required`; `If-Match: *`, a weak validator, a non-numeric revision or both
+headers at once is `400`. Policies written before revisions existed read as revision `0` and can be
+replaced exactly once as such.
+
 ```json
 {
   "workspaceId": "finance",
@@ -198,7 +209,11 @@ The judgement is a snapshot, so the row write is **bound to it**: the trigger's 
 also condition-checks the exact policy item the judgement read. A policy changed or deleted between
 the judgement and the write cancels the transaction (`409`, nothing created). A present but malformed
 admission record is `409`, never read as "no requirement"; a version-3 record missing its inventory or
-capabilities is malformed. Note the consequence until specs can declare triggers (Phase 3): approvers
+capabilities is malformed, and so is an inventory missing **any** of its fields (`tools`, `knowledge`,
+`customCode`, `model`, `region`, ... are required to be present, as explicit empty lists or nulls where
+the agent has none): a record that lost its `tools` list would otherwise re-admit as a toolless, low-risk
+agent and get its webhook without the security approval its real tier needs. Note the consequence until
+specs can declare triggers (Phase 3): approvers
 can only approve the groups a version's admission routed to, so an agent whose current routing names a
 group its admission did not cannot get a webhook at all; the path is a workspace whose policy fits the
 agent's real ingress, then a redeploy. Slack and Teams channel routes do not exist yet; when they do,
@@ -244,6 +259,12 @@ cannot become "everything auto-approves" by accident. The three preset documents
 `backend/tests/fixtures/workspace_policy/presets/` and `backend/tests/test_workspace_presets.py`
 validates each against the schema and pins what it admits.
 
+**Edit** fetches the policy as the server holds it now, with its revision, and the save names that
+revision (`If-Match`); a new policy is created only if none exists (`If-None-Match: *`). When a
+colleague saved first, the backend's `412` is shown verbatim, the admin's form is kept, and **Reload
+current version** fetches the colleague's version so the change can be reapplied on top of it instead
+of over it. A response without a revision is refused rather than edited.
+
 Every version in the deploy panel's **Versions** list carries a **tier badge** (`low` / `medium` /
 `high risk`, the classifier's reasons in its tooltip, and the groups whose approval is still pending);
 versions deployed while the flag was off show none.
@@ -270,13 +291,15 @@ Reason codes: `provider_not_allowed`, `model_not_allowed`, `connector_not_allowe
 `channel_not_allowed`, `region_not_allowed`, `budget_undeclared`, `budget_exceeds_workspace`,
 `workspace_not_member`, `workspace_selection_required`; for a trigger attachment, the same allow-list
 codes plus `version_not_admitted`, `admission_predates_ingress_rule`, `trigger_raises_risk_tier` and
-`trigger_requires_approval`. Every refusal is audited like any other write
-to `/api/deploy` or `/api/runtimes/{name}/triggers`.
+`trigger_requires_approval`. A refused policy write is `precondition_required` (`428`) or
+`policy_revision_conflict` (`412`). Every refusal is audited like any other write
+to `/api/deploy`, `/api/runtimes/{name}/triggers` or `/api/workspaces/{id}/policy`.
 
 ## Where it lives
 
 - Policies: the shared org-config table (`TAG_POLICY_TABLE_NAME`), items `WORKSPACE#<id>#POLICY`
-  under `org_id`; strongly consistent reads; floats stored as `Decimal`. No new table or IAM grant.
+  under `org_id` with a `revision` counter; strongly consistent reads; every write conditional on the
+  revision it was based on; floats stored as `Decimal`. No new table or IAM grant.
 - Routes: `/api/workspaces/{proxy+}` → the **deployment** Lambda (`routers/workspace_policies.py`);
   the exact `GET /api/workspaces` (workflow sharing) stays on the workflow Lambda.
 - Code: `schemas/workspace_policy.py`, `services/risk_classifier.py`, `services/admission_spec.py`,
