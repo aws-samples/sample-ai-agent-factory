@@ -103,7 +103,7 @@ names no flow carries no classifications.
 
 ## The risk classifier
 
-Pure and deterministic (`services/risk_classifier.py`, version 3). Each rule is a floor; the
+Pure and deterministic (`services/risk_classifier.py`, version 4). Each rule is a floor; the
 budget rule is a modifier applied last. Reasons are returned in this order.
 
 | Rule | Tier |
@@ -112,7 +112,7 @@ budget rule is a modifier applied last. Reasons are returned in this order.
 | a `write` tool | medium |
 | a non-Bedrock model provider | medium |
 | `confidential` or `pii` knowledge | high |
-| public ingress (webhook / email trigger) **and** a tool that is not verified read-only (write, pay **or unclassified**) | high |
+| public ingress (webhook / email trigger) **and** an ingress-sensitive capability: a tool that is not verified read-only (write, pay **or unclassified**), or executable custom code | high |
 | custom code | medium |
 | an unclassified tool or knowledge item | `defaults.unclassifiedRiskTier` (medium unless lowered) |
 | per-agent budget above the workspace default | one tier higher |
@@ -168,35 +168,41 @@ unconstrained workspace.
 
 A trigger is ingress attached to a **production** runtime after it was admitted
 (`POST /api/runtimes/{name}/triggers`), so the admission decision never saw it. With the flag on, the
-route judges the attachment against the version row's recorded admission and the workspace's
-**current** policy (`services/trigger_admission.py`), after ownership (a non-owner stays `404`),
-request validation (`400`) and eligibility (`409`), and before its first side effect (the webhook's
-secret), so a refusal creates nothing.
+route **re-admits the agent with the trigger added**, under the workspace's **current** policy
+(`services/trigger_admission.py`), after ownership (a non-owner stays `404`), request validation
+(`400`) and eligibility (`409`), and before its first side effect (the webhook's secret), so a refusal
+creates nothing.
+
+The admission decision (version 3) records an **inventory** of what it judged, as the builder declared
+it (model, tools with their labels, knowledge, channels, triggers, custom code, Region, budget):
+exactly the fields the classifier and the allow-lists read, kept as labels rather than effective
+classes so the policy of the day decides what they mean. The attachment rebuilds that spec plus the
+trigger and runs the real admission against today's policy:
 
 | Trigger | Version | Result |
 |---|---|---|
 | `cron`, `eventbridge`, `s3` | any | Allowed without reading anything: the platform's own plumbing never changes the tier. With the flag off, every trigger takes this path. |
-| `webhook` | deployed without admission (flag off at the time) | `403 policy_denied` / `version_not_admitted`: its tools were never classified, so the combination cannot be judged. Redeploy under the policy first. |
-| `webhook` | admission older than version 2 | `403 policy_denied` / `admission_predates_ingress_rule`: the decision does not record which tools public ingress may reach. Redeploy under the policy first. |
-| `webhook` | admitted, every tool **verified read-only** | Allowed; the tier is unchanged and no policy is read. |
-| `webhook` | admitted at **any** tier (high included) **with** an ingress-sensitive tool | The combination is **high** (`public_ingress_with_write`). The workspace's **current** policy is read; the attachment is allowed only when every group its `approval.high` names has already approved this version (an empty list auto-approves); otherwise `403 policy_denied` / `trigger_raises_risk_tier` naming the pending groups. A policy tightened after the deploy therefore applies, and a deleted or unreadable policy is `503`, never permission. |
+| `webhook` | deployed without admission (flag off at the time) | `403 policy_denied` / `version_not_admitted`: its tools were never classified. Redeploy under the policy first. |
+| `webhook` | admission older than version 3 | `403 policy_denied` / `admission_predates_ingress_rule`: nothing recorded to re-admit from. Redeploy under the policy first. |
+| `webhook` | admitted (version 3) | The **current** policy is read (missing or unreadable: `503`, never permission). The agent plus the webhook is admitted against it in full: a connector, model, data class, channel or Region the policy no longer allows refuses the attachment with the allow-list's own code; the tier is recomputed (public ingress with any **ingress-sensitive capability** is `high`); and every approver group the current policy names for that tier must have approved this version. Pending groups: `403 policy_denied` / `trigger_raises_risk_tier` when the trigger raises the tier, `trigger_requires_approval` when the tier is unchanged but today's routing needs a group the version lacks. A tightened policy therefore applies to an agent admitted `high` under a looser one, and revoking `trustBuilderClassifications` revokes the exemption a `read` label once bought. |
 
-A tool is **ingress-sensitive** when it is not verified read-only: `write`, `pay`, or **unclassified**
-(a Lambda nobody classified may mutate anything, and exposing it to the internet is not a read-only
-act; a builder's `read` label counts only in a workspace that trusts builder classifications). The
-admission decision records the list (`ingressSensitiveTools`, admission version 2) from the same
-classifier helper the ingress rule uses, so the two cannot disagree; a test pins them against each
-other on every gallery template.
+A capability is **ingress-sensitive** when nothing verifies it is harmless behind public ingress: a
+tool whose effective class is `write`, `pay` or **unclassified** (a Lambda nobody classified may mutate
+anything; a builder's `read` label counts only while the workspace trusts builder classifications), or
+any executable **custom code** node (moving the mutation into code is not a way around the gate). The
+decision records the list (`ingressSensitiveCapabilities`) for the badge, from the same classifier
+helper the ingress rule uses; tests pin the recorded inventory to re-admit identically to the original
+spec on every gallery template, and the list to the rule.
 
 The judgement is a snapshot, so the row write is **bound to it**: the trigger's `TransactWriteItems`
 also condition-checks the exact policy item the judgement read. A policy changed or deleted between
-the judgement and the write cancels the transaction (`409`, nothing created); a webhook that needed
-no policy read (read-only agent) carries no such condition. A present but malformed admission record
-is `409`, never read as "no requirement". Note the consequence until specs can declare triggers
-(Phase 3): approvers can only approve the groups a version's admission routed to, so an agent whose
-`approval.high` names a group its admission did not cannot get a webhook at all; the path is a
-workspace whose policy fits the agent's real ingress. Slack and Teams channel routes do not exist yet;
-when they do, they go through this gate.
+the judgement and the write cancels the transaction (`409`, nothing created). A present but malformed
+admission record is `409`, never read as "no requirement"; a version-3 record missing its inventory or
+capabilities is malformed. Note the consequence until specs can declare triggers (Phase 3): approvers
+can only approve the groups a version's admission routed to, so an agent whose current routing names a
+group its admission did not cannot get a webhook at all; the path is a workspace whose policy fits the
+agent's real ingress, then a redeploy. Slack and Teams channel routes do not exist yet; when they do,
+they go through this gate.
 
 ```json
 {
@@ -227,12 +233,14 @@ every policy with who it governs, what it allows and who approves; creates or ed
 | **Developer** | Nothing constrained, every tier auto-approved, builders' own classifications trusted, unclassified floored to low. |
 
 The approver and security groups are inputs the admin types (a group nobody holds would gate a tier
-forever); typing them fills the medium and high routing, before or after a preset is applied, and
-every field can still be edited. The panel **refuses to save** a policy whose medium or high routing
-is empty unless the admin ticks *This workspace auto-approves every tier* (the Developer preset ticks
-it, because that is what it means), and "Create the default policy" starts from Standard rather than
-from an unconstrained document, so the org-wide default cannot become "everything auto-approves" by
-accident. The three preset documents are a contract: the frontend snapshots them to
+forever). They and the medium/high routing fields are one state seen two ways: typing reviewers fills
+the routing, editing the routing refills the reviewers, before or after a preset is applied, so a group
+typed anywhere is never dropped on save. The panel **refuses to save** a policy whose review is
+reduced (a tier auto-approves, or high risk adds no reviewer beyond the medium approvers, which is what
+a reviewed preset with the security group left blank would be) unless the admin ticks *Accept reduced
+review* (the Developer preset ticks it, because that is what it means), and "Create the default
+policy" starts from Standard rather than from an unconstrained document, so the org-wide default
+cannot become "everything auto-approves" by accident. The three preset documents are a contract: the frontend snapshots them to
 `backend/tests/fixtures/workspace_policy/presets/` and `backend/tests/test_workspace_presets.py`
 validates each against the schema and pins what it admits.
 
@@ -260,8 +268,9 @@ versions deployed while the flag was off show none.
 Reason codes: `provider_not_allowed`, `model_not_allowed`, `connector_not_allowed`,
 `tool_risk_class_not_allowed`, `tool_unclassified`, `data_class_not_allowed`, `knowledge_unclassified`,
 `channel_not_allowed`, `region_not_allowed`, `budget_undeclared`, `budget_exceeds_workspace`,
-`workspace_not_member`, `workspace_selection_required`; for a trigger attachment,
-`version_not_admitted`, `admission_predates_ingress_rule` and `trigger_raises_risk_tier`. Every refusal is audited like any other write
+`workspace_not_member`, `workspace_selection_required`; for a trigger attachment, the same allow-list
+codes plus `version_not_admitted`, `admission_predates_ingress_rule`, `trigger_raises_risk_tier` and
+`trigger_requires_approval`. Every refusal is audited like any other write
 to `/api/deploy` or `/api/runtimes/{name}/triggers`.
 
 ## Where it lives

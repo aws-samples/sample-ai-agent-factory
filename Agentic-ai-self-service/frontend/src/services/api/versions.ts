@@ -32,6 +32,10 @@ export interface VersionAdmission {
   violations: Array<{ code: string; path: string; message: string }>;
   admissionVersion: number;
   classifierVersion: number;
+  /** Tools not verified read-only and custom code (admission version 3): what public ingress may not reach unreviewed. */
+  ingressSensitiveCapabilities?: string[];
+  /** What was judged, as declared (admission version 3); re-admitted when a trigger is attached. */
+  inventory?: Record<string, unknown> | null;
 }
 
 /** One approver group's approval of the version, recorded by the approve route. */

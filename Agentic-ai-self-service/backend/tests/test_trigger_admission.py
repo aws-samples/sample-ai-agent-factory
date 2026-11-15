@@ -1,25 +1,24 @@
-"""Triggers attached after deployment are judged by the workspace policy (plan §3.B, attachment gap).
+"""Triggers attached after deployment are RE-ADMITTED under the current workspace policy (plan §3.B).
 
 Three layers, each at its own boundary:
 
-* ``trigger_admission.judge_trigger_attachment`` -- pure and table-driven: a non-ingress trigger is
-  allowed without a read; a webhook on an un-admitted version, or on one whose admission predates the
-  ingress rule, is refused; a webhook keeps the tier of an agent whose every tool is verified
-  read-only; a webhook on an agent with an ingress-sensitive tool (write, pay or UNCLASSIFIED) is the
-  high combination whatever the admitted tier: the CURRENT policy is read and every ``approval.high``
-  group must have approved, else refused; malformed records raise; a missing policy is unavailable,
-  never the default; an allowed judgement carries the fence of the policy item it read.
-* The recorded ``ingressSensitiveTools`` are pinned against the classifier ITSELF on real specs (every
-  gallery template plus hand-built ones): they must be exactly the tools whose effective class is not
-  ``read``, and adding a webhook to the spec must fire ``public_ingress_with_write`` exactly when the
-  list is non-empty.
-* ``POST /api/runtimes/{name}/triggers`` through the real router, with ownership resolved to an owned
-  HTTP runtime and every side effect replaced by a sentinel, so each test can say exactly how far a
-  request got: flag off is the old route; the business persona's webhook on a write agent is the
-  exact ``403 policy_denied`` with ZERO side effects; an unclassified Lambda is judged the same way; a
-  schedule is not judged; an approved agent proceeds and the row write receives the policy fence; a
-  policy changed between judgement and write is 409; a legacy version cannot get a webhook; a
-  malformed record is 409; an unreadable policy is 503; a non-owner is still 404.
+* ``trigger_admission.judge_trigger_attachment`` -- pure and table-driven. A non-ingress trigger is
+  allowed without a read. A webhook on an un-admitted version, or on one whose admission predates the
+  recorded inventory, is refused. Otherwise the recorded inventory plus the trigger is admitted against
+  the CURRENT policy: a read-only agent keeps its tier (and still reads the policy, so the write is
+  fenced); an agent with any tool not verified read-only, or with custom code, becomes high and needs
+  every current ``approval.high`` group, whatever tier it was admitted at; a connector the current
+  policy no longer allows refuses the webhook with the allow-list's own code; a tightened approval for
+  an unchanged tier refuses it too; revoking trust in builder classifications revokes the exemption;
+  malformed records and missing version-3 fields raise; a missing policy is unavailable, never default.
+* The recorded inventory re-admits IDENTICALLY to the original spec (tier, reasons, violations,
+  capabilities) on every gallery template and hand-built specs, and the recorded capabilities are
+  exactly what the classifier's ingress rule fires on.
+* ``POST /api/runtimes/{name}/triggers`` through the real router with every side effect stubbed to a
+  sentinel: flag off is the old route; the business persona's webhook on a risky agent is the exact
+  ``403 policy_denied`` with ZERO side effects; a schedule is not judged; an approved agent proceeds and
+  the row write receives the policy fence; a policy changed between judgement and write is 409; a legacy
+  version cannot get a webhook; a malformed record is 409; an unreadable policy is 503; a non-owner 404.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from app.schemas.agent_spec_v2 import AgentSpecV2, TriggerSpec
 from app.schemas.workspace_policy import WorkspacePolicy
 from app.services import trigger_admission as ta
 from app.services import workspace_policy_service as wps
+from app.services.admission_inventory import AdmissionInventory
 from app.services.agent_versions_store import AgentVersion, RuntimeSlots
 from app.services.auth import get_caller_sub
 from app.services.risk_classifier import PUBLIC_INGRESS_WITH_WRITE_CODE, classify, effective_risk_class
@@ -65,8 +65,10 @@ RUNTIME = "orders_bot"
 RUNTIME_ID = "orders_bot_1a2b3c4d-AbCdEfGhIj"
 RUNTIME_ARN = f"arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/{RUNTIME_ID}"
 NOW = datetime.now(UTC).isoformat()
+SHA = "a" * 64
 
-#: ``high`` needs security AND the approvers; ``medium`` needs the approvers alone.
+#: ``high`` needs security AND the approvers; ``medium`` needs the approvers alone. Trusting, like the
+#: shared ``_policy`` helper, so labelled tools classify as written unless a test says otherwise.
 HIGH_POLICY = _policy(approval={"medium": ["g-approvers"], "high": ["g-security", "g-approvers"]})
 #: What a store snapshot carries beside the policy: the exact item for the row write's condition.
 FENCE = PolicyFence(
@@ -81,6 +83,14 @@ PAYER = _spec(tools=[_tool("stripe", "pay")])
 #: A Lambda nobody classified: the classifier cannot show it is harmless.
 MYSTERY = _spec(tools=[_tool("mystery")])
 NO_TOOLS = _spec()
+#: Executable custom code and no declared tools.
+CODER = _spec(
+    code={"customNodes": {"transform": {"language": "python", "sourceRef": "inline:transform", "sha256": SHA}}}
+)
+#: Confidential knowledge and only a verified read tool: high by data class, not by tools.
+CONFIDENTIAL = _spec(
+    tools=[_tool("lookup", "read")], knowledge=[{"id": "kb", "type": "managedKb", "dataClass": "confidential"}]
+)
 
 
 def _admission(spec: AgentSpecV2, policy: WorkspacePolicy = HIGH_POLICY) -> dict[str, Any]:
@@ -101,6 +111,10 @@ def _judge(trigger_type: str, admission, approvals=None, lookup=None) -> ta.Trig
         owner_sub=OWNER,
         policy_lookup=lookup if lookup is not None else _lookup_of(),
     )
+
+
+def _codes(result: ta.TriggerAdmission) -> list[str]:
+    return [violation.code for violation in result.violations]
 
 
 # --------------------------------------------------------------------------- pure decision
@@ -132,67 +146,79 @@ def test_a_webhook_on_a_version_without_admission_is_refused():
     lookup = _lookup_of()
     result = _judge(TYPE_WEBHOOK, None, lookup=lookup)
     assert result.outcome == "denied"
-    assert result.violation is not None
-    assert result.violation.code == ta.VERSION_NOT_ADMITTED
-    assert result.violation.path == "/triggers/0/type"
-    assert "never classified" in result.violation.message
+    assert _codes(result) == [ta.VERSION_NOT_ADMITTED]
+    assert result.violations[0].path == "/triggers/0/type"
+    assert "never classified" in result.violations[0].message
     lookup.assert_not_called()
 
 
-def test_an_admission_that_predates_the_ingress_rule_is_refused_not_guessed_at():
-    """A version-1 decision does not record which tools public ingress may reach."""
+def test_an_admission_that_predates_the_inventory_is_refused_not_guessed_at():
+    """A version-1 decision records nothing to re-admit from."""
     legacy = _admission(WRITER)
     legacy["admissionVersion"] = 1
-    legacy.pop("ingressSensitiveTools")
+    legacy.pop("ingressSensitiveCapabilities")
+    legacy.pop("inventory")
     lookup = _lookup_of()
     result = _judge(TYPE_WEBHOOK, legacy, lookup=lookup)
     assert result.outcome == "denied"
-    assert result.violation is not None and result.violation.code == ta.ADMISSION_PREDATES_INGRESS_RULE
-    assert "version 1" in result.violation.message
+    assert _codes(result) == [ta.ADMISSION_PREDATES_INGRESS_RULE]
+    assert "version 1" in result.violations[0].message
     lookup.assert_not_called()
 
 
 @pytest.mark.parametrize("spec", [READ_ONLY, NO_TOOLS], ids=["read-only tool", "no tools"])
-def test_a_webhook_on_an_agent_whose_tools_are_all_verified_read_only_keeps_its_tier(spec):
+def test_a_webhook_on_an_agent_whose_tools_are_all_verified_read_only_keeps_its_tier_and_is_fenced(spec):
     lookup = _lookup_of()
     result = _judge(TYPE_WEBHOOK, _admission(spec), lookup=lookup)
     assert result.outcome == "allowed"
     assert (result.workspace_id, result.admitted_tier, result.resulting_tier) == ("finance", "low", "low")
-    assert result.ingress_sensitive_tools == [] and result.policy_fence is None
-    lookup.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("spec", "tool", "admitted"),
-    [(WRITER, "jira", "medium"), (MYSTERY, "mystery", "medium"), (PAYER, "stripe", "high")],
-    ids=["write connector", "unclassified lambda", "pay tool"],
-)
-def test_a_webhook_on_an_agent_with_an_ingress_sensitive_tool_is_refused_until_the_high_tier_approvers_approve(
-    spec, tool, admitted
-):
-    admission = _admission(spec)
-    assert admission["tier"] == admitted
-    assert admission["ingressSensitiveTools"] == [tool]
-    lookup = _lookup_of()
-    result = _judge(TYPE_WEBHOOK, admission, [approval_record("g-approvers", APPROVER, NOW)], lookup)
-    assert result.outcome == "denied"
-    assert result.violation is not None
-    assert result.violation.code == ta.TRIGGER_RAISES_RISK_TIER
-    assert (result.workspace_id, result.admitted_tier, result.resulting_tier) == ("finance", admitted, "high")
-    assert result.ingress_sensitive_tools == [tool]
-    assert tool in result.violation.message and "g-security" in result.violation.message
-    assert "g-approvers" not in result.violation.message, "a group that already approved is not pending"
+    assert result.ingress_sensitive_capabilities == []
+    assert result.policy_fence == FENCE, "every public-ingress judgement reads the policy and is fenced"
     lookup.assert_called_once_with("finance")
 
 
-def test_an_unclassified_lambda_approved_as_medium_cannot_be_exposed_to_the_internet_without_security():
+@pytest.mark.parametrize(
+    ("spec", "capability", "admitted"),
+    [
+        (WRITER, "jira", "medium"),
+        (MYSTERY, "mystery", "medium"),
+        (PAYER, "stripe", "high"),
+        (CODER, "code:transform", "medium"),
+    ],
+    ids=["write connector", "unclassified lambda", "pay tool", "custom code"],
+)
+def test_a_webhook_on_an_agent_with_an_ingress_sensitive_capability_needs_the_current_high_tier_approvers(
+    spec, capability, admitted
+):
+    admission = _admission(spec)
+    assert admission["tier"] == admitted
+    assert admission["ingressSensitiveCapabilities"] == [capability]
+    lookup = _lookup_of()
+    result = _judge(TYPE_WEBHOOK, admission, [approval_record("g-approvers", APPROVER, NOW)], lookup)
+    assert result.outcome == "denied"
+    assert _codes(result) == [ta.TRIGGER_RAISES_RISK_TIER if admitted != "high" else ta.TRIGGER_REQUIRES_APPROVAL]
+    assert (result.workspace_id, result.admitted_tier, result.resulting_tier) == ("finance", admitted, "high")
+    assert result.ingress_sensitive_capabilities == [capability]
+    assert "g-security" in result.violations[0].message
+    assert "g-approvers" not in result.violations[0].message, "a group that already approved is not pending"
+    lookup.assert_called_once_with("finance")
+
+
+def test_an_unclassified_lambda_approved_as_medium_cannot_be_exposed_without_security():
     """Codex round-1 finding 1: omitting a classification must not make a mutating Lambda read-only."""
     admission = _admission(MYSTERY)
     assert admission["tier"] == "medium" and admission["approvers"] == ["g-approvers"]
     result = _judge(TYPE_WEBHOOK, admission, [approval_record("g-approvers", APPROVER, NOW)])
-    assert result.outcome == "denied" and result.violation is not None
-    assert result.violation.code == ta.TRIGGER_RAISES_RISK_TIER
-    assert "g-security" in result.violation.message
+    assert _codes(result) == [ta.TRIGGER_RAISES_RISK_TIER]
+
+
+def test_moving_the_mutation_into_custom_code_is_not_a_way_around_the_gate():
+    """Codex round-2 finding 8: executable custom code is an ingress-sensitive capability."""
+    admission = _admission(CODER)
+    assert admission["tier"] == "medium", "custom code alone is medium"
+    result = _judge(TYPE_WEBHOOK, admission, [approval_record("g-approvers", APPROVER, NOW)])
+    assert _codes(result) == [ta.TRIGGER_RAISES_RISK_TIER]
+    assert result.ingress_sensitive_capabilities == ["code:transform"]
 
 
 def test_once_every_high_tier_group_has_approved_the_webhook_is_allowed_and_carries_the_fence():
@@ -203,7 +229,7 @@ def test_once_every_high_tier_group_has_approved_the_webhook_is_allowed_and_carr
     result = _judge(TYPE_WEBHOOK, _admission(WRITER), approvals)
     assert result.outcome == "allowed"
     assert (result.admitted_tier, result.resulting_tier) == ("medium", "high")
-    assert result.ingress_sensitive_tools == ["jira"]
+    assert result.ingress_sensitive_capabilities == ["jira"]
     assert result.policy_fence == FENCE
 
 
@@ -219,26 +245,60 @@ def test_an_agent_admitted_high_is_still_judged_by_the_current_policy():
     auto_high = _policy(approval={"medium": ["g-approvers"]})
     admission = _admission(PAYER, auto_high)
     assert admission["tier"] == "high" and admission["approvers"] == []
-    # Unchanged policy: allowed, with the fence.
     allowed = _judge(TYPE_WEBHOOK, admission, None, _lookup_of(auto_high))
     assert allowed.outcome == "allowed" and allowed.policy_fence == FENCE
-    # Tightened since the deploy: refused until security approves.
     tightened = _policy(approval={"medium": ["g-approvers"], "high": ["g-security"]})
     refused = _judge(TYPE_WEBHOOK, admission, None, _lookup_of(tightened))
-    assert refused.outcome == "denied" and refused.violation is not None
-    assert refused.violation.code == ta.TRIGGER_RAISES_RISK_TIER and "g-security" in refused.violation.message
-    # Deleted since the deploy: unavailable, never allowed.
+    assert _codes(refused) == [ta.TRIGGER_REQUIRES_APPROVAL], "the tier does not rise, the requirement does"
+    assert "g-security" in refused.violations[0].message
     with pytest.raises(WorkspacePolicyUnavailableError):
         _judge(TYPE_WEBHOOK, admission, None, _lookup_of(None))
 
 
+def test_a_high_agent_by_data_class_alone_is_judged_by_the_current_policy_too():
+    """Codex round-2 finding 2: no ingress-sensitive tool, still high; the shortcut is gone."""
+    auto_high = _policy(approval={"medium": ["g-approvers"]})
+    admission = _admission(CONFIDENTIAL, auto_high)
+    assert admission["tier"] == "high" and admission["ingressSensitiveCapabilities"] == []
+    tightened = _policy(approval={"medium": ["g-approvers"], "high": ["g-security"]})
+    refused = _judge(TYPE_WEBHOOK, admission, None, _lookup_of(tightened))
+    assert _codes(refused) == [ta.TRIGGER_REQUIRES_APPROVAL]
+    with pytest.raises(WorkspacePolicyUnavailableError):
+        _judge(TYPE_WEBHOOK, admission, None, _lookup_of(None))
+
+
+def test_revoking_trust_in_builder_classifications_revokes_the_exemption_it_granted():
+    """Codex round-2 finding 7: a ``read`` label accepted under Developer is unclassified under Standard."""
+    developer = _policy(defaults={"trustBuilderClassifications": True, "unclassifiedRiskTier": "low"})
+    admission = _admission(_spec(tools=[_tool("lambda-x", "read")]), developer)
+    assert admission["tier"] == "low" and admission["ingressSensitiveCapabilities"] == []
+    standard = _policy(
+        defaults={"trustBuilderClassifications": False},
+        approval={"medium": ["g-approvers"], "high": ["g-security", "g-approvers"]},
+    )
+    refused = _judge(TYPE_WEBHOOK, admission, None, _lookup_of(standard))
+    assert _codes(refused) == [ta.TRIGGER_RAISES_RISK_TIER]
+    assert refused.ingress_sensitive_capabilities == ["lambda-x"], "the label no longer counts"
+    assert refused.resulting_tier == "high"
+
+
+def test_a_connector_the_current_policy_no_longer_allows_refuses_the_webhook_with_the_allow_lists_code():
+    admission = _admission(WRITER)
+    locked = _policy(allowed={"connectors": ["slack"]}, approval={"high": []})
+    refused = _judge(TYPE_WEBHOOK, admission, None, _lookup_of(locked))
+    assert refused.outcome == "denied"
+    assert "connector_not_allowed" in _codes(refused)
+    assert ta.trigger_denial_detail(refused)["message"].startswith(
+        "This trigger cannot be attached: with it the agent uses"
+    )
+
+
 def test_the_judgement_reads_the_current_policy_not_the_one_admission_saw():
-    """An admin who tightens ``approval.high`` after the deploy changes what the webhook needs."""
     admitted_under = _policy(approval={"medium": ["g-approvers"]})
     tightened = _policy(approval={"medium": ["g-approvers"], "high": ["g-security"]})
     result = _judge(TYPE_WEBHOOK, _admission(WRITER, admitted_under), None, _lookup_of(tightened))
-    assert result.outcome == "denied"
-    assert result.violation is not None and "g-security" in result.violation.message
+    assert _codes(result) == [ta.TRIGGER_RAISES_RISK_TIER]
+    assert "g-security" in result.violations[0].message
 
 
 def test_an_owner_authored_approval_is_tampering_and_blocks():
@@ -255,7 +315,11 @@ def test_an_owner_authored_approval_is_tampering_and_blocks():
         lambda doc: doc.__setitem__("outcome", "denied"),
         lambda doc: doc.__setitem__("approvers", ["", "g-ok"]),
         lambda doc: doc.__setitem__("admissionVersion", 99),
-        lambda doc: doc.__setitem__("ingressSensitiveTools", "jira"),
+        lambda doc: doc.__setitem__("admissionVersion", 2),  # development-only version, never readable
+        lambda doc: doc.__setitem__("ingressSensitiveCapabilities", "jira"),
+        lambda doc: doc.pop("ingressSensitiveCapabilities"),  # Codex round-2 finding 6
+        lambda doc: doc.pop("inventory"),
+        lambda doc: doc.__setitem__("inventory", None),
         lambda doc: doc.clear(),
     ],
 )
@@ -273,15 +337,14 @@ def test_a_missing_policy_for_the_admitted_workspace_is_unavailable_not_the_defa
 
 def test_the_denial_body_is_the_deploy_refusals_envelope():
     result = _judge(TYPE_WEBHOOK, _admission(WRITER))
-    assert result.violation is not None
     assert ta.trigger_denial_detail(result) == {
         "code": POLICY_DENIED,
         "workspaceId": "finance",
         "tier": "medium",
         "violations": [
-            {"code": ta.TRIGGER_RAISES_RISK_TIER, "path": "/triggers/0/type", "message": result.violation.message}
+            {"code": ta.TRIGGER_RAISES_RISK_TIER, "path": "/triggers/0/type", "message": result.violations[0].message}
         ],
-        "message": f"This trigger cannot be attached: {result.violation.message}. Nothing was created.",
+        "message": f"This trigger cannot be attached: {result.violations[0].message}. Nothing was created.",
     }
     with pytest.raises(ValueError):
         ta.trigger_denial_detail(_judge(TYPE_CRON, None))
@@ -296,13 +359,13 @@ def test_the_decision_serializes_camel_case_for_logs_and_evidence():
         "workspaceId",
         "admittedTier",
         "resultingTier",
-        "ingressSensitiveTools",
-        "violation",
+        "ingressSensitiveCapabilities",
+        "violations",
         "policyFence",
     }
 
 
-# --------------------------------------------------------------------------- recorded list vs classifier
+# --------------------------------------------------------------------------- inventory vs classifier
 
 
 def _real_specs() -> list[AgentSpecV2]:
@@ -315,21 +378,31 @@ def _real_specs() -> list[AgentSpecV2]:
         PAYER,
         MYSTERY,
         NO_TOOLS,
+        CODER,
+        CONFIDENTIAL,
         _spec(tools=[_tool("jira", "read", kind="connector", ref="jira")]),  # catalog floors it to write
         _spec(tools=[_tool("lookup", "read"), _tool("sender", "write")]),
+        _spec(
+            model={"provider": "openai", "modelId": "gpt-5"},
+            tools=[_tool("lookup", "read")],
+            channels=[{"id": "ch", "type": "slack"}],
+            deployment={"region": "eu-west-1"},
+            policy={"budget": {"monthlyUsd": 42.5}},
+        ),
     ]
     return specs
 
 
 @pytest.mark.parametrize("trusting", [True, False])
-def test_the_recorded_ingress_sensitive_tools_agree_with_the_classifier_on_real_specs(trusting):
+def test_the_recorded_capabilities_agree_with_the_classifier_on_real_specs(trusting):
     policy = _policy(defaults={"trustBuilderClassifications": trusting})
     seen = set()
     for spec in _real_specs():
         decision = admit(spec, policy)
-        assert decision.admission_version == ADMISSION_VERSION == 2
+        assert decision.admission_version == ADMISSION_VERSION == 3
         expected = [tool.id for tool in spec.tools if effective_risk_class(tool, policy) != "read"]
-        assert decision.ingress_sensitive_tools == expected, spec.id
+        expected += [f"code:{node}" for node in spec.code.custom_nodes]
+        assert decision.ingress_sensitive_capabilities == expected, spec.id
         with_webhook = spec.model_copy(update={"triggers": [TriggerSpec(id="hook", type="webhook")]})
         fires = any(reason.code == PUBLIC_INGRESS_WITH_WRITE_CODE for reason in classify(with_webhook, policy).reasons)
         assert fires is bool(expected), spec.id
@@ -337,15 +410,50 @@ def test_the_recorded_ingress_sensitive_tools_agree_with_the_classifier_on_real_
     assert seen == {True, False}, "the sample must exercise both outcomes"
 
 
+@pytest.mark.parametrize("trusting", [True, False])
+@pytest.mark.parametrize(
+    "policy_overrides",
+    [
+        {},
+        {"allowed": {"connectors": ["slack"], "providers": ["bedrock"], "channels": ["web"], "regions": ["us-east-1"]}},
+        {"budgets": {"maxAgentMonthlyUsd": 10}},
+    ],
+    ids=["open", "constrained", "capped"],
+)
+def test_the_recorded_inventory_re_admits_exactly_like_the_original_spec(trusting, policy_overrides):
+    """What the attachment gate judges is what admission judged: same tier, reasons, violations and
+    capabilities, with and without the webhook, under permissive and constraining policies."""
+    policy = _policy(defaults={"trustBuilderClassifications": trusting}, **policy_overrides)
+    for spec in _real_specs():
+        rebuilt = AdmissionInventory.from_spec(spec).to_spec()
+        original, again = admit(spec, policy), admit(rebuilt, policy)
+        assert (again.outcome, again.tier, again.reasons, again.violations) == (
+            original.outcome,
+            original.tier,
+            original.reasons,
+            original.violations,
+        ), spec.id
+        assert again.ingress_sensitive_capabilities == original.ingress_sensitive_capabilities, spec.id
+        hook = TriggerSpec(id="trigger-webhook", type="webhook")
+        with_hook = spec.model_copy(update={"triggers": [*spec.triggers, hook]})
+        rebuilt_with_hook = AdmissionInventory.from_spec(spec).to_spec(extra_triggers=[hook])
+        assert classify(rebuilt_with_hook, policy) == classify(with_hook, policy), spec.id
+
+
+def test_the_inventory_keeps_labels_not_effective_classes():
+    inventory = AdmissionInventory.from_spec(_spec(tools=[_tool("jira", "read", kind="connector", ref="jira")]))
+    assert inventory.tools[0].risk_class == "read", "the builder's word, verbatim; the policy of the day decides"
+    assert inventory.to_spec().tools[0].risk_class == "read"
+
+
 def test_an_unclassified_tool_is_ingress_sensitive_unless_the_workspace_trusts_a_read_label():
     untrusting, trusting = _policy(defaults={"trustBuilderClassifications": False}), _policy()
     labelled_read = _spec(tools=[_tool("lambda-x", "read")])
-    assert admit(MYSTERY, untrusting).ingress_sensitive_tools == ["mystery"]
-    assert admit(MYSTERY, trusting).ingress_sensitive_tools == ["mystery"]
-    assert admit(labelled_read, untrusting).ingress_sensitive_tools == ["lambda-x"], (
-        "an unverified label is not a verification"
-    )
-    assert admit(labelled_read, trusting).ingress_sensitive_tools == [], "a trusting workspace takes the builder's word"
+    assert admit(MYSTERY, untrusting).ingress_sensitive_capabilities == ["mystery"]
+    assert admit(MYSTERY, trusting).ingress_sensitive_capabilities == ["mystery"]
+    assert admit(labelled_read, untrusting).ingress_sensitive_capabilities == ["lambda-x"]
+    assert admit(labelled_read, trusting).ingress_sensitive_capabilities == []
+    assert admit(CODER, trusting).ingress_sensitive_capabilities == ["code:transform"], "code is never verified"
 
 
 # --------------------------------------------------------------------------- the route
@@ -448,7 +556,9 @@ def test_flag_off_leaves_the_route_exactly_as_it_was(route, monkeypatch):
     route.policy_store.get_snapshot.assert_not_called()
 
 
-@pytest.mark.parametrize("spec", [WRITER, MYSTERY], ids=["write connector", "unclassified lambda"])
+@pytest.mark.parametrize(
+    "spec", [WRITER, MYSTERY, CODER], ids=["write connector", "unclassified lambda", "custom code"]
+)
 def test_a_business_persona_attaching_a_webhook_to_a_risky_agent_is_the_exact_403_with_zero_side_effects(
     route, monkeypatch, spec
 ):
@@ -476,13 +586,13 @@ def test_a_schedule_trigger_is_not_judged_and_proceeds_without_a_fence(route, mo
     route.policy_store.get_snapshot.assert_not_called()
 
 
-def test_a_webhook_on_a_read_only_agent_proceeds_without_reading_the_policy(route, monkeypatch):
+def test_a_webhook_on_a_read_only_agent_proceeds_after_reading_the_current_policy(route, monkeypatch):
     _flags(monkeypatch, {"workspacePolicy": True})
     route.claim = _claim(admission=_admission(READ_ONLY))
     response = _post(route, WEBHOOK)
     assert response.status_code == 500, response.text
     assert route.secret.called
-    route.policy_store.get_snapshot.assert_not_called()
+    route.policy_store.get_snapshot.assert_called_once_with(wps.DEFAULT_ORG_ID, "finance")
 
 
 def test_an_approved_risky_agents_webhook_write_is_bound_to_the_policy_it_was_judged_against(route, monkeypatch):

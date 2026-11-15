@@ -28,10 +28,11 @@ import { useFeatureFlags } from '../../hooks/useFeatureFlags';
 import { FeatureGate } from '../FeatureGate';
 import { WORKSPACE_PRESETS, applyPreset, emptyPolicy, type WorkspacePresetId } from './workspacePresets';
 import {
-  AUTO_APPROVE_ACKNOWLEDGEMENT,
+  REDUCED_REVIEW_ACKNOWLEDGEMENT,
   documentFromForm,
   formFromDocument,
   presetInputFromForm,
+  reviewersFromRouting,
   routingFromReviewers,
   summarizeAllowed,
   summarizeApproval,
@@ -164,12 +165,23 @@ function WorkspacesPanelBody() {
     setError(null);
   };
 
-  /** Reviewer inputs re-derive the medium/high routing, so a typed group is never dropped on save. */
+  /**
+   * The reviewer inputs and the medium/high routing are one state seen two ways: editing either side
+   * re-derives the other, so a group typed anywhere is never dropped on save (a `g-privacy` added to
+   * the high routing survives a later change of the approver group).
+   */
   const setReviewers = (field: 'approverGroups' | 'securityGroups', value: string) => {
     setForm((current) => {
       if (!current) return current;
       const next = { ...current, [field]: value };
       return { ...next, ...routingFromReviewers(next.approverGroups, next.securityGroups) };
+    });
+  };
+  const setRouting = (field: 'approvalMedium' | 'approvalHigh', value: string) => {
+    setForm((current) => {
+      if (!current) return current;
+      const next = { ...current, [field]: value };
+      return { ...next, ...reviewersFromRouting(next.approvalMedium, next.approvalHigh) };
     });
   };
 
@@ -193,7 +205,7 @@ function WorkspacesPanelBody() {
       name: form.name,
       // Developer is the one preset that auto-approves on purpose; every other empty routing must be
       // acknowledged explicitly before it can be saved.
-      autoApproveAcknowledged: !reviewed,
+      reducedReviewAcknowledged: !reviewed,
     });
     setNotice(
       reviewersMissing
@@ -473,19 +485,19 @@ function WorkspacesPanelBody() {
               <input className={INPUT} value={form.approvalLow} onChange={(event) => update('approvalLow', event.target.value)} />
             </Field>
             <Field label="Approvers: medium risk" hint="Every group must approve.">
-              <input className={INPUT} value={form.approvalMedium} onChange={(event) => update('approvalMedium', event.target.value)} />
+              <input className={INPUT} value={form.approvalMedium} onChange={(event) => setRouting('approvalMedium', event.target.value)} />
             </Field>
             <Field label="Approvers: high risk" hint="Every group must approve.">
-              <input className={INPUT} value={form.approvalHigh} onChange={(event) => update('approvalHigh', event.target.value)} />
+              <input className={INPUT} value={form.approvalHigh} onChange={(event) => setRouting('approvalHigh', event.target.value)} />
             </Field>
           </div>
           <label className="flex items-center gap-2 text-[11px]">
             <input
               type="checkbox"
-              checked={form.autoApproveAcknowledged}
-              onChange={(event) => update('autoApproveAcknowledged', event.target.checked)}
+              checked={form.reducedReviewAcknowledged}
+              onChange={(event) => update('reducedReviewAcknowledged', event.target.checked)}
             />
-            {AUTO_APPROVE_ACKNOWLEDGEMENT} (required to save an empty medium or high routing)
+            {REDUCED_REVIEW_ACKNOWLEDGEMENT}
           </label>
 
           <div className="grid grid-cols-3 gap-2">

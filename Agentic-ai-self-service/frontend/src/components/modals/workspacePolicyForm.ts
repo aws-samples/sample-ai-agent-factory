@@ -34,11 +34,11 @@ export interface WorkspacePolicyForm {
   approverGroups: string;
   securityGroups: string;
   /**
-   * Not persisted. Saving a policy whose medium or high routing is EMPTY (auto-approve) is refused
-   * unless the admin ticks this: a reviewed preset with no reviewers typed, or a brand-new policy,
-   * must not become "everything auto-approves" by accident.
+   * Not persisted. Saving a policy whose review is REDUCED (a tier auto-approves, or high risk adds no
+   * reviewer beyond the medium approvers) is refused unless the admin ticks this: a reviewed preset with
+   * reviewers missing, or a brand-new policy, must not weaken review by accident.
    */
-  autoApproveAcknowledged: boolean;
+  reducedReviewAcknowledged: boolean;
   providers: string;
   models: string;
   connectors: string;
@@ -88,7 +88,7 @@ export function formFromDocument(
     adminGroups: joinList(document.adminGroups),
     approverGroups: presetGroups?.approverGroups ?? joinList(document.approval.medium),
     securityGroups: presetGroups?.securityGroups ?? joinList(security),
-    autoApproveAcknowledged: false,
+    reducedReviewAcknowledged: false,
     providers: joinList(document.allowed.providers),
     models: joinList(document.allowed.models),
     connectors: joinList(document.allowed.connectors),
@@ -147,7 +147,29 @@ export function routingFromReviewers(
   };
 }
 
-export const AUTO_APPROVE_ACKNOWLEDGEMENT = 'This workspace auto-approves every tier';
+export const REDUCED_REVIEW_ACKNOWLEDGEMENT =
+  'Accept reduced review: a tier auto-approves, or high risk adds no reviewer beyond the medium approvers';
+
+/** The reviewer inputs a routing implies: medium's groups are the approvers; high's extra groups are security. */
+export function reviewersFromRouting(
+  approvalMedium: string,
+  approvalHigh: string,
+): Pick<WorkspacePolicyForm, 'approverGroups' | 'securityGroups'> {
+  const medium = splitList(approvalMedium);
+  const high = splitList(approvalHigh);
+  return {
+    approverGroups: joinList(medium),
+    securityGroups: joinList(high.filter((group) => !medium.includes(group))),
+  };
+}
+
+/**
+ * Whether a routing gives less review than the reviewed presets advertise: a tier that auto-approves,
+ * or a high tier whose reviewers are all medium approvers already (no security review at all).
+ */
+export function routingIsReduced(medium: string[], high: string[]): boolean {
+  return medium.length === 0 || high.length === 0 || high.every((group) => medium.includes(group));
+}
 
 /** The document to PUT. Throws a plain-language error for what the backend would refuse anyway. */
 export function documentFromForm(form: WorkspacePolicyForm): WorkspacePolicyDocument {
@@ -161,9 +183,9 @@ export function documentFromForm(form: WorkspacePolicyForm): WorkspacePolicyDocu
   }
   const medium = splitList(form.approvalMedium);
   const high = splitList(form.approvalHigh);
-  if ((medium.length === 0 || high.length === 0) && !form.autoApproveAcknowledged) {
+  if (routingIsReduced(medium, high) && !form.reducedReviewAcknowledged) {
     throw new Error(
-      `Medium or high risk has no approver groups, so this workspace would auto-approve it. Name the groups, or tick "${AUTO_APPROVE_ACKNOWLEDGEMENT}" to confirm that is intended.`,
+      `Medium or high risk has no approver groups, or high risk adds no reviewer beyond the medium approvers, so this policy reviews less than the presets advertise. Name the groups, or tick "${REDUCED_REVIEW_ACKNOWLEDGEMENT}" to confirm that is intended.`,
     );
   }
   return {

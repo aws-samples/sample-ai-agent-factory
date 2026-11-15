@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  AUTO_APPROVE_ACKNOWLEDGEMENT,
+  REDUCED_REVIEW_ACKNOWLEDGEMENT,
   documentFromForm,
   formFromDocument,
   parseBudget,
   presetInputFromForm,
+  reviewersFromRouting,
   routingFromReviewers,
+  routingIsReduced,
   splitList,
   summarizeAllowed,
   summarizeApproval,
@@ -26,33 +28,53 @@ describe('workspace policy form conversions', () => {
     for (const preset of WORKSPACE_PRESETS) {
       const document = applyPreset(preset.id, INPUT);
       // Developer auto-approves every tier on purpose, which the form requires an admin to acknowledge.
-      const form = { ...formFromDocument(document), autoApproveAcknowledged: preset.id === 'developer' };
+      const form = { ...formFromDocument(document), reducedReviewAcknowledged: preset.id === 'developer' };
       expect(documentFromForm(form)).toEqual(document);
     }
     const empty = emptyPolicy('x', 'X');
-    expect(documentFromForm({ ...formFromDocument(empty), autoApproveAcknowledged: true })).toEqual(empty);
+    expect(documentFromForm({ ...formFromDocument(empty), reducedReviewAcknowledged: true })).toEqual(empty);
   });
 
   it('refuses to save an empty medium or high routing unless auto-approval is acknowledged', () => {
     const form = formFromDocument(emptyPolicy('x', 'X'));
-    expect(form.autoApproveAcknowledged).toBe(false);
-    expect(() => documentFromForm(form)).toThrow(AUTO_APPROVE_ACKNOWLEDGEMENT);
+    expect(form.reducedReviewAcknowledged).toBe(false);
+    expect(() => documentFromForm(form)).toThrow(REDUCED_REVIEW_ACKNOWLEDGEMENT);
     expect(() => documentFromForm({ ...form, approvalMedium: 'g-approvers' })).toThrow(/high risk has no approver groups|Medium or high/);
     expect(documentFromForm({ ...form, approvalMedium: 'g-approvers', approvalHigh: 'g-security' }).approval).toEqual({
       low: [],
       medium: ['g-approvers'],
       high: ['g-security'],
     });
-    expect(documentFromForm({ ...form, autoApproveAcknowledged: true }).approval).toEqual({ low: [], medium: [], high: [] });
+    expect(documentFromForm({ ...form, reducedReviewAcknowledged: true }).approval).toEqual({ low: [], medium: [], high: [] });
   });
 
-  it('derives the medium and high routing from the reviewer inputs', () => {
+  it('derives the medium and high routing from the reviewer inputs, and back', () => {
     expect(routingFromReviewers('g-approvers', 'g-security')).toEqual({
       approvalMedium: 'g-approvers',
       approvalHigh: 'g-security, g-approvers',
     });
     expect(routingFromReviewers('g-a, g-a', '')).toEqual({ approvalMedium: 'g-a', approvalHigh: 'g-a' });
     expect(routingFromReviewers('', '')).toEqual({ approvalMedium: '', approvalHigh: '' });
+    expect(reviewersFromRouting('g-approvers', 'g-privacy, g-approvers')).toEqual({
+      approverGroups: 'g-approvers',
+      securityGroups: 'g-privacy',
+    });
+    expect(reviewersFromRouting('', 'g-security')).toEqual({ approverGroups: '', securityGroups: 'g-security' });
+  });
+
+  it('a high routing with no reviewer beyond the medium approvers is reduced review and needs the acknowledgement', () => {
+    expect(routingIsReduced(['g-a'], ['g-a'])).toBe(true);
+    expect(routingIsReduced(['g-a'], ['g-sec', 'g-a'])).toBe(false);
+    expect(routingIsReduced([], ['g-sec'])).toBe(true);
+    expect(routingIsReduced(['g-a'], [])).toBe(true);
+    const form = formFromDocument(emptyPolicy('x', 'X'));
+    expect(() => documentFromForm({ ...form, approvalMedium: 'g-approvers', approvalHigh: 'g-approvers' })).toThrow(
+      /adds no reviewer beyond the medium approvers/,
+    );
+    expect(
+      documentFromForm({ ...form, approvalMedium: 'g-approvers', approvalHigh: 'g-approvers', reducedReviewAcknowledged: true })
+        .approval.high,
+    ).toEqual(['g-approvers']);
   });
 
   it('splits typed lists on commas, semicolons and whitespace, de-duplicating in order', () => {
@@ -92,7 +114,7 @@ describe('workspace policy form conversions', () => {
     document.defaults.platformVersion = 'V2';
     expect(formFromDocument(document).platformVersion).toBe('V2');
     expect(
-      documentFromForm({ ...formFromDocument(document), platformVersion: '', autoApproveAcknowledged: true }).defaults
+      documentFromForm({ ...formFromDocument(document), platformVersion: '', reducedReviewAcknowledged: true }).defaults
         .platformVersion,
     ).toBeNull();
   });

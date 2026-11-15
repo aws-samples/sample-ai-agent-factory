@@ -37,8 +37,17 @@ APPROVALS_FIELD = "admission_approvals"
 
 #: Document versions this build can read. A record carrying any other value was written by code this
 #: build does not know, so its meaning cannot be relied on: it blocks rather than releases.
-SUPPORTED_ADMISSION_VERSIONS = frozenset({1, 2})
-SUPPORTED_CLASSIFIER_VERSIONS = frozenset({1, 2, 3})
+#: Version 2 existed only during this branch's development and no row carries it; it is not readable.
+SUPPORTED_ADMISSION_VERSIONS = frozenset({1, 3})
+SUPPORTED_CLASSIFIER_VERSIONS = frozenset({1, 2, 3, 4})
+
+#: Keys a decision of a given version MUST carry (present and not null). A security field this build
+#: knows the version writes but finds absent is corruption or truncation, never "none": its absence
+#: must not read as permission.
+REQUIRED_KEYS_BY_ADMISSION_VERSION: dict[int, tuple[str, ...]] = {
+    1: (),
+    3: ("ingressSensitiveCapabilities", "inventory"),
+}
 
 
 class MalformedAdmissionError(ValueError):
@@ -81,6 +90,9 @@ def required_approver_groups(admission: dict[str, Any] | None) -> list[str]:
         raise MalformedAdmissionError(f"unsupported admissionVersion {decision.admission_version!r}")
     if decision.classifier_version not in SUPPORTED_CLASSIFIER_VERSIONS:
         raise MalformedAdmissionError(f"unsupported classifierVersion {decision.classifier_version!r}")
+    for key in REQUIRED_KEYS_BY_ADMISSION_VERSION.get(decision.admission_version, ()):
+        if admission.get(key) is None:
+            raise MalformedAdmissionError(f"admission version {decision.admission_version} must carry {key!r}")
     if not all(_well_formed_group(group) for group in decision.approvers):
         raise MalformedAdmissionError("admission.approvers is not a list of group names")
     return list(decision.approvers)

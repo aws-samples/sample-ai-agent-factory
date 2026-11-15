@@ -291,13 +291,15 @@ def test_the_decision_serializes_camel_case_for_the_registry_record():
         "workspaceId",
         "tier",
         "reasons",
-        "ingressSensitiveTools",
+        "ingressSensitiveCapabilities",
+        "inventory",
         "approvers",
         "violations",
         "admissionVersion",
         "classifierVersion",
     }
-    assert document["admissionVersion"] == 2
+    assert document["admissionVersion"] == 3
+    assert document["inventory"]["id"] == "agent-1"
     assert AdmissionDecision.model_validate(document) == admit(_spec(), _policy())
 
 

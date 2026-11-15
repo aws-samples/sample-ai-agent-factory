@@ -134,6 +134,40 @@ describe('WorkspacesPanel', () => {
     });
   });
 
+  it('Standard with approvers but no security group is reduced review and needs the acknowledgement', async () => {
+    render(<WorkspacesPanel isAdmin />);
+    await screen.findByTestId('workspace-finance');
+    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'hr' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'HR' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Standard' }));
+    fireEvent.change(screen.getByLabelText(/Approver groups/), { target: { value: 'g-approvers' } });
+    expect(screen.getByLabelText(/Approvers: high risk/)).toHaveValue('g-approvers');
+    fireEvent.click(screen.getByText('Create workspace'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('adds no reviewer beyond the medium approvers');
+    expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText(/Accept reduced review/));
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    expect(api.putWorkspacePolicy.mock.calls[0][0].approval).toEqual({ low: [], medium: ['g-approvers'], high: ['g-approvers'] });
+  });
+
+  it('a group added directly to the high routing survives a later change of the approver group', async () => {
+    render(<WorkspacesPanel isAdmin />);
+    await screen.findByTestId('workspace-finance');
+    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'legal' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Legal' } });
+    fireEvent.change(screen.getByLabelText(/Approvers: high risk/), { target: { value: 'g-privacy' } });
+    expect(screen.getByLabelText(/Security groups/)).toHaveValue('g-privacy');
+    fireEvent.change(screen.getByLabelText(/Approver groups/), { target: { value: 'g-ops' } });
+    expect(screen.getByLabelText(/Approvers: medium risk/)).toHaveValue('g-ops');
+    expect(screen.getByLabelText(/Approvers: high risk/)).toHaveValue('g-privacy, g-ops');
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    expect(api.putWorkspacePolicy.mock.calls[0][0].approval).toEqual({ low: [], medium: ['g-ops'], high: ['g-privacy', 'g-ops'] });
+  });
+
   it('saves an auto-approving policy only after the explicit acknowledgement', async () => {
     render(<WorkspacesPanel isAdmin />);
     await screen.findByTestId('workspace-finance');
@@ -143,7 +177,7 @@ describe('WorkspacesPanel', () => {
     fireEvent.click(screen.getByText('Create workspace'));
     expect(await screen.findByRole('alert')).toHaveTextContent('Medium or high risk has no approver groups');
     expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText(/This workspace auto-approves every tier/));
+    fireEvent.click(screen.getByLabelText(/Accept reduced review/));
     fireEvent.click(screen.getByText('Create workspace'));
     await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
     expect(api.putWorkspacePolicy.mock.calls[0][0].approval).toEqual({ low: [], medium: [], high: [] });
@@ -156,7 +190,7 @@ describe('WorkspacesPanel', () => {
     fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'dev' } });
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Dev' } });
     fireEvent.click(screen.getByRole('button', { name: 'Developer' }));
-    expect(screen.getByLabelText(/This workspace auto-approves every tier/)).toBeChecked();
+    expect(screen.getByLabelText(/Accept reduced review/)).toBeChecked();
     fireEvent.click(screen.getByText('Create workspace'));
     await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
     expect(api.putWorkspacePolicy.mock.calls[0][0].defaults.trustBuilderClassifications).toBe(true);
