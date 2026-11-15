@@ -37,8 +37,8 @@ APPROVALS_FIELD = "admission_approvals"
 
 #: Document versions this build can read. A record carrying any other value was written by code this
 #: build does not know, so its meaning cannot be relied on: it blocks rather than releases.
-SUPPORTED_ADMISSION_VERSIONS = frozenset({1})
-SUPPORTED_CLASSIFIER_VERSIONS = frozenset({1, 2})
+SUPPORTED_ADMISSION_VERSIONS = frozenset({1, 2})
+SUPPORTED_CLASSIFIER_VERSIONS = frozenset({1, 2, 3})
 
 
 class MalformedAdmissionError(ValueError):

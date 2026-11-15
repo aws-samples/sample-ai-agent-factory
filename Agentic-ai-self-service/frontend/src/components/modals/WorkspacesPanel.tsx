@@ -28,9 +28,11 @@ import { useFeatureFlags } from '../../hooks/useFeatureFlags';
 import { FeatureGate } from '../FeatureGate';
 import { WORKSPACE_PRESETS, applyPreset, emptyPolicy, type WorkspacePresetId } from './workspacePresets';
 import {
+  AUTO_APPROVE_ACKNOWLEDGEMENT,
   documentFromForm,
   formFromDocument,
   presetInputFromForm,
+  routingFromReviewers,
   summarizeAllowed,
   summarizeApproval,
   type WorkspacePolicyForm,
@@ -141,11 +143,34 @@ function WorkspacesPanelBody() {
     setForm((current) => (current ? { ...current, [key]: value } : current));
   };
 
-  const startNew = (workspaceId = '', name = '') => {
-    setForm(formFromDocument(emptyPolicy(workspaceId, name)));
+  const startNew = (workspaceId = '', name = '', preset: WorkspacePresetId | null = null) => {
+    const document = preset
+      ? applyPreset(preset, {
+          workspaceId,
+          name,
+          memberGroups: [],
+          adminGroups: [],
+          approverGroups: [],
+          securityGroups: [],
+        })
+      : emptyPolicy(workspaceId, name);
+    setForm({ ...formFromDocument(document), workspaceId, name });
     setEditingExisting(false);
-    setNotice(null);
+    setNotice(
+      preset
+        ? 'Started from the Standard preset. Enter the approver and security groups before saving: a policy with no reviewers auto-approves.'
+        : null,
+    );
     setError(null);
+  };
+
+  /** Reviewer inputs re-derive the medium/high routing, so a typed group is never dropped on save. */
+  const setReviewers = (field: 'approverGroups' | 'securityGroups', value: string) => {
+    setForm((current) => {
+      if (!current) return current;
+      const next = { ...current, [field]: value };
+      return { ...next, ...routingFromReviewers(next.approverGroups, next.securityGroups) };
+    });
   };
 
   const startEdit = (policy: WorkspacePolicyDocument) => {
@@ -159,13 +184,22 @@ function WorkspacesPanelBody() {
     if (!form) return;
     const preset = WORKSPACE_PRESETS.find((candidate) => candidate.id === id);
     const document = applyPreset(id, presetInputFromForm(form));
-    // Keep the preset inputs the admin typed; the document carries their effect.
+    // Keep the reviewer inputs the admin typed; the document carries their effect.
+    const reviewed = id !== 'developer';
+    const reviewersMissing = reviewed && (!document.approval.medium.length || !document.approval.high.length);
     setForm({
       ...formFromDocument(document, { approverGroups: form.approverGroups, securityGroups: form.securityGroups }),
       workspaceId: form.workspaceId,
       name: form.name,
+      // Developer is the one preset that auto-approves on purpose; every other empty routing must be
+      // acknowledged explicitly before it can be saved.
+      autoApproveAcknowledged: !reviewed,
     });
-    setNotice(`Applied the ${preset?.label ?? id} preset. Review the fields, then save.`);
+    setNotice(
+      reviewersMissing
+        ? `Applied the ${preset?.label ?? id} preset. It routes medium risk to the approver groups and high risk to security, so enter those groups before saving.`
+        : `Applied the ${preset?.label ?? id} preset. Review the fields, then save.`,
+    );
     setError(null);
   };
 
@@ -246,7 +280,11 @@ function WorkspacesPanelBody() {
             No <code>default</code> policy is stored. While the <code>workspacePolicy</code> flag is on,
             every deploy is refused (503) until one exists.
           </span>
-          <button type="button" className={BUTTON} onClick={() => startNew(DEFAULT_WORKSPACE_ID, 'Default')}>
+          <button
+            type="button"
+            className={BUTTON}
+            onClick={() => startNew(DEFAULT_WORKSPACE_ID, 'Default', 'standard')}
+          >
             Create the default policy
           </button>
         </div>
@@ -363,19 +401,19 @@ function WorkspacesPanelBody() {
                 placeholder="g-admins-super"
               />
             </Field>
-            <Field label="Approver groups (preset input)" hint="Review medium-risk agents.">
+            <Field label="Approver groups (fills medium and high)" hint="Review medium-risk agents.">
               <input
                 className={INPUT}
                 value={form.approverGroups}
-                onChange={(event) => update('approverGroups', event.target.value)}
+                onChange={(event) => setReviewers('approverGroups', event.target.value)}
                 placeholder="g-approvers"
               />
             </Field>
-            <Field label="Security groups (preset input)" hint="Must also clear high-risk agents.">
+            <Field label="Security groups (fills high)" hint="Must also clear high-risk agents.">
               <input
                 className={INPUT}
                 value={form.securityGroups}
-                onChange={(event) => update('securityGroups', event.target.value)}
+                onChange={(event) => setReviewers('securityGroups', event.target.value)}
                 placeholder="g-security"
               />
             </Field>
@@ -441,6 +479,14 @@ function WorkspacesPanelBody() {
               <input className={INPUT} value={form.approvalHigh} onChange={(event) => update('approvalHigh', event.target.value)} />
             </Field>
           </div>
+          <label className="flex items-center gap-2 text-[11px]">
+            <input
+              type="checkbox"
+              checked={form.autoApproveAcknowledged}
+              onChange={(event) => update('autoApproveAcknowledged', event.target.checked)}
+            />
+            {AUTO_APPROVE_ACKNOWLEDGEMENT} (required to save an empty medium or high routing)
+          </label>
 
           <div className="grid grid-cols-3 gap-2">
             <Field label="Platform version default">

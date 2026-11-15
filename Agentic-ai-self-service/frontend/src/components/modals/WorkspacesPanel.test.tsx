@@ -87,7 +87,7 @@ describe('WorkspacesPanel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('warns when no default policy exists and offers to create it with the id fixed', async () => {
+  it('warns when no default policy exists and offers to create it from Standard, reviewers required', async () => {
     api.listWorkspacePolicies.mockResolvedValue([finance]);
     render(<WorkspacesPanel isAdmin />);
     const alert = await screen.findByRole('alert');
@@ -95,6 +95,71 @@ describe('WorkspacesPanel', () => {
     fireEvent.click(screen.getByText('Create the default policy'));
     expect(screen.getByLabelText(/Workspace id/)).toHaveValue('default');
     expect(screen.getByLabelText(/Member groups/)).toBeDisabled();
+    expect(screen.getByLabelText(/Allowed providers/)).toHaveValue('bedrock');
+    expect(screen.getByRole('status')).toHaveTextContent('Enter the approver and security groups before saving');
+
+    // Saving without reviewers is refused before any request: the default must not auto-approve by accident.
+    fireEvent.click(screen.getByText('Create workspace'));
+    expect(await screen.findByText(/Medium or high risk has no approver groups/)).toBeInTheDocument();
+    expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText(/Approver groups/), { target: { value: 'g-approvers' } });
+    fireEvent.change(screen.getByLabelText(/Security groups/), { target: { value: 'g-security' } });
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    const saved = api.putWorkspacePolicy.mock.calls[0][0];
+    expect(saved.workspaceId).toBe('default');
+    expect(saved.memberGroups).toEqual([]);
+    expect(saved.approval).toEqual({ low: [], medium: ['g-approvers'], high: ['g-security', 'g-approvers'] });
+  });
+
+  it('keeps reviewer groups typed AFTER applying a preset in the saved routing', async () => {
+    render(<WorkspacesPanel isAdmin />);
+    await screen.findByTestId('workspace-finance');
+    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'ops' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Ops' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Standard' }));
+    expect(screen.getByRole('status')).toHaveTextContent('enter those groups before saving');
+    fireEvent.change(screen.getByLabelText(/Approver groups/), { target: { value: 'g-ops-leads' } });
+    fireEvent.change(screen.getByLabelText(/Security groups/), { target: { value: 'g-security' } });
+    expect(screen.getByLabelText(/Approvers: medium risk/)).toHaveValue('g-ops-leads');
+    expect(screen.getByLabelText(/Approvers: high risk/)).toHaveValue('g-security, g-ops-leads');
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    expect(api.putWorkspacePolicy.mock.calls[0][0].approval).toEqual({
+      low: [],
+      medium: ['g-ops-leads'],
+      high: ['g-security', 'g-ops-leads'],
+    });
+  });
+
+  it('saves an auto-approving policy only after the explicit acknowledgement', async () => {
+    render(<WorkspacesPanel isAdmin />);
+    await screen.findByTestId('workspace-finance');
+    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'lab' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Lab' } });
+    fireEvent.click(screen.getByText('Create workspace'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Medium or high risk has no approver groups');
+    expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText(/This workspace auto-approves every tier/));
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    expect(api.putWorkspacePolicy.mock.calls[0][0].approval).toEqual({ low: [], medium: [], high: [] });
+  });
+
+  it('the Developer preset acknowledges auto-approval on its own, because that is what it means', async () => {
+    render(<WorkspacesPanel isAdmin />);
+    await screen.findByTestId('workspace-finance');
+    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'dev' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Dev' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Developer' }));
+    expect(screen.getByLabelText(/This workspace auto-approves every tier/)).toBeChecked();
+    fireEvent.click(screen.getByText('Create workspace'));
+    await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
+    expect(api.putWorkspacePolicy.mock.calls[0][0].defaults.trustBuilderClassifications).toBe(true);
   });
 
   it('creates a workspace from the Standard preset and sends exactly the preset document', async () => {
@@ -151,6 +216,8 @@ describe('WorkspacesPanel', () => {
     fireEvent.click(screen.getByText('New workspace'));
     fireEvent.change(screen.getByLabelText(/Workspace id/), { target: { value: 'sales' } });
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Sales' } });
+    fireEvent.change(screen.getByLabelText(/Approver groups/), { target: { value: 'g-approvers' } });
+    fireEvent.change(screen.getByLabelText(/Security groups/), { target: { value: 'g-security' } });
     fireEvent.change(screen.getByLabelText(/Per-agent cap/), { target: { value: '-5' } });
     fireEvent.click(screen.getByText('Create workspace'));
     expect(await screen.findByRole('alert')).toHaveTextContent('The per-agent cap must be a non-negative number');

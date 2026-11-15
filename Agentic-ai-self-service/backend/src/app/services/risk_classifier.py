@@ -44,7 +44,7 @@ from app.schemas.workspace_policy import RiskTier, WorkspacePolicy
 
 #: Bump when the rule set changes behaviour, so a stored classification can be compared against the
 #: logic that produced it.
-CLASSIFIER_VERSION = 2
+CLASSIFIER_VERSION = 3  # 3: public ingress is high with ANY tool not verified read-only (unclassified included)
 
 _TIER_RANK: dict[RiskTier, int] = {"low": 0, "medium": 1, "high": 2}
 _RANK_TIER: tuple[RiskTier, ...] = ("low", "medium", "high")
@@ -152,6 +152,19 @@ def admissible_data_class(item: KnowledgeSpec, policy: WorkspacePolicy) -> DataC
     return "unclassified"
 
 
+def ingress_sensitive_tools(spec: AgentSpecV2, policy: WorkspacePolicy | None = None) -> list[str]:
+    """Ids of the tools public ingress must not reach without the high-tier gate: every tool that is
+    NOT verified read-only, i.e. whose effective class is ``write``, ``pay`` or ``unclassified``.
+
+    An unclassified tool is included on purpose. A Lambda nobody classified may mutate anything, and
+    exposing it to the internet is not a read-only act; treating "no evidence of writes" as "read-only"
+    would let a builder bypass the high tier by omitting a classification. The ingress rule below and
+    the trigger attachment gate (``services/trigger_admission``) both read this list, and the admission
+    decision records it, so an attachment made weeks later is judged by the same fact.
+    """
+    return [tool.id for tool in spec.tools if effective_risk_class(tool, policy) != "read"]
+
+
 def _higher(current: RiskTier, candidate: RiskTier) -> RiskTier:
     """The more severe of two tiers."""
     return current if _TIER_RANK[current] >= _TIER_RANK[candidate] else candidate
@@ -231,12 +244,12 @@ def _rule_sensitive_data(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReas
 
 def _rule_public_ingress_with_write(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason | None:
     public = sorted({trig.type for trig in spec.triggers if trig.type in PUBLIC_INGRESS_TRIGGERS})
-    has_write = any(effective_risk_class(tool, policy) in ("write", "pay") for tool in spec.tools)
-    if public and has_write:
+    sensitive = ingress_sensitive_tools(spec, policy)
+    if public and sensitive:
         return RiskReason(
             code=PUBLIC_INGRESS_WITH_WRITE_CODE,
             tier="high",
-            message=f"public ingress {public} combined with a write tool",
+            message=f"public ingress {public} combined with tool(s) {sensitive} that are not verified read-only",
         )
     return None
 

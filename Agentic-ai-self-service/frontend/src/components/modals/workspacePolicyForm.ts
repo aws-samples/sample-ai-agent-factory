@@ -26,9 +26,19 @@ export interface WorkspacePolicyForm {
   name: string;
   memberGroups: string;
   adminGroups: string;
-  /** Preset inputs, not persisted: the groups presets route medium and high risk to. */
+  /**
+   * Reviewer inputs, not persisted: the groups medium and high risk route to. Editing them re-derives
+   * `approvalMedium` / `approvalHigh` (`routingFromReviewers`), so a group the admin types is never
+   * silently dropped from the saved routing.
+   */
   approverGroups: string;
   securityGroups: string;
+  /**
+   * Not persisted. Saving a policy whose medium or high routing is EMPTY (auto-approve) is refused
+   * unless the admin ticks this: a reviewed preset with no reviewers typed, or a brand-new policy,
+   * must not become "everything auto-approves" by accident.
+   */
+  autoApproveAcknowledged: boolean;
   providers: string;
   models: string;
   connectors: string;
@@ -78,6 +88,7 @@ export function formFromDocument(
     adminGroups: joinList(document.adminGroups),
     approverGroups: presetGroups?.approverGroups ?? joinList(document.approval.medium),
     securityGroups: presetGroups?.securityGroups ?? joinList(security),
+    autoApproveAcknowledged: false,
     providers: joinList(document.allowed.providers),
     models: joinList(document.allowed.models),
     connectors: joinList(document.allowed.connectors),
@@ -123,6 +134,21 @@ export function presetInputFromForm(form: WorkspacePolicyForm): WorkspacePresetI
   };
 }
 
+/** The routing the reviewer inputs imply: medium → approvers, high → security plus approvers. */
+export function routingFromReviewers(
+  approverGroups: string,
+  securityGroups: string,
+): Pick<WorkspacePolicyForm, 'approvalMedium' | 'approvalHigh'> {
+  const approvers = splitList(approverGroups);
+  const security = splitList(securityGroups);
+  return {
+    approvalMedium: joinList(approvers),
+    approvalHigh: joinList([...new Set([...security, ...approvers])]),
+  };
+}
+
+export const AUTO_APPROVE_ACKNOWLEDGEMENT = 'This workspace auto-approves every tier';
+
 /** The document to PUT. Throws a plain-language error for what the backend would refuse anyway. */
 export function documentFromForm(form: WorkspacePolicyForm): WorkspacePolicyDocument {
   const workspaceId = form.workspaceId.trim();
@@ -132,6 +158,13 @@ export function documentFromForm(form: WorkspacePolicyForm): WorkspacePolicyDocu
   }
   if (!name) {
     throw new Error('A workspace name is required.');
+  }
+  const medium = splitList(form.approvalMedium);
+  const high = splitList(form.approvalHigh);
+  if ((medium.length === 0 || high.length === 0) && !form.autoApproveAcknowledged) {
+    throw new Error(
+      `Medium or high risk has no approver groups, so this workspace would auto-approve it. Name the groups, or tick "${AUTO_APPROVE_ACKNOWLEDGEMENT}" to confirm that is intended.`,
+    );
   }
   return {
     workspaceId,
@@ -154,8 +187,8 @@ export function documentFromForm(form: WorkspacePolicyForm): WorkspacePolicyDocu
     },
     approval: {
       low: splitList(form.approvalLow),
-      medium: splitList(form.approvalMedium),
-      high: splitList(form.approvalHigh),
+      medium,
+      high,
     },
     defaults: {
       platformVersion: form.platformVersion === '' ? null : form.platformVersion,

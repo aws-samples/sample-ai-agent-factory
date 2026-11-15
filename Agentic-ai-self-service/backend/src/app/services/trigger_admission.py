@@ -2,11 +2,12 @@
 
 Admission (``deployment_handler._reject_workspace_policy_violation``) judged the agent as it was
 DEPLOYED. A trigger is ingress attached later, through ``POST /api/runtimes/{name}/triggers``, so
-the version row's admission decision never saw it. Left unjudged, a webhook on an agent with a write
-tool would turn a medium-risk agent into the combination the classifier floors to ``high``
-(``public_ingress_with_write``) without anyone approving it. This module decides, from the version
-row's recorded admission and the workspace's CURRENT policy, whether an attachment may proceed. It
-is pure: the route supplies the two persisted documents and a policy lookup.
+the version row's admission decision never saw it. Left unjudged, a webhook on an agent with a tool
+that can change the world would turn a medium-risk agent into the combination the classifier floors
+to ``high`` (``public_ingress_with_write``) without anyone approving it. This module decides, from the
+version row's recorded admission and the workspace's CURRENT policy, whether an attachment may
+proceed, and hands the route the exact policy item it judged so the row write can be conditioned on
+it. It is pure: the route supplies the two persisted documents and a policy lookup.
 
 What is judged:
 
@@ -14,23 +15,28 @@ What is judged:
   trigger types that is ``webhook``). A schedule or an EventBridge/S3 source is the platform's own
   plumbing and never changes the tier, so those attachments are allowed WITHOUT reading anything: for
   them the flag-on path is the flag-off path.
-* A webhook on a version that carries NO admission (deployed while the flag was off, or before it
-  existed) is refused: the agent's tools were never classified, so the combination cannot be judged.
-  Redeploying under the policy classifies it.
-* A webhook on an admitted agent WITHOUT a write or pay tool keeps its tier: allowed.
-* A webhook on an admitted agent WITH a write or pay tool is the ``high`` combination. A version
-  admitted ``high`` already changes nothing: allowed. Otherwise the attachment RAISES the tier, which
-  is allowed only when every approver group the workspace names for ``high`` has already approved
-  this version (an empty list auto-approves); else it is the exact ``403 policy_denied`` naming the
-  pending groups. Nothing is created either way.
+* A webhook on a version that carries NO admission (deployed while the flag was off) is refused: its
+  tools were never classified, so the combination cannot be judged. So is a version whose admission
+  predates the ingress rule (``admissionVersion`` below ``MIN_ADMISSION_VERSION_FOR_INGRESS``): it does
+  not record which tools public ingress may not reach. Redeploying under the policy classifies it.
+* A webhook on an admitted agent none of whose tools is ingress-sensitive keeps its tier: allowed. A
+  tool is ingress-sensitive when it is NOT verified read-only: ``write``, ``pay`` or UNCLASSIFIED (a
+  Lambda nobody classified may mutate anything; exposing it to the internet is not a read-only act).
+  The list is recorded on the decision at deploy time by the same classifier helper the ingress rule
+  uses (``risk_classifier.ingress_sensitive_tools``), so the two can never disagree.
+* A webhook on an admitted agent WITH an ingress-sensitive tool is the ``high`` combination, whatever
+  tier it was admitted at, ``high`` itself included. The CURRENT policy of the admitted workspace is
+  read (missing or unreadable: ``WorkspacePolicyUnavailableError``, never "no requirement"), and the
+  attachment is allowed only when every group ``approval.high`` names has already approved this version
+  (an empty list auto-approves); else it is the exact ``403 policy_denied`` naming the pending groups.
+  An admin who tightens ``approval.high`` after the deploy therefore changes what the webhook needs,
+  and a deleted policy blocks it.
 
-The write-or-pay predicate is read from the recorded decision's reasons: ``write_tool`` / ``pay_tool``
-fire exactly when a tool's effective class is write / pay, which is the predicate
-``_rule_public_ingress_with_write`` evaluates; a test pins the two against each other on real specs.
-The admission document is validated by ``workspace_approval.required_approver_groups`` first, so a
-present-but-malformed record raises ``MalformedAdmissionError`` and the route blocks (409) instead of
-reading it as "no requirement". A workspace whose policy cannot be read is
-``WorkspacePolicyUnavailableError`` (503 at the route): never attach unjudged.
+The judgement is a snapshot, so an allowed result carries the ``PolicyFence`` of the item it read and
+the route binds the trigger row's transaction to it: a policy changed between the judgement and the
+write cancels the write (``TriggerPolicyConflict``). The admission and approval documents are validated
+by ``workspace_approval`` first; a present-but-malformed record raises ``MalformedAdmissionError`` and
+the route blocks (409) instead of reading it as "no requirement".
 """
 
 from __future__ import annotations
@@ -38,15 +44,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.schemas.workspace_policy import RiskTier, WorkspacePolicy
-from app.services.risk_classifier import PAY_TOOL_CODE, PUBLIC_INGRESS_TRIGGERS, WRITE_TOOL_CODE
+from app.services.risk_classifier import PUBLIC_INGRESS_TRIGGERS
 from app.services.trigger_store import TYPE_CRON, TYPE_EVENTBRIDGE, TYPE_S3, TYPE_WEBHOOK
 from app.services.workspace_admission import POLICY_DENIED, AdmissionDecision, PolicyViolation, approvers_for
 from app.services.workspace_approval import approved_groups, required_approver_groups
-from app.services.workspace_policy_service import WorkspacePolicyUnavailableError
+from app.services.workspace_policy_service import PolicyFence, WorkspacePolicyUnavailableError
 
 #: Platform trigger type -> Spec v2 ``TriggerType`` (``schemas/agent_spec_v2``), so the classifier's
 #: vocabulary is the one judged here. A type missing here maps to itself.
@@ -59,14 +65,20 @@ PLATFORM_TRIGGER_TO_SPEC: dict[str, str] = {
 
 #: Violation codes (``PolicyViolation.code``) this module produces; tests assert the exact values.
 VERSION_NOT_ADMITTED = "version_not_admitted"
+ADMISSION_PREDATES_INGRESS_RULE = "admission_predates_ingress_rule"
 TRIGGER_RAISES_RISK_TIER = "trigger_raises_risk_tier"
 
 #: JSON pointer of the offending value: the one trigger the request attaches.
 TRIGGER_PATH = "/triggers/0/type"
 
-#: Reads the CURRENT policy of a workspace by id; ``None`` when none is stored. A store failure must
-#: surface as ``WorkspacePolicyUnavailableError`` (the route's lookup wraps it).
-PolicyLookup = Callable[[str], WorkspacePolicy | None]
+#: The first admission document version that records ``ingressSensitiveTools``. An older decision
+#: cannot say which tools public ingress may reach, so it is refused rather than guessed at.
+MIN_ADMISSION_VERSION_FOR_INGRESS = 2
+
+#: Reads the CURRENT policy of a workspace by id together with the fence on the item it came from;
+#: ``None`` when none is stored. A store failure must surface as ``WorkspacePolicyUnavailableError``
+#: (the route's lookup wraps it).
+PolicyLookup = Callable[[str], tuple[WorkspacePolicy, PolicyFence] | None]
 
 
 class TriggerAdmission(BaseModel):
@@ -79,10 +91,15 @@ class TriggerAdmission(BaseModel):
     #: The workspace whose policy governs the version; ``None`` when nothing was read.
     workspace_id: str | None = None
     admitted_tier: RiskTier | None = None
-    #: The agent's tier once the trigger is attached: ``admitted_tier`` unless public ingress meets a
-    #: write tool, which makes it ``high``.
+    #: The agent's tier once the trigger is attached: ``admitted_tier`` unless public ingress meets an
+    #: ingress-sensitive tool, which makes it ``high``.
     resulting_tier: RiskTier | None = None
+    #: The recorded tools that make public ingress high risk for this agent.
+    ingress_sensitive_tools: list[str] = Field(default_factory=list)
     violation: PolicyViolation | None = None
+    #: The policy item the judgement read, for the route to condition the trigger row's write on;
+    #: ``None`` when no policy was read (non-ingress trigger, or no ingress-sensitive tool).
+    policy_fence: PolicyFence | None = None
 
 
 def spec_trigger_type(platform_type: str) -> str:
@@ -95,10 +112,9 @@ def is_public_ingress(platform_type: str) -> bool:
     return spec_trigger_type(platform_type) in PUBLIC_INGRESS_TRIGGERS
 
 
-def admitted_has_write_or_pay(decision: AdmissionDecision) -> bool:
-    """Whether the admitted agent carries a write or pay tool, read from the decision's reasons."""
-    codes = {reason.code for reason in decision.reasons}
-    return bool(codes & {WRITE_TOOL_CODE, PAY_TOOL_CODE})
+def ingress_sensitive(decision: AdmissionDecision) -> list[str]:
+    """The recorded tools public ingress may not reach without the high-tier gate."""
+    return list(decision.ingress_sensitive_tools)
 
 
 def _allowed(
@@ -106,6 +122,8 @@ def _allowed(
     decision: AdmissionDecision | None = None,
     *,
     resulting: RiskTier | None = None,
+    sensitive: list[str] | None = None,
+    fence: PolicyFence | None = None,
 ) -> TriggerAdmission:
     admitted = decision.tier if decision is not None else None
     return TriggerAdmission(
@@ -114,6 +132,8 @@ def _allowed(
         workspace_id=decision.workspace_id if decision is not None else None,
         admitted_tier=admitted,
         resulting_tier=resulting if resulting is not None else admitted,
+        ingress_sensitive_tools=list(sensitive or []),
+        policy_fence=fence,
     )
 
 
@@ -124,6 +144,7 @@ def _denied(
     code: str,
     message: str,
     resulting: RiskTier | None,
+    sensitive: list[str] | None = None,
 ) -> TriggerAdmission:
     return TriggerAdmission(
         outcome="denied",
@@ -131,6 +152,7 @@ def _denied(
         workspace_id=decision.workspace_id if decision is not None else None,
         admitted_tier=decision.tier if decision is not None else None,
         resulting_tier=resulting,
+        ingress_sensitive_tools=list(sensitive or []),
         violation=PolicyViolation(code=code, path=TRIGGER_PATH, message=message),
     )
 
@@ -170,30 +192,45 @@ def judge_trigger_attachment(
     required_approver_groups(admission)
     decision = AdmissionDecision.model_validate(admission)
 
-    if not admitted_has_write_or_pay(decision):
-        return _allowed(trigger_type, decision)
-    if decision.tier == "high":
-        return _allowed(trigger_type, decision, resulting="high")
+    if decision.admission_version < MIN_ADMISSION_VERSION_FOR_INGRESS:
+        return _denied(
+            trigger_type,
+            decision,
+            code=ADMISSION_PREDATES_INGRESS_RULE,
+            message=(
+                f"a {ingress} trigger is public ingress, and this version's admission (version "
+                f"{decision.admission_version}) predates the rule that records which tools public ingress may "
+                "not reach, so the combination cannot be judged; redeploy the agent under the workspace policy, "
+                "then attach the trigger"
+            ),
+            resulting=None,
+        )
 
-    policy = policy_lookup(decision.workspace_id)
-    if policy is None:
+    sensitive = ingress_sensitive(decision)
+    if not sensitive:
+        return _allowed(trigger_type, decision)
+
+    snapshot = policy_lookup(decision.workspace_id)
+    if snapshot is None:
         raise WorkspacePolicyUnavailableError(f"no policy is stored for workspace {decision.workspace_id!r}")
+    policy, fence = snapshot
     required = approvers_for("high", policy)
     done = approved_groups(approvals, owner_sub=owner_sub)
     pending = [group for group in required if group not in done]
     if not pending:
-        return _allowed(trigger_type, decision, resulting="high")
+        return _allowed(trigger_type, decision, resulting="high", sensitive=sensitive, fence=fence)
     return _denied(
         trigger_type,
         decision,
         code=TRIGGER_RAISES_RISK_TIER,
         message=(
-            f"a {ingress} trigger is public ingress; combined with this agent's write tools it makes the agent "
-            f"high risk, but the version was admitted {decision.tier} and approval from {', '.join(pending)} is "
-            "missing; in this workspace a high-risk agent needs their approval before it can be reached from "
-            "the internet"
+            f"a {ingress} trigger is public ingress; combined with tool(s) {sensitive} that are not verified "
+            f"read-only it makes the agent high risk, but the version was admitted {decision.tier} and this "
+            f"workspace's current policy still needs approval from {', '.join(pending)}; a high-risk agent needs "
+            "their approval before it can be reached from the internet"
         ),
         resulting="high",
+        sensitive=sensitive,
     )
 
 

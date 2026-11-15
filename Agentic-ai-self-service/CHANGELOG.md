@@ -63,16 +63,26 @@ All notable changes to this project are documented here. The format follows
   malformed admission record keeps a version blocked. `GET /api/deploy/{id}` and the versions list
   serve the admission for the UI's tier badge.
 - **Trigger attachment gating.** With the flag on, `POST /api/runtimes/{name}/triggers` judges a
-  `webhook` (public ingress) against the version row's admission and the workspace's current policy
-  before its first side effect: `403 policy_denied` with `version_not_admitted` for a version deployed
-  without admission, or `trigger_raises_risk_tier` when a write/pay agent admitted below high would
-  become high and the `approval.high` groups have not approved it; `409` for a malformed admission
-  record; `503` for an unreadable policy. Schedule, EventBridge and S3 triggers are never judged, and
-  with the flag off the route is unchanged (`services/trigger_admission.py`).
+  `webhook` (public ingress) against the version row's admission and the workspace's **current**
+  policy before its first side effect: `403 policy_denied` with `version_not_admitted` for a version
+  deployed without admission, `admission_predates_ingress_rule` for one whose decision predates
+  version 2, or `trigger_raises_risk_tier` when the agent has an ingress-sensitive tool (write, pay or
+  **unclassified**: a tool nobody verified read-only) and the policy's `approval.high` groups have not
+  all approved the version, whatever tier it was admitted at; `409` for a malformed admission record;
+  `503` for a missing or unreadable policy. The row write is bound to the judgement: the trigger's
+  transaction condition-checks the exact policy item it read, so a policy changed or deleted in between
+  is `409` and nothing is created. Schedule, EventBridge and S3 triggers are never judged, and with the
+  flag off the route is unchanged (`services/trigger_admission.py`, `TriggerStore.create_trigger`).
+- **Classifier version 3 / admission version 2.** The public-ingress rule now fires for any tool that
+  is not verified read-only (unclassified included), and the recorded decision carries
+  `ingressSensitiveTools` so a trigger attached later is judged by the same fact.
 - **Admin → Workspaces** panel in the Agent Registry modal (admins, flag on): list every policy, create
   one from a preset (*Locked-down*, *Standard*, *Developer*), edit, delete after confirmation, and a
-  warning when no `default` policy exists. The preset documents are snapshotted into the backend's
-  fixtures and validated there; every gallery template deploys under *Standard*.
+  warning when no `default` policy exists ("Create the default policy" starts from *Standard*). Typing
+  the approver and security groups fills the medium and high routing; a policy whose medium or high
+  routing is empty cannot be saved without an explicit auto-approve acknowledgement. The preset
+  documents are snapshotted into the backend's fixtures and validated there; every gallery template
+  deploys under *Standard*.
 - **Tier badge** on the Versions list: the admitted tier, the classifier's reasons and the approver
   groups still pending.
 - Trust model: builder `riskClass` / `dataClass` labels count only in a workspace with

@@ -156,10 +156,34 @@ def _decimals_to_numbers(value: Any) -> Any:
     return value
 
 
+class PolicyFence(BaseModel):
+    """The exact stored policy item a judgement was made against, so a later write can be conditioned
+    on it. ``document`` is the item's ``policy`` attribute exactly as read (``Decimal`` numbers included),
+    so a DynamoDB equality condition holds if and only if the policy has not changed since the read."""
+
+    table_name: str
+    key: dict[str, str]
+    document: dict[str, Any]
+
+    def condition_check(self) -> dict[str, Any]:
+        """A ``TransactWriteItems`` ``ConditionCheck`` action that cancels the transaction unless the
+        policy is still exactly this document (a deleted policy fails it too)."""
+        return {
+            "ConditionCheck": {
+                "TableName": self.table_name,
+                "Key": dict(self.key),
+                "ConditionExpression": "#policy = :policy",
+                "ExpressionAttributeNames": {"#policy": "policy"},
+                "ExpressionAttributeValues": {":policy": self.document},
+            }
+        }
+
+
 class WorkspacePolicyStore:
     """CRUD over workspace policy items in the shared org-config table."""
 
     def __init__(self, table_name: str, region: str) -> None:
+        self._table_name = table_name
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
 
     # -- boto3 wrappers (the only AWS calls in this module) -------------------------------------
@@ -200,6 +224,16 @@ class WorkspacePolicyStore:
     def get(self, org_id: str, workspace_id: str) -> WorkspacePolicy | None:
         item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
         return policy_from_item(item) if item else None
+
+    def get_snapshot(self, org_id: str, workspace_id: str) -> tuple[WorkspacePolicy, PolicyFence] | None:
+        """The policy AND a fence on the exact item it was read from, for a write that must be
+        conditioned on the policy not having changed since the judgement (strongly consistent read)."""
+        key = {"org_id": org_id, "sk": policy_sort_key(workspace_id)}
+        item = self._get_item(key)
+        if not item:
+            return None
+        policy = policy_from_item(item)
+        return policy, PolicyFence(table_name=self._table_name, key=key, document=item["policy"])
 
     def delete(self, org_id: str, workspace_id: str) -> None:
         self._delete_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})

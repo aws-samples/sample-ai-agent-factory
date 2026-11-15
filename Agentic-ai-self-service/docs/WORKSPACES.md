@@ -103,7 +103,7 @@ names no flow carries no classifications.
 
 ## The risk classifier
 
-Pure and deterministic (`services/risk_classifier.py`, version 2). Each rule is a floor; the
+Pure and deterministic (`services/risk_classifier.py`, version 3). Each rule is a floor; the
 budget rule is a modifier applied last. Reasons are returned in this order.
 
 | Rule | Tier |
@@ -112,7 +112,7 @@ budget rule is a modifier applied last. Reasons are returned in this order.
 | a `write` tool | medium |
 | a non-Bedrock model provider | medium |
 | `confidential` or `pii` knowledge | high |
-| public ingress (webhook / email trigger) **and** a write or pay tool | high |
+| public ingress (webhook / email trigger) **and** a tool that is not verified read-only (write, pay **or unclassified**) | high |
 | custom code | medium |
 | an unclassified tool or knowledge item | `defaults.unclassifiedRiskTier` (medium unless lowered) |
 | per-agent budget above the workspace default | one tier higher |
@@ -177,18 +177,26 @@ secret), so a refusal creates nothing.
 |---|---|---|
 | `cron`, `eventbridge`, `s3` | any | Allowed without reading anything: the platform's own plumbing never changes the tier. With the flag off, every trigger takes this path. |
 | `webhook` | deployed without admission (flag off at the time) | `403 policy_denied` / `version_not_admitted`: its tools were never classified, so the combination cannot be judged. Redeploy under the policy first. |
-| `webhook` | admitted, no write or pay tool | Allowed; the tier is unchanged. |
-| `webhook` | admitted **high** | Allowed; nothing changes. |
-| `webhook` | admitted low or medium **with** a write or pay tool | The combination is **high** (`public_ingress_with_write`). Allowed only when every group `approval.high` names has already approved this version (an empty list auto-approves); otherwise `403 policy_denied` / `trigger_raises_risk_tier` naming the pending groups. |
+| `webhook` | admission older than version 2 | `403 policy_denied` / `admission_predates_ingress_rule`: the decision does not record which tools public ingress may reach. Redeploy under the policy first. |
+| `webhook` | admitted, every tool **verified read-only** | Allowed; the tier is unchanged and no policy is read. |
+| `webhook` | admitted at **any** tier (high included) **with** an ingress-sensitive tool | The combination is **high** (`public_ingress_with_write`). The workspace's **current** policy is read; the attachment is allowed only when every group its `approval.high` names has already approved this version (an empty list auto-approves); otherwise `403 policy_denied` / `trigger_raises_risk_tier` naming the pending groups. A policy tightened after the deploy therefore applies, and a deleted or unreadable policy is `503`, never permission. |
 
-The write-or-pay fact is read from the recorded decision's reasons (`write_tool` / `pay_tool`): the
-same predicate the classifier's ingress rule evaluates, pinned against it by test. A present but
-malformed admission record is `409`, never read as "no requirement"; a policy that cannot be read for
-the admitted workspace is `503`. Note the consequence until specs can declare triggers (Phase 3):
-approvers can only approve the groups a version's admission routed to, so a medium agent in a
-workspace whose `approval.high` names a group its medium admission did not cannot get a webhook at
-all; the path is a workspace whose policy fits the agent's real ingress. Slack and Teams channel
-routes do not exist yet; when they do, they go through this gate.
+A tool is **ingress-sensitive** when it is not verified read-only: `write`, `pay`, or **unclassified**
+(a Lambda nobody classified may mutate anything, and exposing it to the internet is not a read-only
+act; a builder's `read` label counts only in a workspace that trusts builder classifications). The
+admission decision records the list (`ingressSensitiveTools`, admission version 2) from the same
+classifier helper the ingress rule uses, so the two cannot disagree; a test pins them against each
+other on every gallery template.
+
+The judgement is a snapshot, so the row write is **bound to it**: the trigger's `TransactWriteItems`
+also condition-checks the exact policy item the judgement read. A policy changed or deleted between
+the judgement and the write cancels the transaction (`409`, nothing created); a webhook that needed
+no policy read (read-only agent) carries no such condition. A present but malformed admission record
+is `409`, never read as "no requirement". Note the consequence until specs can declare triggers
+(Phase 3): approvers can only approve the groups a version's admission routed to, so an agent whose
+`approval.high` names a group its admission did not cannot get a webhook at all; the path is a
+workspace whose policy fits the agent's real ingress. Slack and Teams channel routes do not exist yet;
+when they do, they go through this gate.
 
 ```json
 {
@@ -219,9 +227,14 @@ every policy with who it governs, what it allows and who approves; creates or ed
 | **Developer** | Nothing constrained, every tier auto-approved, builders' own classifications trusted, unclassified floored to low. |
 
 The approver and security groups are inputs the admin types (a group nobody holds would gate a tier
-forever), and every field can be edited after a preset is applied. The three documents are a
-contract: the frontend snapshots them to `backend/tests/fixtures/workspace_policy/presets/` and
-`backend/tests/test_workspace_presets.py` validates each against the schema and pins what it admits.
+forever); typing them fills the medium and high routing, before or after a preset is applied, and
+every field can still be edited. The panel **refuses to save** a policy whose medium or high routing
+is empty unless the admin ticks *This workspace auto-approves every tier* (the Developer preset ticks
+it, because that is what it means), and "Create the default policy" starts from Standard rather than
+from an unconstrained document, so the org-wide default cannot become "everything auto-approves" by
+accident. The three preset documents are a contract: the frontend snapshots them to
+`backend/tests/fixtures/workspace_policy/presets/` and `backend/tests/test_workspace_presets.py`
+validates each against the schema and pins what it admits.
 
 Every version in the deploy panel's **Versions** list carries a **tier badge** (`low` / `medium` /
 `high risk`, the classifier's reasons in its tooltip, and the groups whose approval is still pending);
@@ -248,7 +261,7 @@ Reason codes: `provider_not_allowed`, `model_not_allowed`, `connector_not_allowe
 `tool_risk_class_not_allowed`, `tool_unclassified`, `data_class_not_allowed`, `knowledge_unclassified`,
 `channel_not_allowed`, `region_not_allowed`, `budget_undeclared`, `budget_exceeds_workspace`,
 `workspace_not_member`, `workspace_selection_required`; for a trigger attachment,
-`version_not_admitted` and `trigger_raises_risk_tier`. Every refusal is audited like any other write
+`version_not_admitted`, `admission_predates_ingress_rule` and `trigger_raises_risk_tier`. Every refusal is audited like any other write
 to `/api/deploy` or `/api/runtimes/{name}/triggers`.
 
 ## Where it lives

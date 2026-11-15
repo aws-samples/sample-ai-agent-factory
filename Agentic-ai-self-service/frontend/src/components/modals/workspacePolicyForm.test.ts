@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTO_APPROVE_ACKNOWLEDGEMENT,
   documentFromForm,
   formFromDocument,
   parseBudget,
   presetInputFromForm,
+  routingFromReviewers,
   splitList,
   summarizeAllowed,
   summarizeApproval,
@@ -23,10 +25,34 @@ describe('workspace policy form conversions', () => {
   it('round-trips every preset document and the empty policy through the form', () => {
     for (const preset of WORKSPACE_PRESETS) {
       const document = applyPreset(preset.id, INPUT);
-      expect(documentFromForm(formFromDocument(document))).toEqual(document);
+      // Developer auto-approves every tier on purpose, which the form requires an admin to acknowledge.
+      const form = { ...formFromDocument(document), autoApproveAcknowledged: preset.id === 'developer' };
+      expect(documentFromForm(form)).toEqual(document);
     }
     const empty = emptyPolicy('x', 'X');
-    expect(documentFromForm(formFromDocument(empty))).toEqual(empty);
+    expect(documentFromForm({ ...formFromDocument(empty), autoApproveAcknowledged: true })).toEqual(empty);
+  });
+
+  it('refuses to save an empty medium or high routing unless auto-approval is acknowledged', () => {
+    const form = formFromDocument(emptyPolicy('x', 'X'));
+    expect(form.autoApproveAcknowledged).toBe(false);
+    expect(() => documentFromForm(form)).toThrow(AUTO_APPROVE_ACKNOWLEDGEMENT);
+    expect(() => documentFromForm({ ...form, approvalMedium: 'g-approvers' })).toThrow(/high risk has no approver groups|Medium or high/);
+    expect(documentFromForm({ ...form, approvalMedium: 'g-approvers', approvalHigh: 'g-security' }).approval).toEqual({
+      low: [],
+      medium: ['g-approvers'],
+      high: ['g-security'],
+    });
+    expect(documentFromForm({ ...form, autoApproveAcknowledged: true }).approval).toEqual({ low: [], medium: [], high: [] });
+  });
+
+  it('derives the medium and high routing from the reviewer inputs', () => {
+    expect(routingFromReviewers('g-approvers', 'g-security')).toEqual({
+      approvalMedium: 'g-approvers',
+      approvalHigh: 'g-security, g-approvers',
+    });
+    expect(routingFromReviewers('g-a, g-a', '')).toEqual({ approvalMedium: 'g-a', approvalHigh: 'g-a' });
+    expect(routingFromReviewers('', '')).toEqual({ approvalMedium: '', approvalHigh: '' });
   });
 
   it('splits typed lists on commas, semicolons and whitespace, de-duplicating in order', () => {
@@ -65,7 +91,10 @@ describe('workspace policy form conversions', () => {
     expect(formFromDocument(document).platformVersion).toBe('');
     document.defaults.platformVersion = 'V2';
     expect(formFromDocument(document).platformVersion).toBe('V2');
-    expect(documentFromForm({ ...formFromDocument(document), platformVersion: '' }).defaults.platformVersion).toBeNull();
+    expect(
+      documentFromForm({ ...formFromDocument(document), platformVersion: '', autoApproveAcknowledged: true }).defaults
+        .platformVersion,
+    ).toBeNull();
   });
 
   it('summarises the allow-lists and the approval routing for the list view', () => {
