@@ -53,9 +53,7 @@ def _rows(table_name: str) -> list[dict]:
 
 
 def _snapshot(pstore: WorkspacePolicyStore):
-    pstore.put(
-        ORG, _policy(approval={"medium": [], "high": []}, budgets={"maxAgentMonthlyUsd": 100.5}), expected_revision=None
-    )
+    pstore.put(ORG, _policy(approval={"medium": [], "high": []}, budgets={"maxAgentMonthlyUsd": 100.5}), expected=None)
     snapshot = pstore.get_snapshot(ORG, "finance")
     assert snapshot is not None
     return snapshot
@@ -89,7 +87,7 @@ def test_a_policy_changed_after_the_judgement_cancels_the_write(stores, policy_s
     policy_store.put(
         ORG,
         _policy(approval={"medium": [], "high": ["g-security"]}, budgets={"maxAgentMonthlyUsd": 100.5}),
-        expected_revision=1,
+        expected=policy_store.read(ORG, "finance").version,
     )
     with pytest.raises(TriggerPolicyConflict):
         tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON, policy_fence=fence)
@@ -124,7 +122,7 @@ def test_a_stale_claim_is_the_parent_conflict_not_a_policy_conflict(stores, poli
 def test_without_a_fence_the_transaction_is_the_three_action_one_it_always_was(stores, policy_store):
     vstore, sstore, tstore = stores
     seed(vstore, sstore)
-    policy_store.put(ORG, _policy(), expected_revision=None)
+    policy_store.put(ORG, _policy(), expected=None)
     policy_store.delete(ORG, "finance")  # no policy at all: a flag-off or non-ingress create does not care
     trig = tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON)
     assert [row["trigger_id"] for row in _rows("Triggers")] == [trig.trigger_id]

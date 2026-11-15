@@ -275,8 +275,8 @@ export {
   putWorkspacePolicy,
   deleteWorkspacePolicy,
   isRevisionConflict,
-  currentRevisionOf,
-  revisionFromEtag,
+  currentVersionOf,
+  versionFromEtag,
   preconditionHeaders,
   POLICY_REVISION_CONFLICT_STATUS,
   type PutPrecondition,
@@ -453,12 +453,12 @@ export class ApiClient {
     return listWorkspacePolicies(this.baseUrl);
   }
 
-  /** The policy with the revision (`ETag`) a later save must name. */
+  /** The policy with the version token (`ETag`) a later save must name. */
   async getWorkspacePolicy(workspaceId: string): Promise<StoredWorkspacePolicy> {
     return getWorkspacePolicy(workspaceId, this.baseUrl);
   }
 
-  /** `'create'` for a policy that must not exist yet; `{ revision }` to replace the one that was read. */
+  /** `'create'` for a policy that must not exist yet; `{ version }` to replace exactly the one that was read. */
   async putWorkspacePolicy(policy: WorkspacePolicyDocument, precondition: PutPrecondition): Promise<StoredWorkspacePolicy> {
     return putWorkspacePolicy(policy, precondition, this.baseUrl);
   }

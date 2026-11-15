@@ -7,12 +7,13 @@
  * Every route is behind the `workspacePolicy` feature flag (off: the exact 404 of a nonexistent
  * route) and the `admin` scope; the panel that uses this module is gated the same way.
  *
- * A policy is never replaced blind. Every stored policy has a revision, served as the `ETag` of a GET
- * or PUT (a quoted integer). A PUT says what it is based on: `If-Match: "<revision>"` to replace the
- * policy as read, or `If-None-Match: *` to create one that does not exist yet. A stale revision is
- * `412 policy_revision_conflict` (someone else saved first; the caller re-reads and reapplies) and a PUT
- * without either header is `428`. This module carries the revision alongside the document and fails
- * closed when the server does not return one: without it a later save could not be made safely.
+ * A policy is never replaced blind. Every stored policy has a version, served as the `ETag` of a GET
+ * or PUT: an opaque quoted token this module passes back exactly as received. A PUT says what it is
+ * based on: `If-Match: "<version>"` to replace the policy as read, or `If-None-Match: *` to create one
+ * that does not exist yet. A stale version is `412 policy_revision_conflict` (someone else saved first,
+ * or the policy was deleted and recreated; the caller re-reads and reapplies) and a PUT without either
+ * header is `428`. This module carries the version alongside the document and fails closed when the
+ * server does not return one: without it a later save could not be made safely.
  */
 
 import { authFetch } from '../../auth/authFetch';
@@ -84,36 +85,40 @@ export interface WorkspacePolicyDocument {
   defaults: WorkspaceDefaults;
 }
 
-/** A policy as the server holds it: the document and the revision a replacement must name. */
+/** A policy as the server holds it: the document and the version token a replacement must name. */
 export interface StoredWorkspacePolicy {
   policy: WorkspacePolicyDocument;
-  revision: number;
+  /** The `ETag` token, opaque: passed back exactly as received. */
+  version: string;
 }
 
 /**
  * What a PUT claims the server holds: `'create'` (the policy must not exist yet, `If-None-Match: *`)
- * or the revision the form was loaded from (`If-Match`).
+ * or the version the form was loaded from (`If-Match`).
  */
-export type PutPrecondition = 'create' | { revision: number };
+export type PutPrecondition = 'create' | { version: string };
 
 /** The org-wide policy that governs everyone who is in no configured workspace. */
 export const DEFAULT_WORKSPACE_ID = 'default';
 
-/** HTTP status of a stale save: the policy changed since it was read (or now exists / no longer exists). */
+/** HTTP status of a stale save: the policy changed, was recreated, now exists or no longer exists. */
 export const POLICY_REVISION_CONFLICT_STATUS = 412;
 
 // ============================================================================
-// Revisions
+// Versions
 // ============================================================================
 
 /**
- * The revision an `ETag` header names, or `null` when the header is absent or not a quoted integer.
- * The backend serves strong validators only (`"3"`); a bare integer is accepted too.
+ * The version token an `ETag` header carries, or `null` when the header is absent, weak (`W/`) or
+ * empty. The token is opaque: it is only ever sent back as it came.
  */
-export function revisionFromEtag(etag: string | null): number | null {
+export function versionFromEtag(etag: string | null): string | null {
   if (etag === null) return null;
-  const match = /^\s*"?(\d+)"?\s*$/.exec(etag);
-  return match ? Number(match[1]) : null;
+  const trimmed = etag.trim();
+  if (trimmed.startsWith('W/')) return null;
+  const match = /^"([^"\s]+)"$|^([^"\s]+)$/.exec(trimmed);
+  if (!match) return null;
+  return match[1] ?? match[2];
 }
 
 /** The precondition header a PUT carries for `precondition`. */
@@ -121,10 +126,10 @@ export function preconditionHeaders(precondition: PutPrecondition): Record<strin
   if (precondition === 'create') {
     return { 'If-None-Match': '*' };
   }
-  if (!Number.isInteger(precondition.revision) || precondition.revision < 0) {
-    throw new Error(`A policy revision is a non-negative integer, not ${String(precondition.revision)}`);
+  if (!/^[^"\s]+$/.test(precondition.version)) {
+    throw new Error(`A policy version is the ETag token as served, not ${JSON.stringify(precondition.version)}`);
   }
-  return { 'If-Match': `"${precondition.revision}"` };
+  return { 'If-Match': `"${precondition.version}"` };
 }
 
 /** True when `error` is the backend's refusal of a stale or misdirected save (`412`). */
@@ -133,27 +138,27 @@ export function isRevisionConflict(error: unknown): error is ApiError {
 }
 
 /**
- * The revision the server holds now, as reported by a `412` body (`detail.currentRevision`), or `null`
+ * The version the server holds now, as reported by a `412` body (`detail.currentVersion`), or `null`
  * when the policy no longer exists or the body did not say.
  */
-export function currentRevisionOf(error: unknown): number | null {
+export function currentVersionOf(error: unknown): string | null {
   if (!isRevisionConflict(error) || typeof error.details !== 'object' || error.details === null) return null;
   const detail = (error.details as { detail?: unknown }).detail;
   if (typeof detail !== 'object' || detail === null) return null;
-  const current = (detail as { currentRevision?: unknown }).currentRevision;
-  return typeof current === 'number' && Number.isInteger(current) ? current : null;
+  const current = (detail as { currentVersion?: unknown }).currentVersion;
+  return typeof current === 'string' && current.length > 0 ? current : null;
 }
 
 async function storedPolicyFrom(response: Response): Promise<StoredWorkspacePolicy> {
   if (!response.ok) {
     throw await apiErrorFromResponse(response);
   }
-  const revision = revisionFromEtag(response.headers.get('ETag'));
-  if (revision === null) {
-    // Fail closed: a document whose revision is unknown cannot be saved back safely, so do not hand it out.
+  const version = versionFromEtag(response.headers.get('ETag'));
+  if (version === null) {
+    // Fail closed: a document whose version is unknown cannot be saved back safely, so do not hand it out.
     const error: ApiError = {
       message:
-        'The server did not return the policy revision (ETag), so this policy cannot be edited safely. ' +
+        'The server did not return the policy version (ETag), so this policy cannot be edited safely. ' +
         'Reload; if it persists, the API is not exposing the ETag header.',
       status: response.status,
     };
@@ -164,7 +169,7 @@ async function storedPolicyFrom(response: Response): Promise<StoredWorkspacePoli
     const error: ApiError = { message: 'Unexpected response from server', status: response.status };
     throw error;
   }
-  return { policy: (await response.json()) as WorkspacePolicyDocument, revision };
+  return { policy: (await response.json()) as WorkspacePolicyDocument, version };
 }
 
 // ============================================================================
@@ -175,7 +180,7 @@ export async function listWorkspacePolicies(baseUrl: string = API_BASE_URL): Pro
   return apiRequest<WorkspacePolicyDocument[]>(`/api/workspaces/policies`, {}, baseUrl);
 }
 
-/** Read one policy with the revision a later save must name (the `ETag`). */
+/** Read one policy with the version a later save must name (the `ETag`). */
 export async function getWorkspacePolicy(
   workspaceId: string,
   baseUrl: string = API_BASE_URL,
@@ -187,7 +192,7 @@ export async function getWorkspacePolicy(
 }
 
 /**
- * Create (`'create'`) or replace (`{ revision }`) a policy. The path's id is the document's; the backend
+ * Create (`'create'`) or replace (`{ version }`) a policy. The path's id is the document's; the backend
  * refuses a mismatch (400), a stale or misdirected precondition (412) and a missing one (428).
  */
 export async function putWorkspacePolicy(

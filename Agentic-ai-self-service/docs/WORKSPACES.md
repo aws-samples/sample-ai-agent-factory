@@ -16,16 +16,20 @@ the same `404` as a nonexistent route.
 `PUT /api/workspaces/{workspaceId}/policy` (scope `admin`) stores one policy per workspace. The
 schema is strict: an unknown key is `422`, and so is `unclassified` inside an allow-list.
 
-A policy is **never replaced blind**. Every stored policy has a revision, served as the `ETag` of a
-`GET` or `PUT` (a quoted integer). A `PUT` says what it is based on: `If-Match: "<revision>"` to replace
-the policy as it was read, or `If-None-Match: *` to create one that does not exist yet. The store
-enforces the precondition in the same DynamoDB write, so two admins editing the same policy cannot
-overwrite each other: the second save is `412 policy_revision_conflict` (the body names
-`expectedRevision` and `currentRevision`) and nothing changes, which is what keeps a form opened before a
-colleague added `g-security` to the high routing from silently removing it again. A `PUT` with neither
-header is `428 precondition_required`; `If-Match: *`, a weak validator, a non-numeric revision or both
-headers at once is `400`. Policies written before revisions existed read as revision `0` and can be
-replaced exactly once as such.
+A policy is **never replaced blind**. Every stored policy has a version, served as the `ETag` of a
+`GET` or `PUT`: an opaque quoted token (`<incarnation>.<revision>`, where the incarnation is a random id
+minted when the policy is created and the revision counts the writes within it). A `PUT` says what it is
+based on: `If-Match: "<token>"` to replace the policy exactly as it was read, or `If-None-Match: *` to
+create one that does not exist yet. The store enforces the precondition on both attributes in the same
+DynamoDB write, so two admins editing the same policy cannot overwrite each other: the second save is
+`412 policy_revision_conflict` (the body names `expectedVersion` and `currentVersion`) and nothing
+changes, which is what keeps a form opened before a colleague added `g-security` to the high routing from
+silently removing it again. Because a delete followed by a create mints a new incarnation, a form opened
+before the deletion cannot overwrite the recreated policy either (a plain counter would restart at 1 and
+let it; the `412` then says the policy was deleted and recreated). A `PUT` with neither header is
+`428 precondition_required`; `If-Match: *`, a weak validator, a token this store never issued or both
+headers at once is `400`. Policies written before versions existed read as the legacy token `"0"` and can
+be claimed exactly once as such.
 
 ```json
 {
@@ -259,11 +263,11 @@ cannot become "everything auto-approves" by accident. The three preset documents
 `backend/tests/fixtures/workspace_policy/presets/` and `backend/tests/test_workspace_presets.py`
 validates each against the schema and pins what it admits.
 
-**Edit** fetches the policy as the server holds it now, with its revision, and the save names that
-revision (`If-Match`); a new policy is created only if none exists (`If-None-Match: *`). When a
-colleague saved first, the backend's `412` is shown verbatim, the admin's form is kept, and **Reload
-current version** fetches the colleague's version so the change can be reapplied on top of it instead
-of over it. A response without a revision is refused rather than edited.
+**Edit** fetches the policy as the server holds it now, with its version token, and the save names that
+version (`If-Match`); a new policy is created only if none exists (`If-None-Match: *`). When a colleague
+saved first, or deleted and recreated the policy, the backend's `412` is shown verbatim, the admin's form
+is kept, and **Reload current version** fetches the colleague's version so the change can be reapplied on
+top of it instead of over it. A response without a version is refused rather than edited.
 
 Every version in the deploy panel's **Versions** list carries a **tier badge** (`low` / `medium` /
 `high risk`, the classifier's reasons in its tooltip, and the groups whose approval is still pending);
@@ -298,8 +302,8 @@ to `/api/deploy`, `/api/runtimes/{name}/triggers` or `/api/workspaces/{id}/polic
 ## Where it lives
 
 - Policies: the shared org-config table (`TAG_POLICY_TABLE_NAME`), items `WORKSPACE#<id>#POLICY`
-  under `org_id` with a `revision` counter; strongly consistent reads; every write conditional on the
-  revision it was based on; floats stored as `Decimal`. No new table or IAM grant.
+  under `org_id` with an `incarnation` (minted at create) and a `revision` counter; strongly consistent
+  reads; every write conditional on both; floats stored as `Decimal`. No new table or IAM grant.
 - Routes: `/api/workspaces/{proxy+}` → the **deployment** Lambda (`routers/workspace_policies.py`);
   the exact `GET /api/workspaces` (workflow sharing) stays on the workflow Lambda.
 - Code: `schemas/workspace_policy.py`, `services/risk_classifier.py`, `services/admission_spec.py`,

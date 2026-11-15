@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import re
 from typing import Any
 
 import pytest
@@ -51,6 +52,8 @@ spy = pytest.fixture(_gate_spy.__wrapped__)
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "spec_v2" / "templates"
 FLOW_ID = "flow-finance-1"
+#: The version hand-built policy items carry in these tests (any valid incarnation will do).
+_VERSION = wps.PolicyVersion(incarnation="0123456789abcdef", revision=1)
 
 
 # --------------------------------------------------------------------------- builders
@@ -342,12 +345,20 @@ class _FakeTable:
         for alias, name in (ExpressionAttributeNames or {}).items():
             expression = expression.replace(alias, name)
         current = self.items.get((Item["org_id"], Item["sk"]))
+        values = ExpressionAttributeValues or {}
         if expression == "attribute_not_exists(sk)":
             holds = current is None
-        elif expression == "attribute_exists(sk) AND attribute_not_exists(revision)":
-            holds = current is not None and "revision" not in current
-        elif expression == "revision = :expected":
-            holds = current is not None and current.get("revision") == (ExpressionAttributeValues or {})[":expected"]
+        elif (
+            expression
+            == "attribute_exists(sk) AND attribute_not_exists(revision) AND attribute_not_exists(incarnation)"
+        ):
+            holds = current is not None and "revision" not in current and "incarnation" not in current
+        elif expression == "incarnation = :inc AND revision = :rev":
+            holds = (
+                current is not None
+                and current.get("incarnation") == values[":inc"]
+                and current.get("revision") == values[":rev"]
+            )
         else:
             raise AssertionError(f"unexpected policy write condition {ConditionExpression!r}")
         if not holds:
@@ -395,10 +406,10 @@ def table(monkeypatch) -> _FakeTable:
 
 def test_policy_items_round_trip_through_the_org_config_table_shape(table):
     policy = _policy(allowed={"connectors": ["slack"]}, approval={"high": ["g-admins-security"]})
-    table.store.put("default", policy, expected_revision=None)
+    table.store.put("default", policy, expected=None)
     item = table.items[("default", "WORKSPACE#finance#POLICY")]
-    assert set(item) == {"org_id", "sk", "revision", "policy"}
-    assert item["revision"] == 1
+    assert set(item) == {"org_id", "sk", "revision", "incarnation", "policy"}
+    assert item["revision"] == 1 and re.fullmatch(r"[0-9a-f]{16}", item["incarnation"])
     assert item["policy"]["allowed"]["connectors"] == ["slack"]  # camelCase document, by alias
     assert table.store.get("default", "finance") == policy
     assert wps.workspace_id_from_sort_key(item["sk"]) == "finance"
@@ -429,11 +440,11 @@ def test_a_corrupt_stored_policy_refuses_rather_than_admitting_on_it(table):
 
 
 def test_list_paginates_sorts_and_skips_foreign_items(table):
-    table.store.put("default", _policy(workspaceId="zeta", name="Z"), expected_revision=None)
-    table.store.put("default", _policy(workspaceId="alpha", name="A"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="zeta", name="Z"), expected=None)
+    table.store.put("default", _policy(workspaceId="alpha", name="A"), expected=None)
     table.items[("default", "APPROVAL#x")] = {"org_id": "default", "sk": "APPROVAL#x", "name": "x"}
     table.items[("other-org", "WORKSPACE#alpha#POLICY")] = wps.policy_to_item(
-        "other-org", _policy(workspaceId="alpha", name="O"), 1
+        "other-org", _policy(workspaceId="alpha", name="O"), _VERSION
     )
     assert [p.workspace_id for p in table.store.list("default")] == ["alpha", "zeta"]
 
@@ -442,9 +453,9 @@ def test_resolution_follows_the_deployers_memberships_not_the_spec(table):
     """A member of exactly one workspace is governed by it however the spec is written (named,
     unnamed, naming an unconfigured workspace, or naming ``default``), so dropping the flow or clearing
     ``workspaceId`` is not an escape to the org default; a caller in no workspace gets the default."""
-    table.store.put("default", _policy(workspaceId="default", name="Org default"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="default", name="Org default"), expected=None)
     table.store.put(
-        "default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]), expected_revision=None
+        "default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]), expected=None
     )
     finance = table.store.get("default", "finance")
     member = ["g-users-default", "g-finance"]
@@ -456,11 +467,11 @@ def test_resolution_follows_the_deployers_memberships_not_the_spec(table):
 
 
 def test_a_member_of_several_workspaces_must_name_one_of_them(table):
-    table.store.put("default", _policy(workspaceId="default", name="Org default"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="default", name="Org default"), expected=None)
     table.store.put(
-        "default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]), expected_revision=None
+        "default", _policy(workspaceId="finance", name="Finance", memberGroups=["g-finance"]), expected=None
     )
-    table.store.put("default", _policy(workspaceId="hr", name="HR", memberGroups=["g-hr"]), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="hr", name="HR", memberGroups=["g-hr"]), expected=None)
     both = ["g-finance", "g-hr"]
     assert wps.resolve_policy(table.store, "default", "hr", both)[0].workspace_id == "hr"
     assert wps.resolve_policy(table.store, "default", "finance", both)[0].workspace_id == "finance"
@@ -477,16 +488,16 @@ def test_a_spec_cannot_select_a_workspace_its_deployer_is_not_a_member_of(table)
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Locked", allowed={"providers": ["bedrock"]}),
-        expected_revision=None,
+        expected=None,
     )
     table.store.put(
-        "default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]), expected_revision=None
+        "default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]), expected=None
     )
     with pytest.raises(wps.WorkspaceMembershipError) as excinfo:
         wps.resolve_policy(table.store, "default", "devs", ["g-users-default"])
     assert excinfo.value.workspace_id == "devs"
     # A workspace with no member groups at all admits nobody by name (only default is open to all).
-    table.store.put("default", _policy(workspaceId="closed", name="Closed"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="closed", name="Closed"), expected=None)
     with pytest.raises(wps.WorkspaceMembershipError):
         wps.resolve_policy(table.store, "default", "closed", ["g-admins-super"])
     assert wps.is_member(table.store.get("default", "default"), []) is True
@@ -499,7 +510,7 @@ def test_a_spec_cannot_select_a_workspace_its_deployer_is_not_a_member_of(table)
 def test_resolution_is_unavailable_without_a_default_policy_or_with_a_failing_store(table):
     with pytest.raises(wps.WorkspacePolicyUnavailableError):
         wps.resolve_policy(table.store, "default", "finance")
-    table.store.put("default", _policy(workspaceId="default", name="D"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="default", name="D"), expected=None)
     table.fail = RuntimeError("ProvisionedThroughputExceededException tenant-sensitive")
     with pytest.raises(wps.WorkspacePolicyUnavailableError) as excinfo:
         wps.resolve_policy(table.store, "default", "finance")
@@ -621,7 +632,7 @@ def test_a_business_persona_adding_jira_in_a_read_only_workspace_is_the_exact_40
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Read-only", allowed={"connectors": ["slack"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_deploy_body())
@@ -642,7 +653,7 @@ def test_the_same_attempt_through_the_raw_api_is_the_same_403(spy, owned_flow, t
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Read-only", allowed={"connectors": ["slack"]}),
-        expected_revision=None,
+        expected=None,
     )
     raw = {
         "nodeId": "node-1",
@@ -668,7 +679,7 @@ def test_an_unclassified_tool_in_a_risk_constrained_workspace_is_refused_with_it
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Classified only", allowed={"toolRiskClasses": ["read"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post(
@@ -692,7 +703,7 @@ def test_an_admitted_canvas_deploys_and_carries_its_tier(spy, owned_flow, table,
             allowed={"connectors": ["jira", "slack"]},
             approval={"medium": ["g-approvers"]},
         ),
-        expected_revision=None,
+        expected=None,
     )
     seen: list[dict | None] = []
     original = dh._reject_workspace_policy_violation
@@ -741,10 +752,10 @@ def test_an_unreadable_policy_store_fails_closed_without_echoing_the_error(spy, 
 def test_a_flow_less_deploy_is_governed_by_the_default_policy_too(spy, table, monkeypatch):
     """No flowId (an unsaved canvas): the request's own provider and Region are still judged."""
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put(
+    first = table.store.put(
         "default",
         _policy(workspaceId="default", name="Bedrock only", allowed={"providers": ["bedrock"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     admitted = _client().post("/api/deploy", json=_body())
@@ -754,7 +765,7 @@ def test_a_flow_less_deploy_is_governed_by_the_default_policy_too(spy, table, mo
     table.store.put(
         "default",
         _policy(workspaceId="default", name="No Bedrock", allowed={"providers": ["openai"]}),
-        expected_revision=1,
+        expected=first.version,
     )
     refused = _client().post("/api/deploy", json=_body())
     assert refused.status_code == 403
@@ -798,7 +809,7 @@ def _admin_client(monkeypatch, *, flags: dict[str, bool], groups=("g-admins-supe
 
 
 _POLICY_DOC = {"workspaceId": "finance", "name": "Finance", "allowed": {"connectors": ["slack"]}}
-#: The precondition of a PUT that creates a policy; replacements name the revision they read
+#: The precondition of a PUT that creates a policy; replacements name the version they read
 #: (``If-Match``). The two-editor and precondition cases live in ``test_workspace_policy_revisions``.
 _CREATE = {"If-None-Match": "*"}
 
@@ -835,10 +846,10 @@ def test_an_admin_can_put_get_list_and_delete_a_policy(table, monkeypatch):
     assert put.status_code == 200, put.text
     assert put.json()["allowed"]["connectors"] == ["slack"]
     assert put.json()["approval"] == {"low": [], "medium": [], "high": []}
-    assert put.headers["ETag"] == '"1"', "the revision a replacement must name"
+    assert re.fullmatch(r'"[0-9a-f]{16}\.1"', put.headers["ETag"]), "the version a replacement must name"
     got = client.get("/api/workspaces/finance/policy")
     assert got.json() == put.json()
-    assert got.headers["ETag"] == '"1"'
+    assert got.headers["ETag"] == put.headers["ETag"]
     assert [p["workspaceId"] for p in client.get("/api/workspaces/policies").json()] == ["finance"]
     assert client.delete("/api/workspaces/finance/policy").status_code == 204
     assert client.delete("/api/workspaces/finance/policy").status_code == 204  # idempotent
@@ -907,7 +918,7 @@ def test_admission_judges_the_request_body_not_the_saved_flow(spy, monkeypatch, 
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Read-only", allowed={"connectors": ["slack"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
@@ -928,7 +939,7 @@ def test_a_flow_less_body_is_judged_on_everything_it_carries(spy, table, monkeyp
             name="Locked",
             allowed={"connectors": ["slack"], "toolRiskClasses": ["read"], "dataClasses": ["public"]},
         ),
-        expected_revision=None,
+        expected=None,
     )
     body = _body(
         connectors=[JIRA],
@@ -985,7 +996,7 @@ def test_a_write_connector_labelled_read_on_the_canvas_is_still_refused_by_a_rea
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Read tools only", allowed={"toolRiskClasses": ["read"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
@@ -1030,10 +1041,10 @@ def test_a_canvas_cannot_pick_a_workspace_its_deployer_is_not_in(spy, monkeypatc
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Locked", allowed={"connectors": ["slack"]}),
-        expected_revision=None,
+        expected=None,
     )
     table.store.put(
-        "default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]), expected_revision=None
+        "default", _policy(workspaceId="devs", name="Developers", memberGroups=["g-developers"]), expected=None
     )
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
@@ -1078,7 +1089,7 @@ def test_a_member_is_governed_by_their_workspace_policy(spy, monkeypatch, table)
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Locked", allowed={"connectors": ["slack"]}),
-        expected_revision=None,
+        expected=None,
     )
     table.store.put(
         "default",
@@ -1088,7 +1099,7 @@ def test_a_member_is_governed_by_their_workspace_policy(spy, monkeypatch, table)
             memberGroups=["g-users-default"],
             defaults={"unclassifiedRiskTier": "low"},
         ),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
@@ -1117,7 +1128,7 @@ def test_a_budget_bearing_policy_writes_and_reads_through_the_real_dynamodb_seri
         )
         store = wps.WorkspacePolicyStore(table_name="OrgConfig", region="us-east-1")
         policy = _policy(budgets={"perAgentMonthlyUsd": 12.5, "perWorkspaceMonthlyUsd": 1000})
-        store.put("default", policy, expected_revision=None)
+        store.put("default", policy, expected=None)
         read = store.get("default", "finance")
         assert read == policy
         assert read.budgets.per_agent_monthly_usd == 12.5 and read.budgets.per_workspace_monthly_usd == 1000
@@ -1128,7 +1139,7 @@ def test_a_budget_bearing_policy_writes_and_reads_through_the_real_dynamodb_seri
 
 def test_a_policy_filed_under_another_workspaces_key_is_refused_on_read(table):
     """Finding 4: a document whose workspaceId disagrees with its key governs nothing."""
-    item = wps.policy_to_item("default", _policy(workspaceId="finance", name="F"), 1)
+    item = wps.policy_to_item("default", _policy(workspaceId="finance", name="F"), _VERSION)
     item["sk"] = "WORKSPACE#marketing#POLICY"
     table.items[("default", item["sk"])] = item
     with pytest.raises(wps.WorkspacePolicyError):
@@ -1188,7 +1199,7 @@ def test_an_omitted_target_region_is_judged_as_the_home_region(spy, table, monke
     table.store.put(
         "default",
         _policy(workspaceId="default", name="EU only", allowed={"regions": ["eu-west-1"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body())
@@ -1206,7 +1217,7 @@ def test_connected_code_interpreter_and_browser_are_judged_as_tools(spy, table, 
     table.store.put(
         "default",
         _policy(workspaceId="default", name="Read only", allowed={"toolRiskClasses": ["read"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body(connectedTools=["gateway", "code_interpreter", "browser"]))
@@ -1222,7 +1233,7 @@ def test_a_member_cannot_escape_their_workspace_by_deploying_without_a_flow(spy,
     """Finding 2 (residual): the governing workspace follows the deployer's membership. A member of a
     locked workspace who drops flowId (or saves a canvas with no workspaceId) is still judged by it."""
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put("default", _policy(workspaceId="default", name="Permissive"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="default", name="Permissive"), expected=None)
     table.store.put(
         "default",
         _policy(
@@ -1231,7 +1242,7 @@ def test_a_member_cannot_escape_their_workspace_by_deploying_without_a_flow(spy,
             memberGroups=["g-users-default"],
             allowed={"connectors": ["slack"]},
         ),
-        expected_revision=None,
+        expected=None,
     )
 
     response = _client().post("/api/deploy", json=_body(connectors=[JIRA]))
@@ -1247,15 +1258,13 @@ def test_a_member_of_two_workspaces_whose_canvas_names_neither_is_refused_with_s
     spy, table, monkeypatch
 ):
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put("default", _policy(workspaceId="default", name="Default"), expected_revision=None)
+    table.store.put("default", _policy(workspaceId="default", name="Default"), expected=None)
     table.store.put(
         "default",
         _policy(workspaceId="finance", name="Finance", memberGroups=["g-users-default"]),
-        expected_revision=None,
+        expected=None,
     )
-    table.store.put(
-        "default", _policy(workspaceId="hr", name="HR", memberGroups=["g-users-default"]), expected_revision=None
-    )
+    table.store.put("default", _policy(workspaceId="hr", name="HR", memberGroups=["g-users-default"]), expected=None)
 
     response = _client().post("/api/deploy", json=_body())
 
@@ -1319,7 +1328,7 @@ def test_a_classification_does_not_travel_to_a_different_resource_with_the_same_
         _policy(
             workspaceId="default", name="Public data only", allowed={"dataClasses": ["public"], "connectors": ["jira"]}
         ),
-        expected_revision=None,
+        expected=None,
     )
 
     same = _client().post(
@@ -1347,23 +1356,23 @@ def test_the_flows_budget_declaration_reaches_admission(spy, table, monkeypatch)
     _flags(monkeypatch, {"workspacePolicy": True})
 
     # A cap with no per-agent default: the flow's own declaration (80) satisfies it.
-    table.store.put(
+    first = table.store.put(
         "default",
         _policy(
             workspaceId="default", name="Capped", budgets={"maxAgentMonthlyUsd": 100}, allowed={"connectors": ["jira"]}
         ),
-        expected_revision=None,
+        expected=None,
     )
     assert _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA])).status_code == 202
 
     # A tighter cap refuses that same declaration.
     spy.calls.clear()
-    table.store.put(
+    second = table.store.put(
         "default",
         _policy(
             workspaceId="default", name="Tighter", budgets={"maxAgentMonthlyUsd": 50}, allowed={"connectors": ["jira"]}
         ),
-        expected_revision=1,
+        expected=first.version,
     )
     refused = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
     assert refused.status_code == 403, refused.text
@@ -1380,7 +1389,7 @@ def test_the_flows_budget_declaration_reaches_admission(spy, table, monkeypatch)
             allowed={"connectors": ["jira"]},
             approval={"high": ["g-admins-security"]},
         ),
-        expected_revision=2,
+        expected=second.version,
     )
     seen: list[dict | None] = []
     original = dh._reject_workspace_policy_violation
@@ -1405,7 +1414,7 @@ def test_the_runtime_protocol_and_a2a_are_judged_as_channels(spy, table, monkeyp
     table.store.put(
         "default",
         _policy(workspaceId="default", name="API only", allowed={"channels": ["api"]}),
-        expected_revision=None,
+        expected=None,
     )
 
     http = _client().post("/api/deploy", json=_body())
@@ -1467,9 +1476,9 @@ def test_an_mcp_servers_classification_dies_when_its_endpoint_moves():
 def test_a_truncated_stored_policy_is_corruption_not_an_unconstrained_workspace(table):
     """Finding 4 (round 3): the writer always stores the complete document, so a stored item missing
     fields (at any level) must refuse rather than reconstruct permissive defaults."""
-    full = wps.policy_to_item("default", _policy(workspaceId="default", name="D"), 1)
+    full = wps.policy_to_item("default", _policy(workspaceId="default", name="D"), _VERSION)
     assert table.store.put(
-        "default", _policy(workspaceId="default", name="D"), expected_revision=None
+        "default", _policy(workspaceId="default", name="D"), expected=None
     )  # the full document reads back
     assert table.store.get("default", "default") is not None
 
@@ -1512,7 +1521,7 @@ def test_in_a_locked_workspace_a_write_label_cannot_pick_the_listed_class(spy, t
         }
     )
     assert locked.defaults.trust_builder_classifications is False
-    table.store.put("default", locked, expected_revision=None)
+    table.store.put("default", locked, expected=None)
 
     verified = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
     assert verified.status_code == 202, verified.text  # jira: catalog-verified write

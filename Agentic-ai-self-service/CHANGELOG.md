@@ -42,13 +42,15 @@ All notable changes to this project are documented here. The format follows
   (`WORKSPACE#<id>#POLICY`); no new table or grant. Strict schema: unknown keys, `unclassified`
   in an allow-list and empty group names are `422`. The admin routes are the exact `404` of a
   nonexistent route while the flag is off. [docs/WORKSPACES.md](docs/WORKSPACES.md).
-- **Policy revisions.** A policy is never replaced blind: every stored policy carries a revision
-  (the `ETag` of `GET`/`PUT`), a `PUT` must say what it is based on (`If-Match: "<revision>"` to
-  replace, `If-None-Match: *` to create) and the store enforces that in the same DynamoDB write, so
-  two admins editing one policy cannot overwrite each other's tightening. A stale save is
-  `412 policy_revision_conflict` (naming `currentRevision`) and changes nothing; no precondition is
-  `428 precondition_required`; `If-Match: *` and other ambiguous preconditions are `400`. The
-  deployment Lambda's CORS allow-list gains `PUT`, `If-Match`, `If-None-Match` and exposes `ETag`.
+- **Policy versions.** A policy is never replaced blind: every stored policy carries a version (the
+  `ETag` of `GET`/`PUT`, an opaque `<incarnation>.<revision>` token whose incarnation is minted at
+  create), a `PUT` must say what it is based on (`If-Match: "<token>"` to replace, `If-None-Match: *`
+  to create) and the store enforces both attributes in the same DynamoDB write, so two admins editing
+  one policy cannot overwrite each other's tightening, and a form opened before a delete and recreate
+  cannot overwrite the recreated policy. A stale save is `412 policy_revision_conflict` (naming
+  `currentVersion`) and changes nothing; no precondition is `428 precondition_required`;
+  `If-Match: *` and other ambiguous preconditions are `400`. The deployment Lambda's CORS allow-list
+  gains `PUT`, `If-Match`, `If-None-Match` and exposes `ETag`.
 - **Admission** runs in `POST /api/deploy` after flow ownership and before any row, secret,
   execution or AWS resource. It judges the **request body** (what is deployed): model, connectors,
   Gateway and custom tools, external MCP servers, knowledge and Region; the saved flow contributes
@@ -96,8 +98,9 @@ All notable changes to this project are documented here. The format follows
   reviewer inputs and the medium/high routing are one state seen two ways (editing either refills the
   other); a policy whose review is reduced (a tier auto-approves, or high risk adds no reviewer beyond
   the medium approvers) cannot be saved without an explicit acknowledgement. Editing fetches the
-  policy as the server holds it now and saves against that revision; a colleague's earlier save is
-  shown as the backend's `412` with a *Reload current version* action, never overwritten. The preset
+  policy as the server holds it now and saves against that version; a colleague's earlier save (or a
+  delete and recreate) is shown as the backend's `412` with a *Reload current version* action, never
+  overwritten. The preset
   documents are snapshotted into the backend's fixtures and validated there; every gallery template
   deploys under *Standard*.
 - **Tier badge** on the Versions list: the admitted tier, the classifier's reasons and the approver

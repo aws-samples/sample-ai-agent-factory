@@ -60,12 +60,12 @@ describe('WorkspacesPanel', () => {
     vi.clearAllMocks();
     flags.state = ready(true);
     api.listWorkspacePolicies.mockResolvedValue([defaultPolicy, finance]);
-    // Editing fetches the policy as the server holds it now, with the revision the save must name.
+    // Editing fetches the policy as the server holds it now, with the version token the save must name.
     api.getWorkspacePolicy.mockImplementation(async (workspaceId: string) => ({
       policy: [defaultPolicy, finance].find((policy) => policy.workspaceId === workspaceId),
-      revision: 3,
+      version: 'aaaaaaaaaaaaaaaa.3',
     }));
-    api.putWorkspacePolicy.mockImplementation(async (document: unknown) => ({ policy: document, revision: 4 }));
+    api.putWorkspacePolicy.mockImplementation(async (document: unknown) => ({ policy: document, version: 'aaaaaaaaaaaaaaaa.4' }));
     api.deleteWorkspacePolicy.mockResolvedValue(undefined);
   });
 
@@ -284,19 +284,19 @@ describe('WorkspacesPanel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Insufficient scope: admin');
   });
 
-  it('edits the policy as the server holds it now and saves against the revision it was read at', async () => {
+  it('edits the policy as the server holds it now and saves against the version it was read at', async () => {
     const current = { ...finance, name: 'Finance (renamed by a colleague)' };
-    api.getWorkspacePolicy.mockResolvedValue({ policy: current, revision: 7 });
+    api.getWorkspacePolicy.mockResolvedValue({ policy: current, version: 'bbbbbbbbbbbbbbbb.7' });
     render(<WorkspacesPanel isAdmin />);
     const card = await screen.findByTestId('workspace-finance');
     fireEvent.click(within(card).getByText('Edit'));
     expect(await screen.findByLabelText(/^Name/)).toHaveValue('Finance (renamed by a colleague)');
     expect(api.getWorkspacePolicy).toHaveBeenCalledWith('finance');
-    expect(screen.getByTestId('workspace-policy-revision')).toHaveTextContent('Editing revision 7');
+    expect(screen.getByTestId('workspace-policy-version')).toHaveTextContent('Editing version bbbbbbbbbbbbbbbb.7');
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Finance (EU)' } });
     fireEvent.click(screen.getByText('Save changes'));
     await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(1));
-    expect(api.putWorkspacePolicy).toHaveBeenCalledWith({ ...current, name: 'Finance (EU)' }, { revision: 7 });
+    expect(api.putWorkspacePolicy).toHaveBeenCalledWith({ ...current, name: 'Finance (EU)' }, { version: 'bbbbbbbbbbbbbbbb.7' });
     expect(await screen.findByText('Saved the policy for workspace "finance".')).toBeInTheDocument();
   });
 
@@ -310,47 +310,47 @@ describe('WorkspacesPanel', () => {
       securityGroups: ['g-privacy'],
     });
     const tightened = { ...opened, approval: { ...opened.approval, high: ['g-security', 'g-privacy', 'g-approvers'] } };
-    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: opened, revision: 1 });
+    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: opened, version: 'cccccccccccccccc.1' });
     api.putWorkspacePolicy.mockRejectedValueOnce({
       message:
         "The policy for workspace 'finance' changed since it was read (revision 1, now 2); read the current policy and reapply the change. Nothing was changed.",
       status: 412,
-      details: { detail: { code: 'policy_revision_conflict', expectedRevision: 1, currentRevision: 2 } },
+      details: { detail: { code: 'policy_revision_conflict', expectedVersion: 'cccccccccccccccc.1', currentVersion: 'cccccccccccccccc.2' } },
     });
     render(<WorkspacesPanel isAdmin />);
     const card = await screen.findByTestId('workspace-finance');
     fireEvent.click(within(card).getByText('Edit'));
-    expect(await screen.findByTestId('workspace-policy-revision')).toHaveTextContent('Editing revision 1');
+    expect(await screen.findByTestId('workspace-policy-version')).toHaveTextContent('Editing version cccccccccccccccc.1');
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Finance (EU)' } });
     fireEvent.click(screen.getByText('Save changes'));
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('changed since it was read (revision 1, now 2)');
-    expect(api.putWorkspacePolicy).toHaveBeenCalledWith({ ...opened, name: 'Finance (EU)' }, { revision: 1 });
+    expect(api.putWorkspacePolicy).toHaveBeenCalledWith({ ...opened, name: 'Finance (EU)' }, { version: 'cccccccccccccccc.1' });
     expect(api.listWorkspacePolicies).toHaveBeenCalledTimes(1); // nothing was saved, so nothing was reloaded
     expect(screen.getByLabelText(/^Name/)).toHaveValue('Finance (EU)'); // the admin's edit is kept until they reload
 
-    // Reload fetches the colleague's version: the tightened routing is on screen, the save names revision 2.
-    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: tightened, revision: 2 });
+    // Reload fetches the colleague's version: the tightened routing is on screen, the save names version .2.
+    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: tightened, version: 'cccccccccccccccc.2' });
     fireEvent.click(within(alert).getByText('Reload current version'));
-    await waitFor(() => expect(screen.getByTestId('workspace-policy-revision')).toHaveTextContent('Editing revision 2'));
+    await waitFor(() => expect(screen.getByTestId('workspace-policy-version')).toHaveTextContent('Editing version cccccccccccccccc.2'));
     expect(screen.getByLabelText(/Approvers: high risk/)).toHaveValue('g-security, g-privacy, g-approvers');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Finance (EU)' } });
     fireEvent.click(screen.getByText('Save changes'));
     await waitFor(() => expect(api.putWorkspacePolicy).toHaveBeenCalledTimes(2));
-    expect(api.putWorkspacePolicy.mock.calls[1]).toEqual([{ ...tightened, name: 'Finance (EU)' }, { revision: 2 }]);
+    expect(api.putWorkspacePolicy.mock.calls[1]).toEqual([{ ...tightened, name: 'Finance (EU)' }, { version: 'cccccccccccccccc.2' }]);
   });
 
   it('a create that finds the policy already there is refused and reload switches to editing it', async () => {
     api.putWorkspacePolicy.mockRejectedValueOnce({
       message:
-        "A policy for workspace 'sales' already exists (revision 1); read it and send If-Match with its ETag to replace it. Nothing was changed.",
+        "A policy for workspace 'sales' already exists; read it and send If-Match with its ETag to replace it. Nothing was changed.",
       status: 412,
-      details: { detail: { code: 'policy_revision_conflict', expectedRevision: null, currentRevision: 1 } },
+      details: { detail: { code: 'policy_revision_conflict', expectedVersion: null, currentVersion: 'dddddddddddddddd.1' } },
     });
     const existing = { ...emptyPolicy('sales', 'Sales (theirs)'), approval: { low: [], medium: ['g-sales'], high: ['g-sales'] } };
-    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: existing, revision: 1 });
+    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: existing, version: 'dddddddddddddddd.1' });
     render(<WorkspacesPanel isAdmin />);
     await screen.findByTestId('workspace-finance');
     fireEvent.click(screen.getByText('New workspace'));
@@ -360,23 +360,23 @@ describe('WorkspacesPanel', () => {
     fireEvent.change(screen.getByLabelText(/Security groups/), { target: { value: 'g-security' } });
     fireEvent.click(screen.getByText('Create workspace'));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('already exists (revision 1)');
+    expect(alert).toHaveTextContent('already exists');
     expect(api.putWorkspacePolicy.mock.calls[0][1]).toBe('create');
     fireEvent.click(within(alert).getByText('Reload current version'));
     expect(await screen.findByLabelText(/^Name/)).toHaveValue('Sales (theirs)');
     expect(screen.getByLabelText(/Workspace id/)).toBeDisabled();
-    expect(screen.getByTestId('workspace-policy-revision')).toHaveTextContent('Editing revision 1');
+    expect(screen.getByTestId('workspace-policy-version')).toHaveTextContent('Editing version dddddddddddddddd.1');
   });
 
   it('shows the fetch failure and opens no form when the current policy cannot be read', async () => {
     api.getWorkspacePolicy.mockRejectedValueOnce({
-      message: 'The server did not return the policy revision (ETag), so this policy cannot be edited safely.',
+      message: 'The server did not return the policy version (ETag), so this policy cannot be edited safely.',
       status: 200,
     });
     render(<WorkspacesPanel isAdmin />);
     const card = await screen.findByTestId('workspace-finance');
     fireEvent.click(within(card).getByText('Edit'));
-    expect(await screen.findByRole('alert')).toHaveTextContent('did not return the policy revision');
+    expect(await screen.findByRole('alert')).toHaveTextContent('did not return the policy version');
     expect(screen.queryByLabelText(/^Name/)).not.toBeInTheDocument();
     expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
   });

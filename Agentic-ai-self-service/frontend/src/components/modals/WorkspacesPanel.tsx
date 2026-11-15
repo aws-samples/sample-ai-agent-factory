@@ -9,8 +9,9 @@
  * deploy is refused (503) until one does.
  *
  * Saving is never a blind replacement. Editing fetches the policy as the server holds it NOW, with its
- * revision (`ETag`), and the save names that revision (`If-Match`); a new policy is created only if none
- * exists (`If-None-Match: *`). When a colleague saved first, the backend answers `412`: the panel shows
+ * version token (`ETag`), and the save names that version (`If-Match`); a new policy is created only if
+ * none exists (`If-None-Match: *`). When a colleague saved first, or deleted and recreated the policy, the
+ * backend answers `412`: the panel shows
  * that refusal verbatim, keeps the admin's form, and offers to reload the current version so the change
  * can be reapplied on top of it rather than over it (a tightened approver routing cannot be undone by a
  * stale form).
@@ -130,8 +131,8 @@ function WorkspacesPanelBody() {
   const [notice, setNotice] = useState<string | null>(null);
   const [form, setForm] = useState<WorkspacePolicyForm | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
-  /** The revision the open form was loaded from; the save names it. `null` while creating. */
-  const [revision, setRevision] = useState<number | null>(null);
+  /** The version token the open form was loaded from; the save names it. `null` while creating. */
+  const [version, setVersion] = useState<string | null>(null);
   /** The workspace whose save was refused as stale (412); offers "Reload current version". */
   const [conflict, setConflict] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -170,7 +171,7 @@ function WorkspacesPanelBody() {
       : emptyPolicy(workspaceId, name);
     setForm({ ...formFromDocument(document), workspaceId, name });
     setEditingExisting(false);
-    setRevision(null);
+    setVersion(null);
     setConflict(null);
     setNotice(
       preset
@@ -201,7 +202,7 @@ function WorkspacesPanelBody() {
   };
 
   /**
-   * Edit what the server holds NOW, not the list's snapshot: the fetch also yields the revision the
+   * Edit what the server holds NOW, not the list's snapshot: the fetch also yields the version the
    * save must name, so a colleague's change made since the list loaded is seen rather than overwritten.
    */
   const startEdit = async (workspaceId: string) => {
@@ -212,7 +213,7 @@ function WorkspacesPanelBody() {
     try {
       const stored = await getApiClient().getWorkspacePolicy(workspaceId);
       setForm(formFromDocument(stored.policy));
-      setRevision(stored.revision);
+      setVersion(stored.version);
       setEditingExisting(true);
     } catch (e) {
       setError(getErrorMessage(e));
@@ -246,9 +247,9 @@ function WorkspacesPanelBody() {
 
   const save = async () => {
     if (!form) return;
-    if (editingExisting && revision === null) {
+    if (editingExisting && version === null) {
       // Cannot happen through the UI (editing always starts from a fetch); refuse rather than save blind.
-      setError('The revision of this policy is unknown, so it cannot be saved safely. Reload it and try again.');
+      setError('The version of this policy is unknown, so it cannot be saved safely. Reload it and try again.');
       return;
     }
     setBusy(true);
@@ -256,14 +257,14 @@ function WorkspacesPanelBody() {
     setConflict(null);
     try {
       const document = documentFromForm(form);
-      const precondition: PutPrecondition = editingExisting && revision !== null ? { revision } : 'create';
+      const precondition: PutPrecondition = editingExisting && version !== null ? { version } : 'create';
       const stored = await getApiClient().putWorkspacePolicy(document, precondition);
       setNotice(`Saved the policy for workspace "${stored.policy.workspaceId}".`);
       setForm(null);
-      setRevision(null);
+      setVersion(null);
       await load();
     } catch (e) {
-      // A 412 is a colleague's save, not a defect in the form: say so verbatim and offer the current version.
+      // A 412 is a colleague's save (or a delete and recreate), not a defect in the form: say so verbatim and offer the current version.
       setError(getErrorMessage(e));
       if (isRevisionConflict(e)) {
         setConflict(form.workspaceId.trim());
@@ -421,10 +422,11 @@ function WorkspacesPanelBody() {
             void save();
           }}
         >
-          {editingExisting && revision !== null && (
-            <p className="text-[10px] text-gray-500" data-testid="workspace-policy-revision">
-              Editing revision {revision} of this policy. Saving replaces exactly that revision; if someone
-              else saves first, the save is refused and you can reload their version.
+          {editingExisting && version !== null && (
+            <p className="text-[10px] text-gray-500" data-testid="workspace-policy-version">
+              Editing version <code>{version}</code> of this policy. Saving replaces exactly that version; if
+              someone else saves first, or deletes and recreates the policy, the save is refused and you can
+              reload their version.
             </p>
           )}
           <div className="flex flex-wrap gap-1 items-center">

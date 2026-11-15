@@ -18,12 +18,15 @@ unguarded agent; when the ``default`` policy itself is absent, resolution raises
 governance read takes. The default workspace is never auto-created: an admin writes it, so an
 environment that has not been configured refuses rather than guesses.
 
-Revisions. Every item carries an integer ``revision`` the store increments on each write, and a write
-names the revision it was based on (``expected_revision``; ``None`` for "must not exist yet") as a
-DynamoDB condition. Two admins editing the same policy therefore cannot silently overwrite each other:
-the second save fails (``WorkspacePolicyRevisionConflict``) and has to be redone against the current
-document, so a tightened approver routing or allow-list is never undone by a stale form. Items written
-before revisions existed read as revision 0 and can be replaced exactly once as such.
+Versions. Every item carries a ``PolicyVersion``: an ``incarnation`` (a random id minted when the policy
+is created and kept across replacements) and a ``revision`` counting the writes within it. A write names
+the version it was based on (``expected``; ``None`` for "must not exist yet") as a DynamoDB condition on
+BOTH attributes. Two admins editing the same policy therefore cannot silently overwrite each other: the
+second save fails (``WorkspacePolicyRevisionConflict``) and has to be redone against the current
+document, so a tightened approver routing or allow-list is never undone by a stale form. Because a
+delete followed by a create mints a new incarnation, a token read before the deletion can never name
+the recreated policy either (a plain counter would restart at 1 and could). Items written before
+versions existed read as the legacy version ``0`` and can be claimed exactly once as such.
 
 Only ``boto3`` DynamoDB Table calls are wrapped here; every other function is pure and testable
 without AWS.
@@ -34,12 +37,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 from decimal import Decimal
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from app.schemas.workspace_policy import WorkspacePolicy
 
@@ -71,18 +75,30 @@ class WorkspacePolicyUnavailableError(WorkspacePolicyError):
 
 
 class WorkspacePolicyRevisionConflict(WorkspacePolicyError):
-    """A write named a revision (or "none yet") that is not what the table holds now.
+    """A write named a version (or "none yet") that is not what the table holds now.
 
-    ``expected_revision`` is what the writer based its document on (``None``: it meant to create);
-    ``current_revision`` is what is stored now (``None``: nothing is). Nothing was written.
+    ``expected`` is the version the writer based its document on (``None``: it meant to create);
+    ``current`` is what is stored now (``None``: nothing is). Nothing was written.
     """
 
-    def __init__(self, workspace_id: str, expected_revision: int | None, current_revision: int | None) -> None:
+    def __init__(self, workspace_id: str, expected: PolicyVersion | None, current: PolicyVersion | None) -> None:
         self.workspace_id = workspace_id
-        self.expected_revision = expected_revision
-        self.current_revision = current_revision
+        self.expected = expected
+        self.current = current
         super().__init__(
-            f"workspace policy {workspace_id!r}: expected revision {expected_revision!r}, found {current_revision!r}"
+            f"workspace policy {workspace_id!r}: expected version "
+            f"{expected.token if expected else None!r}, found {current.token if current else None!r}"
+        )
+
+    @property
+    def recreated(self) -> bool:
+        """Both versions exist but belong to different incarnations: the policy the writer read was
+        deleted and another was created under the same id since."""
+        return (
+            self.expected is not None
+            and self.current is not None
+            and self.expected.incarnation is not None
+            and self.expected.incarnation != self.current.incarnation
         )
 
 
@@ -106,41 +122,108 @@ def workspace_id_from_sort_key(sort_key: str) -> str | None:
     return middle if _WORKSPACE_ID_RE.match(middle) else None
 
 
-#: Item attribute holding the write counter; absent on items written before revisions existed.
+#: Item attributes holding the version. ``revision`` counts the writes within an ``incarnation``, a random
+#: id minted when the policy is created and kept across replacements; a delete followed by a create mints
+#: a new one, so no token ever names two different policies. Both are absent on items written before
+#: versions existed.
 REVISION_ATTRIBUTE = "revision"
+INCARNATION_ATTRIBUTE = "incarnation"
+
+_INCARNATION_RE = re.compile(r"^[0-9a-f]{16}$")
+_TOKEN_RE = re.compile(r"^([0-9a-f]{16})\.([1-9][0-9]*)$")
 
 
-def policy_to_item(org_id: str, policy: WorkspacePolicy, revision: int) -> dict[str, Any]:
-    """The DynamoDB item for a policy: the camelCase document plus the table keys and the revision this
+class PolicyVersion(BaseModel):
+    """The identity of one stored state of a policy, served to clients as the ``ETag`` token.
+
+    ``incarnation`` is minted at creation and kept across replacements; ``revision`` counts the writes
+    within it. A policy deleted and recreated gets a new incarnation, so a stale token from before the
+    deletion cannot name the recreated policy (a plain counter would restart at 1 and could). The legacy
+    token ``0`` names an item written before versions existed; it is claimed exactly once.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    incarnation: str | None
+    revision: int
+
+    @model_validator(mode="after")
+    def _consistent(self) -> PolicyVersion:
+        if self.incarnation is None:
+            if self.revision != 0:
+                raise ValueError("a version without an incarnation is the legacy version 0")
+        elif not _INCARNATION_RE.match(self.incarnation) or self.revision < 1:
+            raise ValueError("a version is a 16-hex-digit incarnation and a positive revision")
+        return self
+
+    @property
+    def token(self) -> str:
+        if self.incarnation is None:
+            return "0"
+        return f"{self.incarnation}.{self.revision}"
+
+    @classmethod
+    def parse(cls, token: str) -> PolicyVersion:
+        """The version a token names; ``ValueError`` for anything this store never issues."""
+        if token == "0":
+            return LEGACY_VERSION
+        match = _TOKEN_RE.match(token)
+        if match is None:
+            raise ValueError(f"not a workspace policy version token: {token!r}")
+        return cls(incarnation=match.group(1), revision=int(match.group(2)))
+
+
+#: The version of an item written before versions existed.
+LEGACY_VERSION = PolicyVersion(incarnation=None, revision=0)
+
+
+def new_incarnation() -> str:
+    """A fresh incarnation id (64 random bits as hex): unpredictable, so a stale token cannot be forged
+    into a current one by guessing, and never reused by a later create."""
+    return secrets.token_hex(8)
+
+
+def policy_to_item(org_id: str, policy: WorkspacePolicy, version: PolicyVersion) -> dict[str, Any]:
+    """The DynamoDB item for a policy: the camelCase document plus the table keys and the version this
     write produces. Floats become ``Decimal`` because boto3's DynamoDB serializer refuses Python floats
     (a budget-bearing policy would otherwise fail to write)."""
-    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
-        raise WorkspacePolicyError(f"a stored revision is a positive integer, not {revision!r}")
+    if not isinstance(version, PolicyVersion) or version.incarnation is None:
+        raise WorkspacePolicyError(f"a stored version has an incarnation and a positive revision, not {version!r}")
     item: dict[str, Any] = {
         "org_id": org_id,
         "sk": policy_sort_key(policy.workspace_id),
-        REVISION_ATTRIBUTE: revision,
+        REVISION_ATTRIBUTE: version.revision,
+        INCARNATION_ATTRIBUTE: version.incarnation,
         "policy": _floats_to_decimals(policy.model_dump(by_alias=True, mode="json")),
     }
     return item
 
 
-def revision_of(item: dict[str, Any]) -> int:
-    """The revision an item carries; 0 for an item written before revisions existed. Anything else
-    (a string, a fraction, a negative number) is corruption and raises rather than being guessed at."""
-    value = item.get(REVISION_ATTRIBUTE, 0)
-    if isinstance(value, bool) or not isinstance(value, int | Decimal):
-        raise WorkspacePolicyError(f"stored workspace policy revision is not a number: {type(value).__name__}")
-    if value != int(value) or value < 0:
-        raise WorkspacePolicyError(f"stored workspace policy revision is not a non-negative integer: {value!r}")
-    return int(value)
+def version_of(item: dict[str, Any]) -> PolicyVersion:
+    """The version an item carries; the legacy version for an item written before versions existed.
+    Anything inconsistent (a revision without an incarnation or the reverse, a malformed incarnation, a
+    revision that is not a positive integer) is corruption and raises rather than being guessed at."""
+    revision = item.get(REVISION_ATTRIBUTE)
+    incarnation = item.get(INCARNATION_ATTRIBUTE)
+    if revision is None and incarnation is None:
+        return LEGACY_VERSION
+    if (
+        isinstance(revision, bool)
+        or not isinstance(revision, int | Decimal)
+        or revision != int(revision)
+        or revision < 1
+    ):
+        raise WorkspacePolicyError(f"stored workspace policy revision is not a positive integer: {revision!r}")
+    if not isinstance(incarnation, str) or not _INCARNATION_RE.match(incarnation):
+        raise WorkspacePolicyError("stored workspace policy incarnation is malformed")
+    return PolicyVersion(incarnation=incarnation, revision=int(revision))
 
 
 class StoredPolicy(BaseModel):
-    """A policy as read from the table, with the revision a replacement must name."""
+    """A policy as read from the table, with the version a replacement must name."""
 
     policy: WorkspacePolicy
-    revision: int
+    version: PolicyVersion
 
 
 def policy_from_item(item: dict[str, Any]) -> WorkspacePolicy:
@@ -268,50 +351,51 @@ class WorkspacePolicyStore:
 
     # -- public API ------------------------------------------------------------------------------
 
-    def put(self, org_id: str, policy: WorkspacePolicy, *, expected_revision: int | None) -> StoredPolicy:
-        """Create (``expected_revision=None``: the item must not exist) or replace (the item must carry
-        exactly ``expected_revision``; 0 names an item written before revisions existed) a policy, as
-        one conditional write. Any other state of the table is ``WorkspacePolicyRevisionConflict`` and
-        nothing is written. Returns the policy with the revision this write produced."""
-        if expected_revision is None:
+    def put(self, org_id: str, policy: WorkspacePolicy, *, expected: PolicyVersion | None) -> StoredPolicy:
+        """Create (``expected=None``: the item must not exist) or replace (the item must be at exactly
+        ``expected``; the legacy version names an item written before versions existed) a policy, as one
+        conditional write on both version attributes. Any other state of the table is
+        ``WorkspacePolicyRevisionConflict`` and nothing is written. A create, and the first claim of a
+        legacy item, mints a new incarnation, so a token read before a delete can never match what a
+        later create stores. Returns the policy with the version this write produced."""
+        if expected is not None and not isinstance(expected, PolicyVersion):
+            raise WorkspacePolicyError(f"expected must be None or a PolicyVersion, not {type(expected).__name__}")
+        names = {"#rev": REVISION_ATTRIBUTE, "#inc": INCARNATION_ATTRIBUTE}
+        if expected is None:
             condition: dict[str, Any] = {"ConditionExpression": "attribute_not_exists(sk)"}
-            revision = 1
-        elif isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
-            raise WorkspacePolicyError(
-                f"expected_revision must be None or a non-negative integer, not {expected_revision!r}"
-            )
-        elif expected_revision == 0:
+            version = PolicyVersion(incarnation=new_incarnation(), revision=1)
+        elif expected.incarnation is None:
             condition = {
-                "ConditionExpression": "attribute_exists(sk) AND attribute_not_exists(#rev)",
-                "ExpressionAttributeNames": {"#rev": REVISION_ATTRIBUTE},
+                "ConditionExpression": "attribute_exists(sk) AND attribute_not_exists(#rev) AND attribute_not_exists(#inc)",
+                "ExpressionAttributeNames": names,
             }
-            revision = 1
+            version = PolicyVersion(incarnation=new_incarnation(), revision=1)
         else:
             condition = {
-                "ConditionExpression": "#rev = :expected",
-                "ExpressionAttributeNames": {"#rev": REVISION_ATTRIBUTE},
-                "ExpressionAttributeValues": {":expected": expected_revision},
+                "ConditionExpression": "#inc = :inc AND #rev = :rev",
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": {":inc": expected.incarnation, ":rev": expected.revision},
             }
-            revision = expected_revision + 1
+            version = PolicyVersion(incarnation=expected.incarnation, revision=expected.revision + 1)
         try:
-            self._put_item(policy_to_item(org_id, policy, revision), condition)
+            self._put_item(policy_to_item(org_id, policy, version), condition)
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
                 raise
-            current = self._read_revision(org_id, policy.workspace_id)
-            raise WorkspacePolicyRevisionConflict(policy.workspace_id, expected_revision, current) from exc
-        return StoredPolicy(policy=policy, revision=revision)
+            current = self._read_version(org_id, policy.workspace_id)
+            raise WorkspacePolicyRevisionConflict(policy.workspace_id, expected, current) from exc
+        return StoredPolicy(policy=policy, version=version)
 
-    def _read_revision(self, org_id: str, workspace_id: str) -> int | None:
+    def _read_version(self, org_id: str, workspace_id: str) -> PolicyVersion | None:
         item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
-        return revision_of(item) if item else None
+        return version_of(item) if item else None
 
     def read(self, org_id: str, workspace_id: str) -> StoredPolicy | None:
-        """The policy and the revision a replacement must name (strongly consistent)."""
+        """The policy and the version a replacement must name (strongly consistent)."""
         item = self._get_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
         if not item:
             return None
-        return StoredPolicy(policy=policy_from_item(item), revision=revision_of(item))
+        return StoredPolicy(policy=policy_from_item(item), version=version_of(item))
 
     def get(self, org_id: str, workspace_id: str) -> WorkspacePolicy | None:
         record = self.read(org_id, workspace_id)

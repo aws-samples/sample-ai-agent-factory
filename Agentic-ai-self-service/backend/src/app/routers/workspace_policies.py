@@ -5,9 +5,9 @@ FIRST (off: the exact 404 of a nonexistent route) and the ``admin`` scope SECOND
 
   GET    /api/workspaces/policies                 list every workspace policy in the org
   GET    /api/workspaces/{workspaceId}/policy     read one policy (404 when none is stored); ``ETag``
-                                                  carries its revision
+                                                  carries its version token
   PUT    /api/workspaces/{workspaceId}/policy     create (``If-None-Match: *``) or replace
-                                                  (``If-Match: "<revision>"``) a policy (strict schema)
+                                                  (``If-Match: "<version>"``) a policy (strict schema)
   DELETE /api/workspaces/{workspaceId}/policy     delete a policy (204; idempotent)
 
 ROUTING: this router is mounted on the DEPLOYMENT Lambda (``app/deployment_handler.py``), not the
@@ -22,14 +22,17 @@ deploy, so it is an org-admin control, not a per-workspace one; ``adminGroups`` 
 carried for the later UI and for component C, not consulted here. The ``workspaceId`` in the path
 must equal the one in the body on PUT, so a policy cannot be filed under another workspace's key.
 
-Replacement is never blind. Every stored policy has a revision (served as the ``ETag`` of GET and
-PUT, a quoted integer). A PUT must say what it is based on: ``If-Match: "<revision>"`` to replace the
-policy as read, or ``If-None-Match: *`` to create one that does not exist yet. The store enforces the
-precondition atomically with the write, so two admins editing the same policy cannot overwrite each
-other: the second save is ``412 policy_revision_conflict`` naming the current revision and nothing
-changes (a stale form can therefore never remove an approver group or an allow-list entry another
-admin just added). A PUT with neither header is ``428 precondition_required``; a request that cannot
-mean one thing (both headers, ``If-Match: *``, a non-numeric revision) is ``400``.
+Replacement is never blind. Every stored policy has a version (``services/workspace_policy_service
+.PolicyVersion``: an incarnation minted at creation plus a revision within it), served as the ``ETag``
+of GET and PUT as an opaque quoted token. A PUT must say what it is based on: ``If-Match: "<token>"``
+to replace the policy exactly as read, or ``If-None-Match: *`` to create one that does not exist yet.
+The store enforces the precondition atomically with the write, so two admins editing the same policy
+cannot overwrite each other, and a policy deleted and recreated under the same id gets a new
+incarnation, so a form opened before the deletion cannot overwrite the recreated policy either. A
+stale or misdirected save is ``412 policy_revision_conflict`` naming the current version and nothing
+changes (a stale form can therefore never remove an approver group or an allow-list entry another admin
+just added). A PUT with neither header is ``428 precondition_required``; a request that cannot mean one
+thing (both headers, ``If-Match: *``, a token this store never issued) is ``400``.
 
 Fail closed: a store failure is 503 and nothing is written.
 """
@@ -49,6 +52,7 @@ from app.services.rbac import require_scopes
 from app.services.workspace_policy_service import (
     DEFAULT_ORG_ID,
     InvalidWorkspaceIdError,
+    PolicyVersion,
     StoredPolicy,
     WorkspacePolicyError,
     WorkspacePolicyRevisionConflict,
@@ -70,8 +74,8 @@ PRECONDITION_REQUIRED = "precondition_required"
 POLICY_REVISION_CONFLICT = "policy_revision_conflict"
 
 _PRECONDITION_HELP = (
-    'send If-Match: "<revision>" (the ETag of the policy as you read it) to replace an existing policy, '
-    "or If-None-Match: * to create one that does not exist yet"
+    'send If-Match: "<version>" (the ETag of the policy exactly as you read it) to replace an existing '
+    "policy, or If-None-Match: * to create one that does not exist yet"
 )
 
 
@@ -96,19 +100,19 @@ def _as_document(policy: WorkspacePolicy) -> dict[str, Any]:
     return policy.model_dump(by_alias=True, mode="json")
 
 
-def etag_of(revision: int) -> str:
-    """The strong validator a revision is served as: a quoted integer."""
-    return f'"{revision}"'
+def etag_of(version: PolicyVersion) -> str:
+    """The strong validator a version is served as: its token, quoted. Opaque to clients."""
+    return f'"{version.token}"'
 
 
 def _policy_response(record: StoredPolicy) -> Response:
-    return JSONResponse(content=_as_document(record.policy), headers={"ETag": etag_of(record.revision)})
+    return JSONResponse(content=_as_document(record.policy), headers={"ETag": etag_of(record.version)})
 
 
-def parse_if_match(value: str) -> int:
-    """The revision an ``If-Match`` names. Only a strong, numeric validator is accepted: ``*`` would
-    mean "replace whatever is there", which is exactly the blind write this header exists to forbid,
-    and a weak validator (``W/``) never satisfies ``If-Match``."""
+def parse_if_match(value: str) -> PolicyVersion:
+    """The version an ``If-Match`` names. Only a strong validator this store issued is accepted: ``*``
+    would mean "replace whatever is there", which is exactly the blind write this header exists to
+    forbid, and a weak validator (``W/``) never satisfies ``If-Match``."""
     token = value.strip()
     if token == "*":
         raise HTTPException(
@@ -117,17 +121,18 @@ def parse_if_match(value: str) -> int:
         )
     if len(token) >= 2 and token[0] == token[-1] == '"':
         token = token[1:-1]
-    if not token.isdigit():
+    try:
+        return PolicyVersion.parse(token)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"If-Match must be the policy's ETag, a quoted revision number; {_PRECONDITION_HELP}",
-        )
-    return int(token)
+            detail=f"If-Match must be the policy's ETag exactly as served; {_PRECONDITION_HELP}",
+        ) from exc
 
 
-def expected_revision(if_match: str | None, if_none_match: str | None) -> int | None:
+def expected_version(if_match: str | None, if_none_match: str | None) -> PolicyVersion | None:
     """What the request claims the table holds: ``None`` for "nothing yet" (``If-None-Match: *``), a
-    revision for ``If-Match``. Neither header is ``428``; both, or an ``If-None-Match`` other than
+    version for ``If-Match``. Neither header is ``428``; both, or an ``If-None-Match`` other than
     ``*``, is ``400``: a write whose precondition is ambiguous is not attempted."""
     if if_match is not None and if_none_match is not None:
         raise HTTPException(
@@ -153,29 +158,34 @@ def expected_revision(if_match: str | None, if_none_match: str | None) -> int | 
 
 
 def _revision_conflict(exc: WorkspacePolicyRevisionConflict) -> HTTPException:
-    workspace_id, expected, current = exc.workspace_id, exc.expected_revision, exc.current_revision
+    workspace_id, expected, current = exc.workspace_id, exc.expected, exc.current
     if expected is None:
         message = (
-            f"A policy for workspace '{workspace_id}' already exists (revision {current}); read it and send "
-            "If-Match with its ETag to replace it. Nothing was changed."
+            f"A policy for workspace '{workspace_id}' already exists; read it and send If-Match with its ETag to "
+            "replace it. Nothing was changed."
         )
     elif current is None:
         message = (
-            f"The policy for workspace '{workspace_id}' no longer exists, so there was nothing at revision "
-            f"{expected} to replace; send If-None-Match: * to create it. Nothing was changed."
+            f"The policy for workspace '{workspace_id}' no longer exists, so there was nothing to replace; send "
+            "If-None-Match: * to create it. Nothing was changed."
+        )
+    elif exc.recreated:
+        message = (
+            f"The policy for workspace '{workspace_id}' was deleted and recreated since it was read, so the policy "
+            "you read no longer exists; read the current policy and reapply the change. Nothing was changed."
         )
     else:
         message = (
-            f"The policy for workspace '{workspace_id}' changed since it was read (revision {expected}, now "
-            f"{current}); read the current policy and reapply the change. Nothing was changed."
+            f"The policy for workspace '{workspace_id}' changed since it was read (revision {expected.revision}, "
+            f"now {current.revision}); read the current policy and reapply the change. Nothing was changed."
         )
     return HTTPException(
         status_code=status.HTTP_412_PRECONDITION_FAILED,
         detail={
             "code": POLICY_REVISION_CONFLICT,
             "workspaceId": workspace_id,
-            "expectedRevision": expected,
-            "currentRevision": current,
+            "expectedVersion": expected.token if expected else None,
+            "currentVersion": current.token if current else None,
             "message": message,
         },
     )
@@ -219,15 +229,15 @@ def put_policy(
                 f"workspaceId in the body ({body.workspace_id!r}) must equal the one in the path ({workspace_id!r})"
             ),
         )
-    expected = expected_revision(if_match, if_none_match)
+    expected = expected_version(if_match, if_none_match)
     try:
-        stored = _store().put(DEFAULT_ORG_ID, body, expected_revision=expected)
+        stored = _store().put(DEFAULT_ORG_ID, body, expected=expected)
     except WorkspacePolicyRevisionConflict as exc:
-        logger.info("Workspace policy write refused, revision conflict: workspace=%s", workspace_id)
+        logger.info("Workspace policy write refused, version conflict: workspace=%s", workspace_id)
         raise _revision_conflict(exc) from exc
     except (ClientError, BotoCoreError, WorkspacePolicyError) as exc:
         raise _store_failure(exc, "write") from exc
-    logger.info("Workspace policy stored: workspace=%s revision=%s", workspace_id, stored.revision)
+    logger.info("Workspace policy stored: workspace=%s version=%s", workspace_id, stored.version.token)
     return _policy_response(stored)
 
 
