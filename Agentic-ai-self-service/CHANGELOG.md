@@ -62,13 +62,26 @@ All notable changes to this project are documented here. The format follows
   requirement is read from the version row, so flipping the flag off releases nothing, and a
   malformed admission record keeps a version blocked. `GET /api/deploy/{id}` and the versions list
   serve the admission for the UI's tier badge.
+- **Trigger attachment gating.** With the flag on, `POST /api/runtimes/{name}/triggers` judges a
+  `webhook` (public ingress) against the version row's admission and the workspace's current policy
+  before its first side effect: `403 policy_denied` with `version_not_admitted` for a version deployed
+  without admission, or `trigger_raises_risk_tier` when a write/pay agent admitted below high would
+  become high and the `approval.high` groups have not approved it; `409` for a malformed admission
+  record; `503` for an unreadable policy. Schedule, EventBridge and S3 triggers are never judged, and
+  with the flag off the route is unchanged (`services/trigger_admission.py`).
+- **Admin → Workspaces** panel in the Agent Registry modal (admins, flag on): list every policy, create
+  one from a preset (*Locked-down*, *Standard*, *Developer*), edit, delete after confirmation, and a
+  warning when no `default` policy exists. The preset documents are snapshotted into the backend's
+  fixtures and validated there; every gallery template deploys under *Standard*.
+- **Tier badge** on the Versions list: the admitted tier, the classifier's reasons and the approver
+  groups still pending.
 - Trust model: builder `riskClass` / `dataClass` labels count only in a workspace with
   `defaults.trustBuilderClassifications: true`; elsewhere everything the connector catalog cannot
   vouch for is unclassified. The governing workspace follows the deployer's memberships, not the
   agent's document. Carried-over classifications are bound to the resource (type, ref,
   configuration), not to an entry id. Known limits, stated in the guide: `maxAgentMonthlyUsd` caps one
-  declaration (`perWorkspaceMonthlyUsd` is recorded, not enforced at admission); Cedar sets, the Admin
-  Workspaces UI and trigger-time gating follow.
+  declaration (`perWorkspaceMonthlyUsd` is recorded, not enforced at admission); Cedar sets and a badge
+  on registry cards follow.
 - Fixed in passing: a flow whose stored document was already Spec v2 could not be read back by
   `GET /api/specs/{id}` because `Flow` stamps a `governance` envelope the strict document refuses;
   the read path now strips the envelope (`spec_migration.without_flow_envelope`).

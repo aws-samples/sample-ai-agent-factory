@@ -49,8 +49,15 @@ CLASSIFIER_VERSION = 2
 _TIER_RANK: dict[RiskTier, int] = {"low": 0, "medium": 1, "high": 2}
 _RANK_TIER: tuple[RiskTier, ...] = ("low", "medium", "high")
 
-#: Trigger types that expose the agent to the public internet without a human in the loop.
-_PUBLIC_INGRESS_TRIGGERS = frozenset({"webhook", "email"})
+#: Trigger types that expose the agent to the public internet without a human in the loop. Read by
+#: ``services/trigger_admission`` too, so a trigger attached after deployment is judged by the same set.
+PUBLIC_INGRESS_TRIGGERS = frozenset({"webhook", "email"})
+
+#: Reason codes (``RiskReason.code``). Stable identifiers: the UI badge shows them and trigger admission
+#: reads ``write_tool`` / ``pay_tool`` off a stored decision, so they are named once here.
+PAY_TOOL_CODE = "pay_tool"
+WRITE_TOOL_CODE = "write_tool"
+PUBLIC_INGRESS_WITH_WRITE_CODE = "public_ingress_with_write"
 
 _CLASS_RANK: dict[str, int] = {"unclassified": -1, "read": 0, "write": 1, "pay": 2}
 #: Catalog operation-name prefixes that mutate the connected system.
@@ -183,7 +190,7 @@ def _rule_pay_tool(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason | N
     offending = [tool.id for tool in spec.tools if effective_risk_class(tool, policy) == "pay"]
     if offending:
         return RiskReason(
-            code="pay_tool",
+            code=PAY_TOOL_CODE,
             tier="high",
             message=f"payment tool(s) {offending} are always highest tier",
         )
@@ -194,7 +201,7 @@ def _rule_write_tool(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason |
     offending = [tool.id for tool in spec.tools if effective_risk_class(tool, policy) == "write"]
     if offending:
         return RiskReason(
-            code="write_tool",
+            code=WRITE_TOOL_CODE,
             tier="medium",
             message=f"write tool(s) {offending} can change external state",
         )
@@ -223,11 +230,11 @@ def _rule_sensitive_data(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReas
 
 
 def _rule_public_ingress_with_write(spec: AgentSpecV2, policy: WorkspacePolicy) -> RiskReason | None:
-    public = sorted({trig.type for trig in spec.triggers if trig.type in _PUBLIC_INGRESS_TRIGGERS})
+    public = sorted({trig.type for trig in spec.triggers if trig.type in PUBLIC_INGRESS_TRIGGERS})
     has_write = any(effective_risk_class(tool, policy) in ("write", "pay") for tool in spec.tools)
     if public and has_write:
         return RiskReason(
-            code="public_ingress_with_write",
+            code=PUBLIC_INGRESS_WITH_WRITE_CODE,
             tier="high",
             message=f"public ingress {public} combined with a write tool",
         )

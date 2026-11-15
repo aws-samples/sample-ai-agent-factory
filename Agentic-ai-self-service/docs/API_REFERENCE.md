@@ -209,7 +209,7 @@ they are not reconciled AWS charges or an account-level spending guarantee.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/runtimes/{name}/triggers` | Provision an active `cron` / `eventbridge` / `s3` / `webhook` trigger against the exact owned production deployment; webhook creation returns its signing secret once |
+| `POST` | `/api/runtimes/{name}/triggers` | Provision an active `cron` / `eventbridge` / `s3` / `webhook` trigger against the exact owned production deployment; webhook creation returns its signing secret once. With the `workspacePolicy` flag on, a `webhook` is judged by the workspace policy before any side effect: `403 policy_denied` (`version_not_admitted`, `trigger_raises_risk_tier`), `409` for an unreadable admission record, `503` for an unreadable policy; schedule/event/file triggers are never judged. See [docs/WORKSPACES.md](WORKSPACES.md#triggers-attached-after-deployment). |
 | `GET` | `/api/runtimes/{name}/triggers` | List the runtime's trigger lifecycle state and provisioned public handles |
 | `DELETE` | `/api/runtimes/{name}/triggers/{id}` | Stop and delete the trigger's platform-owned resources and webhook HMAC secret |
 

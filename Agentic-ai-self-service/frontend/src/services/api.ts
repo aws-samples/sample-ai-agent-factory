@@ -67,6 +67,9 @@ export {
   type AgentVersionSummary,
   type RuntimeSlotsSummary,
   type PromoteResult,
+  type VersionAdmission,
+  type AdmissionApproval,
+  type AdmissionReason,
 } from './api/versions';
 
 // ============================================================================
@@ -188,6 +191,12 @@ export {
 // `export … from` re-exports without binding locally, so the ApiClient methods
 // below need their own type import.
 import type { LiteLLMRegistryConfig, LiteLLMServer } from './api/registry';
+import {
+  deleteWorkspacePolicy,
+  listWorkspacePolicies,
+  putWorkspacePolicy,
+  type WorkspacePolicyDocument,
+} from './api/workspacePolicies';
 
 // ============================================================================
 // Re-export connectors domain
@@ -252,6 +261,18 @@ export {
   addDeployAccount,
   type DeployTargetsConfig,
 } from './api/admin';
+
+// ============================================================================
+// Re-export workspace policies domain (plan §3.B; flag `workspacePolicy`, admin scope)
+// ============================================================================
+
+export {
+  listWorkspacePolicies,
+  getWorkspacePolicy,
+  putWorkspacePolicy,
+  deleteWorkspacePolicy,
+  type WorkspacePolicyDocument,
+} from './api/workspacePolicies';
 
 // ============================================================================
 // Re-export models domain
@@ -415,6 +436,19 @@ export class ApiClient {
   // Versions
   async listVersions(runtimeName: string): Promise<AgentVersionSummary[]> {
     return apiRequest<AgentVersionSummary[]>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions`, {}, this.baseUrl);
+  }
+
+  // Workspace policies (plan §3.B; flag `workspacePolicy`, admin scope)
+  async listWorkspacePolicies(): Promise<WorkspacePolicyDocument[]> {
+    return listWorkspacePolicies(this.baseUrl);
+  }
+
+  async putWorkspacePolicy(policy: WorkspacePolicyDocument): Promise<WorkspacePolicyDocument> {
+    return putWorkspacePolicy(policy, this.baseUrl);
+  }
+
+  async deleteWorkspacePolicy(workspaceId: string): Promise<void> {
+    return deleteWorkspacePolicy(workspaceId, this.baseUrl);
   }
 
   async getSlots(runtimeName: string): Promise<RuntimeSlotsSummary> {

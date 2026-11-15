@@ -15,6 +15,7 @@ import {
   type RuntimeSlotsSummary,
 } from '../../services/api';
 import { PromotionEvaluationPanel } from './PromotionEvaluationPanel';
+import { AdmissionBadge } from './AdmissionBadge';
 
 interface VersionsListProps {
   runtimeName: string | null;
@@ -207,6 +208,8 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
                       evaluated
                     </span>
                   )}
+                  {/* Plan §3.B — the workspace admission tier, its reasons and approval state. */}
+                  <AdmissionBadge admission={v.admission} approvals={v.admission_approvals} />
                 </div>
                 <div className="text-[11px] text-gray-500">
                   {new Date(v.created_at).toLocaleString()}

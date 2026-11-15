@@ -1,0 +1,508 @@
+/**
+ * WorkspacesPanel — Admin → Workspaces (plan §3.B, implementation step 5).
+ *
+ * Lists every workspace policy, creates or edits one from a preset (Locked-down, Standard,
+ * Developer) and deletes one. The backend is the control: the panel renders only while the
+ * `workspacePolicy` flag is on (off, its routes are a 404) and only for admins; a refusal from the
+ * strict schema (422), the id guard (400) or the scope gate (403) is shown verbatim, never
+ * reinterpreted. It also warns when no `default` policy exists, because with the flag on every
+ * deploy is refused (503) until one does.
+ */
+
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { getApiClient, getErrorMessage } from '../../services/api';
+import { API_BASE_URL } from '../../services/api/client';
+import {
+  ALLOWED_DATA_CLASSES,
+  ALLOWED_TOOL_RISK_CLASSES,
+  CHANNEL_TYPES,
+  DEFAULT_WORKSPACE_ID,
+  GUARDRAIL_PROFILES,
+  RISK_TIERS,
+  type GuardrailProfile,
+  type PlatformVersion,
+  type RiskTier,
+  type WorkspacePolicyDocument,
+} from '../../services/api/workspacePolicies';
+import { useFeatureFlags } from '../../hooks/useFeatureFlags';
+import { FeatureGate } from '../FeatureGate';
+import { WORKSPACE_PRESETS, applyPreset, emptyPolicy, type WorkspacePresetId } from './workspacePresets';
+import {
+  documentFromForm,
+  formFromDocument,
+  presetInputFromForm,
+  summarizeAllowed,
+  summarizeApproval,
+  type WorkspacePolicyForm,
+} from './workspacePolicyForm';
+
+export interface WorkspacesPanelProps {
+  /** Only admins see the panel; the backend's `admin` scope is the real gate. */
+  isAdmin: boolean;
+}
+
+export function WorkspacesPanel({ isAdmin }: WorkspacesPanelProps) {
+  const { state } = useFeatureFlags(API_BASE_URL);
+  if (!isAdmin) {
+    return null;
+  }
+  return (
+    <FeatureGate state={state} flag="workspacePolicy">
+      <WorkspacesPanelBody />
+    </FeatureGate>
+  );
+}
+
+const INPUT = 'rounded border border-white/20 bg-transparent px-2 py-1 text-xs w-full';
+const BUTTON = 'text-[11px] px-2 py-0.5 rounded border border-white/20 hover:bg-white/10 disabled:opacity-40';
+const PRIMARY = 'text-[11px] px-2.5 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40';
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <label className="flex flex-col gap-0.5 text-[11px]">
+      <span className="font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-[10px] text-gray-500">{hint}</span>}
+    </label>
+  );
+}
+
+function ChoiceGroup<T extends string>({
+  label,
+  hint,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  options: readonly T[];
+  selected: T[];
+  onChange: (next: T[]) => void;
+}) {
+  return (
+    <fieldset className="text-[11px]">
+      <legend className="font-medium">{label}</legend>
+      <div className="flex flex-wrap gap-2 mt-0.5">
+        {options.map((option) => (
+          <label key={option} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={selected.includes(option)}
+              onChange={(event) =>
+                onChange(
+                  event.target.checked ? [...selected, option] : selected.filter((item) => item !== option),
+                )
+              }
+            />
+            {option}
+          </label>
+        ))}
+      </div>
+      {hint && <div className="text-[10px] text-gray-500">{hint}</div>}
+    </fieldset>
+  );
+}
+
+function membersLine(policy: WorkspacePolicyDocument): string {
+  if (policy.workspaceId === DEFAULT_WORKSPACE_ID) {
+    return 'everyone who is in no other workspace';
+  }
+  return policy.memberGroups.length ? policy.memberGroups.join(', ') : 'no member groups yet, so it governs nobody';
+}
+
+function WorkspacesPanelBody() {
+  const [policies, setPolicies] = useState<WorkspacePolicyDocument[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [form, setForm] = useState<WorkspacePolicyForm | null>(null);
+  const [editingExisting, setEditingExisting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setPolicies(await getApiClient().listWorkspacePolicies());
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const update = <K extends keyof WorkspacePolicyForm>(key: K, value: WorkspacePolicyForm[K]) => {
+    setForm((current) => (current ? { ...current, [key]: value } : current));
+  };
+
+  const startNew = (workspaceId = '', name = '') => {
+    setForm(formFromDocument(emptyPolicy(workspaceId, name)));
+    setEditingExisting(false);
+    setNotice(null);
+    setError(null);
+  };
+
+  const startEdit = (policy: WorkspacePolicyDocument) => {
+    setForm(formFromDocument(policy));
+    setEditingExisting(true);
+    setNotice(null);
+    setError(null);
+  };
+
+  const applyPresetToForm = (id: WorkspacePresetId) => {
+    if (!form) return;
+    const preset = WORKSPACE_PRESETS.find((candidate) => candidate.id === id);
+    const document = applyPreset(id, presetInputFromForm(form));
+    // Keep the preset inputs the admin typed; the document carries their effect.
+    setForm({
+      ...formFromDocument(document, { approverGroups: form.approverGroups, securityGroups: form.securityGroups }),
+      workspaceId: form.workspaceId,
+      name: form.name,
+    });
+    setNotice(`Applied the ${preset?.label ?? id} preset. Review the fields, then save.`);
+    setError(null);
+  };
+
+  const save = async () => {
+    if (!form) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const document = documentFromForm(form);
+      const stored = await getApiClient().putWorkspacePolicy(document);
+      setNotice(`Saved the policy for workspace "${stored.workspaceId}".`);
+      setForm(null);
+      await load();
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (workspaceId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await getApiClient().deleteWorkspacePolicy(workspaceId);
+      setNotice(`Deleted the policy for workspace "${workspaceId}".`);
+      setConfirmingDelete(null);
+      await load();
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hasDefault = policies.some((policy) => policy.workspaceId === DEFAULT_WORKSPACE_ID);
+
+  return (
+    <section
+      aria-labelledby="workspaces-panel-title"
+      className="rounded-lg border border-white/10 p-3 space-y-3 no-darkmap"
+      data-testid="workspaces-panel"
+    >
+      <div className="flex items-center justify-between">
+        <span id="workspaces-panel-title" className="text-sm font-medium">
+          Workspaces (policy and risk-tiered admission)
+        </span>
+        <div className="flex gap-2">
+          <button type="button" className={BUTTON} onClick={() => void load()} disabled={loading || busy}>
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+          <button type="button" className={PRIMARY} onClick={() => startNew()} disabled={busy}>
+            New workspace
+          </button>
+        </div>
+      </div>
+
+      <p className="text-[11px] text-gray-500">
+        A policy says what a workspace may use and which groups approve each risk tier. The workspace
+        that governs an agent follows its deployer's Cognito groups; everyone else is governed by{' '}
+        <code>default</code>.
+      </p>
+
+      {error && (
+        <div role="alert" className="text-xs text-red-400">
+          {error}
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="text-xs text-emerald-500">
+          {notice}
+        </div>
+      )}
+
+      {!loading && !error && !hasDefault && (
+        <div role="alert" className="text-[11px] text-amber-500 flex items-center justify-between gap-2">
+          <span>
+            No <code>default</code> policy is stored. While the <code>workspacePolicy</code> flag is on,
+            every deploy is refused (503) until one exists.
+          </span>
+          <button type="button" className={BUTTON} onClick={() => startNew(DEFAULT_WORKSPACE_ID, 'Default')}>
+            Create the default policy
+          </button>
+        </div>
+      )}
+
+      {policies.length === 0 && !loading ? (
+        <p className="text-[11px] text-gray-500">No workspace policies yet.</p>
+      ) : (
+        <ul className="space-y-1" aria-label="Workspace policies">
+          {policies.map((policy) => (
+            <li
+              key={policy.workspaceId}
+              className="text-[11px] px-2 py-1.5 rounded bg-white/10 space-y-0.5"
+              data-testid={`workspace-${policy.workspaceId}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <span className="font-medium">{policy.name}</span>{' '}
+                  <span className="font-mono text-[10px] text-gray-500">{policy.workspaceId}</span>
+                </div>
+                <div className="flex gap-1">
+                  <button type="button" className={BUTTON} onClick={() => startEdit(policy)} disabled={busy}>
+                    Edit
+                  </button>
+                  {confirmingDelete === policy.workspaceId ? (
+                    <>
+                      <button
+                        type="button"
+                        className={`${BUTTON} text-red-400`}
+                        onClick={() => void remove(policy.workspaceId)}
+                        disabled={busy}
+                      >
+                        Confirm delete
+                      </button>
+                      <button type="button" className={BUTTON} onClick={() => setConfirmingDelete(null)}>
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className={BUTTON}
+                      onClick={() => setConfirmingDelete(policy.workspaceId)}
+                      disabled={busy}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="text-[10px] text-gray-500">Members: {membersLine(policy)}</div>
+              <div className="text-[10px] text-gray-500">Allowed: {summarizeAllowed(policy.allowed)}</div>
+              <div className="text-[10px] text-gray-500">Approval: {summarizeApproval(policy.approval)}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {form && (
+        <form
+          className="space-y-3 border-t border-white/10 pt-3"
+          aria-label={editingExisting ? 'Edit workspace policy' : 'New workspace policy'}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void save();
+          }}
+        >
+          <div className="flex flex-wrap gap-1 items-center">
+            <span className="text-[11px] font-medium">Preset:</span>
+            {WORKSPACE_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                className={BUTTON}
+                title={preset.summary}
+                onClick={() => applyPresetToForm(preset.id)}
+                disabled={busy}
+              >
+                {preset.label}
+              </button>
+            ))}
+            <span className="text-[10px] text-gray-500">
+              Presets route medium risk to the approver groups and high risk to security and approvers.
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Workspace id" hint="Letters, digits, . _ : -; cannot change after saving.">
+              <input
+                className={INPUT}
+                value={form.workspaceId}
+                onChange={(event) => update('workspaceId', event.target.value)}
+                disabled={editingExisting}
+                required
+              />
+            </Field>
+            <Field label="Name">
+              <input className={INPUT} value={form.name} onChange={(event) => update('name', event.target.value)} required />
+            </Field>
+            <Field label="Member groups" hint="Cognito groups whose members deploy into this workspace.">
+              <input
+                className={INPUT}
+                value={form.memberGroups}
+                onChange={(event) => update('memberGroups', event.target.value)}
+                placeholder="g-finance-builders"
+                disabled={form.workspaceId.trim() === DEFAULT_WORKSPACE_ID}
+              />
+            </Field>
+            <Field label="Admin groups">
+              <input
+                className={INPUT}
+                value={form.adminGroups}
+                onChange={(event) => update('adminGroups', event.target.value)}
+                placeholder="g-admins-super"
+              />
+            </Field>
+            <Field label="Approver groups (preset input)" hint="Review medium-risk agents.">
+              <input
+                className={INPUT}
+                value={form.approverGroups}
+                onChange={(event) => update('approverGroups', event.target.value)}
+                placeholder="g-approvers"
+              />
+            </Field>
+            <Field label="Security groups (preset input)" hint="Must also clear high-risk agents.">
+              <input
+                className={INPUT}
+                value={form.securityGroups}
+                onChange={(event) => update('securityGroups', event.target.value)}
+                placeholder="g-security"
+              />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Allowed providers" hint="Empty = unconstrained.">
+              <input className={INPUT} value={form.providers} onChange={(event) => update('providers', event.target.value)} placeholder="bedrock" />
+            </Field>
+            <Field label="Allowed models" hint="Empty = unconstrained.">
+              <input className={INPUT} value={form.models} onChange={(event) => update('models', event.target.value)} />
+            </Field>
+            <Field label="Allowed connectors" hint="Empty = unconstrained.">
+              <input className={INPUT} value={form.connectors} onChange={(event) => update('connectors', event.target.value)} placeholder="jira, slack" />
+            </Field>
+            <Field label="Allowed Regions" hint="Empty = unconstrained.">
+              <input className={INPUT} value={form.regions} onChange={(event) => update('regions', event.target.value)} placeholder="us-east-1" />
+            </Field>
+          </div>
+
+          <ChoiceGroup
+            label="Allowed tool risk classes"
+            hint="Empty = unconstrained. Constrained, an unclassified tool is refused, not floored."
+            options={ALLOWED_TOOL_RISK_CLASSES}
+            selected={form.toolRiskClasses}
+            onChange={(next) => update('toolRiskClasses', next)}
+          />
+          <ChoiceGroup
+            label="Allowed data classes"
+            hint="Empty = unconstrained."
+            options={ALLOWED_DATA_CLASSES}
+            selected={form.dataClasses}
+            onChange={(next) => update('dataClasses', next)}
+          />
+          <ChoiceGroup
+            label="Allowed channels"
+            hint="Empty = unconstrained."
+            options={CHANNEL_TYPES}
+            selected={form.channels}
+            onChange={(next) => update('channels', next)}
+          />
+
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="Per-agent monthly budget (USD)" hint="Default for an agent that declares none.">
+              <input className={INPUT} inputMode="decimal" value={form.perAgentMonthlyUsd} onChange={(event) => update('perAgentMonthlyUsd', event.target.value)} />
+            </Field>
+            <Field label="Per-agent cap (USD)" hint="Admission refuses an agent above it.">
+              <input className={INPUT} inputMode="decimal" value={form.maxAgentMonthlyUsd} onChange={(event) => update('maxAgentMonthlyUsd', event.target.value)} />
+            </Field>
+            <Field label="Workspace monthly budget (USD)" hint="Recorded for chargeback; not enforced at admission.">
+              <input className={INPUT} inputMode="decimal" value={form.perWorkspaceMonthlyUsd} onChange={(event) => update('perWorkspaceMonthlyUsd', event.target.value)} />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="Approvers: low risk" hint="Empty = auto-approve.">
+              <input className={INPUT} value={form.approvalLow} onChange={(event) => update('approvalLow', event.target.value)} />
+            </Field>
+            <Field label="Approvers: medium risk" hint="Every group must approve.">
+              <input className={INPUT} value={form.approvalMedium} onChange={(event) => update('approvalMedium', event.target.value)} />
+            </Field>
+            <Field label="Approvers: high risk" hint="Every group must approve.">
+              <input className={INPUT} value={form.approvalHigh} onChange={(event) => update('approvalHigh', event.target.value)} />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <Field label="Platform version default">
+              <select
+                className={INPUT}
+                value={form.platformVersion}
+                onChange={(event) => update('platformVersion', event.target.value as '' | PlatformVersion)}
+              >
+                <option value="">platform default</option>
+                <option value="V1">V1</option>
+                <option value="V2">V2</option>
+              </select>
+            </Field>
+            <Field label="Gateway guardrail profile">
+              <select
+                className={INPUT}
+                value={form.guardrailProfile}
+                onChange={(event) => update('guardrailProfile', event.target.value as GuardrailProfile)}
+              >
+                {GUARDRAIL_PROFILES.map((profile) => (
+                  <option key={profile} value={profile}>
+                    {profile}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Unclassified items floor the tier to">
+              <select
+                className={INPUT}
+                value={form.unclassifiedRiskTier}
+                onChange={(event) => update('unclassifiedRiskTier', event.target.value as RiskTier)}
+              >
+                {RISK_TIERS.map((tier) => (
+                  <option key={tier} value={tier}>
+                    {tier}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Memory default">
+              <input className={INPUT} value={form.memory} onChange={(event) => update('memory', event.target.value)} />
+            </Field>
+            <label className="flex items-center gap-2 text-[11px] col-span-2 mt-4">
+              <input
+                type="checkbox"
+                checked={form.trustBuilderClassifications}
+                onChange={(event) => update('trustBuilderClassifications', event.target.checked)}
+              />
+              Trust builders' own risk and data classifications (developer workspaces only)
+            </label>
+          </div>
+
+          <div className="flex gap-2">
+            <button type="submit" className={PRIMARY} disabled={busy}>
+              {busy ? 'Saving…' : editingExisting ? 'Save changes' : 'Create workspace'}
+            </button>
+            <button type="button" className={BUTTON} onClick={() => setForm(null)} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
