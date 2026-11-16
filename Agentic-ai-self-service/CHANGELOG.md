@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — canvas usability from external evaluator feedback (Code Interpreter/Browser, tool-to-runtime, runtime-name tabs, validation reasons)
+
+- **Code Interpreter and Browser nodes are usable again.** Dropping either node created it
+  with no configuration object, so the canvas re-validated and immediately marked it
+  "Component configuration is required", blocking the whole deploy, and no dialog was
+  registered to fix it. They now drop with a valid default (`{ name, enabled: true }`) and
+  have minimal configuration modals, so they are valid on drop and editable from the
+  Configure button / double-click. The deploy path already supported both (the generated
+  agent imports `code_session` / `browser_session`); only the canvas gate was wrong.
+- **A tool can be connected directly to a runtime.** AgentCore tools are served through an
+  AgentCore Gateway, so a direct tool→runtime drag previously did nothing. Connecting a tool
+  to a runtime now auto-routes it through a Gateway — reusing the runtime's existing Gateway
+  or creating one and wiring `runtime → gateway → tool` as a single undoable action. The
+  resulting graph is the exact shape the deploy compiler already produces, so nothing in the
+  pipeline changes.
+- **The management tabs query the deployed runtime name.** The deploy normalizes the canvas
+  name to the AgentCore pattern (e.g. `My Agent` → `My_Agent`), but the Versions, Evals,
+  Cost, Observability and Triggers tabs queried with the raw canvas name and got
+  `400 runtime_name must match [a-zA-Z][a-zA-Z0-9_]*`, leaving those tabs empty after a
+  successful deploy. They now use the `runtime_name` the backend served; the deployed name is
+  shown in the result panel, and the Runtime Name field states up front that the name is
+  normalized on deploy.
+- **Validation reasons are readable.** A node marked invalid showed no usable reason: the
+  node tooltip truncated each message to one line and the canvas chip only said "N Errors".
+  The tooltip now wraps and lists every reason in full, and the canvas indicator expands to a
+  list of issues, each shown as "<node>: <reason>" with the node name linking to select it.
+
 ### Added — workspaces, policy and risk-tiered admission (flag `workspacePolicy`)
 
 - A **workspace policy** (`PUT /api/workspaces/{id}/policy`, `admin` scope) declares what a
