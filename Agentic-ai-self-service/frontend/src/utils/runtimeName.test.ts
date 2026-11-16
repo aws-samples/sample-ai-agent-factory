@@ -12,12 +12,23 @@ describe('resolveManagementRuntimeName', () => {
     expect(resolveManagementRuntimeName(undefined, 'My_Agent', 'My Agent')).toBe('My_Agent');
   });
 
-  it('falls back to the canvas name before any deployment', () => {
+  it('falls back to a valid canvas name before any deployment', () => {
     expect(resolveManagementRuntimeName(undefined, undefined, 'draft_agent')).toBe('draft_agent');
   });
 
   it('is null when nothing is known', () => {
     expect(resolveManagementRuntimeName(undefined, undefined, undefined)).toBeNull();
     expect(resolveManagementRuntimeName(null, null, null)).toBeNull();
+  });
+
+  it('refuses a name that is not a valid AgentCore runtime name (no request path from a hostile value)', () => {
+    // A raw canvas name with a space is not query-able; show the empty state.
+    expect(resolveManagementRuntimeName(undefined, undefined, 'My Agent')).toBeNull();
+    // Path-traversal-shaped values never reach a request path.
+    expect(resolveManagementRuntimeName('..', undefined, undefined)).toBeNull();
+    expect(resolveManagementRuntimeName('../admin', undefined, undefined)).toBeNull();
+    expect(resolveManagementRuntimeName('a/b', undefined, undefined)).toBeNull();
+    // A hyphenated name is not the underscore AgentCore pattern either.
+    expect(resolveManagementRuntimeName('my-agent', undefined, undefined)).toBeNull();
   });
 });

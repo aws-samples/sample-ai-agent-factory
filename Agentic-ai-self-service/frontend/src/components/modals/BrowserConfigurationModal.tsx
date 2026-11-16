@@ -65,7 +65,7 @@ export function BrowserConfigurationModal({
         <div className="space-y-6">
           <FormSection
             title="Browser Tool"
-            description="Gives the deployed agent a managed cloud browser session for web interactions. Outbound reach follows the runtime's network placement."
+            description="Gives the deployed agent a managed AgentCore cloud browser session for web interactions."
           >
             <TextField
               label="Name"

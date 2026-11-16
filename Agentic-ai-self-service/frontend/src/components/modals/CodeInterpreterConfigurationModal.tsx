@@ -66,7 +66,7 @@ export function CodeInterpreterConfigurationModal({
         <div className="space-y-6">
           <FormSection
             title="Code Interpreter"
-            description="Runs the agent's generated code in a secure AgentCore sandbox session. No network egress unless the runtime's VPC allows it."
+            description="Gives the deployed agent an AgentCore code-interpreter sandbox session to run generated code."
           >
             <TextField
               label="Name"

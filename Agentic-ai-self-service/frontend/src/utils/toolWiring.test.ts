@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { planToolToRuntimeWiring, deriveGatewayName } from './toolWiring';
 import { deriveCanvasDeployInputs } from './deployRequestFromCanvas';
+import { createDefaultGatewayConfig } from './gatewayConfig';
 import type { AgentCoreNode } from '../store/workflowStore';
 import type { Edge } from '@xyflow/react';
 
@@ -114,6 +115,28 @@ describe('planToolToRuntimeWiring', () => {
     const bare = runtimeNode('r', '');
     bare.data.label = '';
     expect(deriveGatewayName(bare)).toBe('agent-tools');
+  });
+
+  it('the auto-created gateway introduces no privileged default beyond a hand-placed gateway', () => {
+    const rt = runtimeNode();
+    const tool = toolNode();
+    const plan = planToolToRuntimeWiring([rt, tool], [], tool.id, rt.id);
+    const autoCfg = plan.gatewayNode!.data.configuration as unknown as Record<string, unknown>;
+    const handPlaced = createDefaultGatewayConfig() as unknown as Record<string, unknown>;
+
+    // The auto gateway is exactly the hand-placed default with only its name set:
+    // no extra credential, provider override, target, or wildcard is introduced.
+    const autoRest = { ...autoCfg };
+    const handRest = { ...handPlaced };
+    delete autoRest.name;
+    delete handRest.name;
+    expect(autoRest).toEqual(handRest);
+    expect(autoCfg.gatewayProvider).toBe('agentcore');
+    expect(autoCfg.litellmApiKey).toBeUndefined();
+    expect(autoCfg.litellmBaseUrl).toBeUndefined();
+    // Name is a non-empty friendly label (backend owns real identity/ownership).
+    expect(typeof autoCfg.name).toBe('string');
+    expect((autoCfg.name as string).length).toBeGreaterThan(0);
   });
 
   it('produces a graph that compiles to a gateway-served deploy request', () => {

@@ -9,10 +9,19 @@
  * before anything has been deployed (so the tabs' own "deploy first" empty state
  * still shows a sensible value).
  */
+const AGENTCORE_RUNTIME_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
 export function resolveManagementRuntimeName(
   deployedRuntimeName: string | null | undefined,
   restoredRuntimeName: string | null | undefined,
   canvasName: string | null | undefined,
 ): string | null {
-  return deployedRuntimeName ?? restoredRuntimeName ?? canvasName ?? null;
+  const candidate = deployedRuntimeName ?? restoredRuntimeName ?? canvasName ?? null;
+  // Defense in depth: the management endpoints validate the name with this exact
+  // pattern and return 400 otherwise, and a browser silently normalizes "." / ".."
+  // path segments. Only hand a name to the tabs when it already matches, so a
+  // pre-deploy canvas name with spaces — or any hostile value — is never placed
+  // in a request path; the tabs show their "deploy first" empty state instead.
+  if (!candidate || !AGENTCORE_RUNTIME_NAME.test(candidate)) return null;
+  return candidate;
 }

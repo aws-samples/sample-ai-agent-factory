@@ -38,8 +38,11 @@ function hasEdgeBetween(edges: Edge[], a: string, b: string): boolean {
   return edges.some((edge) => edgeConnects(edge, a, b));
 }
 
-/** A hyphen-style Gateway name derived from the runtime, so a shared account does
- *  not collide on a fixed default. Falls back to "agent-tools". */
+/** A hyphen-style Gateway name derived from the runtime, so an auto-created gateway
+ *  does not reuse one fixed default name across runtimes. This is a friendly label
+ *  only: it reduces (does not prove) name collisions, and the backend — not this
+ *  name — owns resource identity, ownership and tenant isolation. Falls back to
+ *  "agent-tools". */
 export function deriveGatewayName(runtime: AgentCoreNode): string {
   const cfg = runtime.data.configuration as RuntimeConfiguration | undefined;
   const raw = (cfg?.name || runtime.data.label || 'agent').trim();
