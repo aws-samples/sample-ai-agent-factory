@@ -48,22 +48,22 @@ function ValidationTooltip({ errors = [], warnings = [], status }: ValidationToo
   }
 
   return (
-    <div className="text-xs max-w-xs">
+    <div className="text-xs max-w-sm">
       {errors.length > 0 && (
         <div className="mb-1">
           <div className="font-semibold text-red-600 mb-0.5">Errors:</div>
-          <ul className="list-disc list-inside text-red-600">
-            {errors.slice(0, 3).map((err, i) => <li key={i} className="truncate">{err.message}</li>)}
-            {errors.length > 3 && <li className="text-gray-500">...and {errors.length - 3} more</li>}
+          <ul className="list-disc list-inside text-red-600 space-y-0.5">
+            {/* Full, wrapped reasons — truncating them to one line was why a node
+                read "invalid" with no usable explanation (customer feedback). */}
+            {errors.map((err, i) => <li key={i} className="break-words">{err.message}</li>)}
           </ul>
         </div>
       )}
       {warnings.length > 0 && (
         <div>
           <div className="font-semibold text-yellow-600 mb-0.5">Warnings:</div>
-          <ul className="list-disc list-inside text-yellow-600">
-            {warnings.slice(0, 3).map((warn, i) => <li key={i} className="truncate">{warn.message}</li>)}
-            {warnings.length > 3 && <li className="text-gray-500">...and {warnings.length - 3} more</li>}
+          <ul className="list-disc list-inside text-yellow-600 space-y-0.5">
+            {warnings.map((warn, i) => <li key={i} className="break-words">{warn.message}</li>)}
           </ul>
         </div>
       )}
@@ -245,7 +245,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
             </span>
 
             {showTooltip && (
-              <div className="absolute z-50 right-0 top-full mt-1 p-2 bg-white rounded-md border border-[#e9ebed] min-w-[200px]" style={{ boxShadow: 'var(--elevation-3)' }}>
+              <div className="absolute z-50 right-0 top-full mt-1 p-2 bg-white rounded-md border border-[#e9ebed] min-w-[200px] max-w-[340px] whitespace-normal" style={{ boxShadow: 'var(--elevation-3)' }}>
                 <ValidationTooltip errors={data.validationErrors} warnings={data.validationWarnings} status={data.validationStatus} />
               </div>
             )}
