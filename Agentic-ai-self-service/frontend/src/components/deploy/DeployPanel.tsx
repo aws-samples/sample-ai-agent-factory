@@ -54,6 +54,7 @@ import {
 } from './DeploymentTargetFields';
 import { useDeployment } from './useDeployment';
 import { mapGatewayDeployTargets } from '../../utils/gatewayConfig';
+import { resolveManagementRuntimeName } from '../../utils/runtimeName';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { ChatInterface } from './ChatInterface';
 import { McpToolsPanel } from './McpToolsPanel';
@@ -164,6 +165,7 @@ export interface DeployPanelProps {
   restoredDeployment?: {
     deploymentId?: string;
     runtimeId: string;
+    runtimeName?: string;
     endpoint: string;
     runtimeProtocol?: 'HTTP' | 'MCP' | 'A2A';
     gatewayUrl?: string;
@@ -412,6 +414,7 @@ export function DeployPanel({
         deploymentId: restoredDeployment.deploymentId,
         message: 'Restored from previous deployment',
         runtimeId: restoredDeployment.runtimeId,
+        runtimeName: restoredDeployment.runtimeName,
         endpoint: restoredDeployment.endpoint,
         runtimeProtocol: restoredDeployment.runtimeProtocol || 'HTTP',
         gatewayUrl: restoredDeployment.gatewayUrl,
@@ -419,6 +422,17 @@ export function DeployPanel({
       setActiveTab(restoredDeployment.runtimeProtocol === 'MCP' ? 'tools' : 'chat');
     }
   }, [restoredDeployment]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The management tabs query AgentCore by the DEPLOYED runtime name. The deploy
+  // normalizes the canvas name (e.g. "My Agent" -> "My_Agent"), so the raw
+  // `config.name` returned 400 from versions/evals/cost/observability/triggers
+  // and left every tab empty. Prefer the name the backend actually served
+  // (`runtime_name`), falling back to the canvas name only before a deploy.
+  const effectiveRuntimeName = resolveManagementRuntimeName(
+    deploymentStatus.runtimeName,
+    restoredDeployment?.runtimeName,
+    config?.name,
+  );
 
   const pythonExportBlockedReason =
     Object.keys(resourceTagState.tags).length || resourceTagState.profileName
@@ -1034,6 +1048,7 @@ export function DeployPanel({
                   message={deploymentStatus.message || 'Deployed successfully!'}
                   simulated={deploymentStatus.simulated}
                   runtimeId={deploymentStatus.runtimeId}
+                  runtimeName={deploymentStatus.runtimeName}
                   runtimeProtocol={deploymentStatus.runtimeProtocol}
                   endpoint={deploymentStatus.endpoint}
                   gatewayUrl={deploymentStatus.gatewayUrl}
@@ -1224,17 +1239,17 @@ export function DeployPanel({
               <McpToolsPanel deploymentId={deploymentStatus.deploymentId} />
             </div>
           )}
-          {activeTab === 'versions' && <VersionsList runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
-          {activeTab === 'evals' && <EvaluationResultsPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
-          {activeTab === 'cost' && <CostPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
+          {activeTab === 'versions' && <VersionsList runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />}
+          {activeTab === 'evals' && <EvaluationResultsPanel runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />}
+          {activeTab === 'cost' && <CostPanel runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />}
           {activeTab === 'observability' && (
             <>
-              <ObservabilityPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />
-              <TraceWaterfall runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />
+              <ObservabilityPanel runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />
+              <TraceWaterfall runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />
             </>
           )}
           {activeTab === 'triggers' && !isMcpProtocol && (
-            <TriggersPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />
+            <TriggersPanel runtimeName={effectiveRuntimeName} refreshKey={versionsRefreshKey} />
           )}
         </div>
 

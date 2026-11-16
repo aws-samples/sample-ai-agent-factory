@@ -122,6 +122,7 @@ function App() {
   const [restoredDeployment, setRestoredDeployment] = useState<{
     deploymentId: string;
     runtimeId: string;
+    runtimeName?: string;
     endpoint: string;
     runtimeProtocol: 'HTTP' | 'MCP' | 'A2A';
     gatewayUrl?: string;
@@ -131,6 +132,7 @@ function App() {
     setRestoredDeployment({
       deploymentId: deployment.deployment_id,
       runtimeId: deployment.runtime_id || deployment.deployment_id,
+      runtimeName: deployment.runtime_name,
       endpoint: deployment.runtime_endpoint || '',
       runtimeProtocol: deployment.runtime_protocol || 'HTTP',
       gatewayUrl: deployment.gateway_url,

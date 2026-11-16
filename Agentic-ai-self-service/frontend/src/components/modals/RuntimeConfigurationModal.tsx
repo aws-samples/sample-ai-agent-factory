@@ -384,6 +384,7 @@ export function RuntimeConfigurationModal({
               placeholder="My Agent Runtime"
               required
               error={getFieldError('name')}
+              helpText="Letters, numbers and underscores. Spaces and other characters become underscores on deploy; the exact deployed name is shown after deployment."
             />
             <TextField
               id="entrypoint"
