@@ -47,7 +47,9 @@ All notable changes to this project are documented here. The format follows
   create), a `PUT` must say what it is based on (`If-Match: "<token>"` to replace, `If-None-Match: *`
   to create) and the store enforces both attributes in the same DynamoDB write, so two admins editing
   one policy cannot overwrite each other's tightening, and a form opened before a delete and recreate
-  cannot overwrite the recreated policy. A stale save is `412 policy_revision_conflict` (naming
+  cannot overwrite the recreated policy. `DELETE` names the version it confirmed the same way (a
+  workspace without its own policy falls back to the org default, so a stale confirmation must not
+  remove a tightened one). A stale save or delete is `412 policy_revision_conflict` (naming
   `currentVersion`) and changes nothing; no precondition is `428 precondition_required`;
   `If-Match: *` and other ambiguous preconditions are `400`. The deployment Lambda's CORS allow-list
   gains `PUT`, `If-Match`, `If-None-Match` and exposes `ETag`.
@@ -100,7 +102,8 @@ All notable changes to this project are documented here. The format follows
   the medium approvers) cannot be saved without an explicit acknowledgement. Editing fetches the
   policy as the server holds it now and saves against that version; a colleague's earlier save (or a
   delete and recreate) is shown as the backend's `412` with a *Reload current version* action, never
-  overwritten. The preset
+  overwritten. Delete reads the policy first, shows exactly what is about to be deleted, and names
+  that version. The preset
   documents are snapshotted into the backend's fixtures and validated there; every gallery template
   deploys under *Standard*.
 - **Tier badge** on the Versions list: the admitted tier, the classifier's reasons and the approver

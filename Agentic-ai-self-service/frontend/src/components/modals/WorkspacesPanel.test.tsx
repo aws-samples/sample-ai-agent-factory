@@ -265,17 +265,41 @@ describe('WorkspacesPanel', () => {
     expect(api.putWorkspacePolicy).not.toHaveBeenCalled();
   });
 
-  it('deletes a policy only after an explicit confirmation', async () => {
+  it('deletes exactly the version it read and showed, only after an explicit confirmation', async () => {
+    api.getWorkspacePolicy.mockResolvedValue({ policy: { ...finance, name: 'Finance (current)' }, version: 'eeeeeeeeeeeeeeee.5' });
     render(<WorkspacesPanel isAdmin />);
     const card = await screen.findByTestId('workspace-finance');
     fireEvent.click(within(card).getByText('Delete'));
+    const confirmation = await within(card).findByTestId('workspace-delete-confirmation');
+    expect(api.getWorkspacePolicy).toHaveBeenCalledWith('finance');
+    expect(confirmation).toHaveTextContent('Deleting "Finance (current)" (version eeeeeeeeeeeeeeee.5');
+    expect(confirmation).toHaveTextContent('high g-security+g-approvers');
     expect(api.deleteWorkspacePolicy).not.toHaveBeenCalled();
     fireEvent.click(within(card).getByText('Cancel'));
     expect(within(card).queryByText('Confirm delete')).not.toBeInTheDocument();
     fireEvent.click(within(card).getByText('Delete'));
-    fireEvent.click(within(card).getByText('Confirm delete'));
-    await waitFor(() => expect(api.deleteWorkspacePolicy).toHaveBeenCalledWith('finance'));
+    fireEvent.click(await within(card).findByText('Confirm delete'));
+    await waitFor(() => expect(api.deleteWorkspacePolicy).toHaveBeenCalledWith('finance', { version: 'eeeeeeeeeeeeeeee.5' }));
     expect(await screen.findByText('Deleted the policy for workspace "finance".')).toBeInTheDocument();
+  });
+
+  it('a stale delete confirmation is refused verbatim, deletes nothing, and closes', async () => {
+    api.getWorkspacePolicy.mockResolvedValueOnce({ policy: finance, version: 'ffffffffffffffff.1' });
+    api.deleteWorkspacePolicy.mockRejectedValueOnce({
+      message:
+        "The policy for workspace 'finance' changed since it was read (revision 1, now 2); read the current policy before deleting it. Nothing was deleted.",
+      status: 412,
+      details: { detail: { code: 'policy_revision_conflict', expectedVersion: 'ffffffffffffffff.1', currentVersion: 'ffffffffffffffff.2' } },
+    });
+    render(<WorkspacesPanel isAdmin />);
+    const card = await screen.findByTestId('workspace-finance');
+    fireEvent.click(within(card).getByText('Delete'));
+    fireEvent.click(await within(card).findByText('Confirm delete'));
+    await waitFor(() => expect(api.deleteWorkspacePolicy).toHaveBeenCalledWith('finance', { version: 'ffffffffffffffff.1' }));
+    expect(await screen.findByText(/Nothing was deleted/)).toBeInTheDocument();
+    expect(within(card).queryByText('Confirm delete')).not.toBeInTheDocument();
+    expect(api.listWorkspacePolicies).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Deleted the policy/)).not.toBeInTheDocument();
   });
 
   it('shows a list failure instead of an empty list', async () => {

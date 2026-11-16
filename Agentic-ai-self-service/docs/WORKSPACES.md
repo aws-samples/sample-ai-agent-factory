@@ -26,10 +26,13 @@ DynamoDB write, so two admins editing the same policy cannot overwrite each othe
 changes, which is what keeps a form opened before a colleague added `g-security` to the high routing from
 silently removing it again. Because a delete followed by a create mints a new incarnation, a form opened
 before the deletion cannot overwrite the recreated policy either (a plain counter would restart at 1 and
-let it; the `412` then says the policy was deleted and recreated). A `PUT` with neither header is
-`428 precondition_required`; `If-Match: *`, a weak validator, a token this store never issued or both
-headers at once is `400`. Policies written before versions existed read as the legacy token `"0"` and can
-be claimed exactly once as such.
+let it; the `412` then says the policy was deleted and recreated). **Deletion is conditional the same
+way**: `DELETE` must carry `If-Match` with the version the admin confirmed, because a workspace without
+its own policy falls back to the org `default`, so a delete confirmation opened before a colleague
+tightened or recreated the policy must not remove it (`412`, nothing deleted). A `PUT` with neither
+header, or a `DELETE` without `If-Match`, is `428 precondition_required`; `If-Match: *`, a weak validator,
+a token this store never issued or both headers at once is `400`. Policies written before versions
+existed read as the legacy token `"0"` and can be claimed or deleted exactly once as such.
 
 ```json
 {
@@ -267,7 +270,10 @@ validates each against the schema and pins what it admits.
 version (`If-Match`); a new policy is created only if none exists (`If-None-Match: *`). When a colleague
 saved first, or deleted and recreated the policy, the backend's `412` is shown verbatim, the admin's form
 is kept, and **Reload current version** fetches the colleague's version so the change can be reapplied on
-top of it instead of over it. A response without a version is refused rather than edited.
+top of it instead of over it. **Delete** reads the policy first and shows exactly what is about to be
+deleted (name, version, approval routing) before asking for confirmation; the delete names that version,
+so a policy changed or recreated meanwhile stays and the refusal is shown. A response without a version
+is refused rather than edited or deleted.
 
 Every version in the deploy panel's **Versions** list carries a **tier badge** (`low` / `medium` /
 `high risk`, the classifier's reasons in its tooltip, and the groups whose approval is still pending);

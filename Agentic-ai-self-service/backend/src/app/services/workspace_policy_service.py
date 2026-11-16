@@ -25,8 +25,11 @@ BOTH attributes. Two admins editing the same policy therefore cannot silently ov
 second save fails (``WorkspacePolicyRevisionConflict``) and has to be redone against the current
 document, so a tightened approver routing or allow-list is never undone by a stale form. Because a
 delete followed by a create mints a new incarnation, a token read before the deletion can never name
-the recreated policy either (a plain counter would restart at 1 and could). Items written before
-versions existed read as the legacy version ``0`` and can be claimed exactly once as such.
+the recreated policy either (a plain counter would restart at 1 and could). Deletion is conditional the
+same way: a delete names the version it saw, so a confirmation opened before a colleague tightened or
+recreated the policy cannot remove it (and send the workspace's builders to the org ``default``). Items
+written before versions existed read as the legacy version ``0`` and can be claimed or deleted exactly
+once as such.
 
 Only ``boto3`` DynamoDB Table calls are wrapped here; every other function is pure and testable
 without AWS.
@@ -329,8 +332,9 @@ class WorkspacePolicyStore:
         response = self._table.get_item(Key=key, ConsistentRead=True)
         return response.get("Item")
 
-    def _delete_item(self, key: dict[str, str]) -> None:
-        self._table.delete_item(Key=key)
+    def _delete_item(self, key: dict[str, str], condition: dict[str, Any]) -> None:
+        """Like ``_put_item``: every policy deletion names the version it is deleting."""
+        self._table.delete_item(Key=key, **condition)
 
     def _query_prefix(self, org_id: str, prefix: str) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -411,8 +415,34 @@ class WorkspacePolicyStore:
         policy = policy_from_item(item)
         return policy, PolicyFence(table_name=self._table_name, key=key, document=item["policy"])
 
-    def delete(self, org_id: str, workspace_id: str) -> None:
-        self._delete_item({"org_id": org_id, "sk": policy_sort_key(workspace_id)})
+    def delete(self, org_id: str, workspace_id: str, *, expected: PolicyVersion) -> None:
+        """Delete the policy ONLY if it is still exactly at ``expected`` (the legacy version names an item
+        written before versions existed), as one conditional delete on both version attributes. A policy
+        that changed, was recreated or is already gone is ``WorkspacePolicyRevisionConflict`` and nothing
+        is deleted: deleting a workspace's policy sends its builders to the org ``default``, so a stale
+        confirmation must not remove a policy a colleague has since tightened or recreated."""
+        if not isinstance(expected, PolicyVersion):
+            raise WorkspacePolicyError(f"expected must be a PolicyVersion, not {type(expected).__name__}")
+        names = {"#rev": REVISION_ATTRIBUTE, "#inc": INCARNATION_ATTRIBUTE}
+        if expected.incarnation is None:
+            condition: dict[str, Any] = {
+                "ConditionExpression": "attribute_exists(sk) AND attribute_not_exists(#rev) AND attribute_not_exists(#inc)",
+                "ExpressionAttributeNames": names,
+            }
+        else:
+            condition = {
+                "ConditionExpression": "#inc = :inc AND #rev = :rev",
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": {":inc": expected.incarnation, ":rev": expected.revision},
+            }
+        key = {"org_id": org_id, "sk": policy_sort_key(workspace_id)}
+        try:
+            self._delete_item(key, condition)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            current = self._read_version(org_id, workspace_id)
+            raise WorkspacePolicyRevisionConflict(workspace_id, expected, current) from exc
 
     def list(self, org_id: str) -> list[WorkspacePolicy]:
         policies = []

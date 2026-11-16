@@ -12,7 +12,8 @@
  * based on: `If-Match: "<version>"` to replace the policy as read, or `If-None-Match: *` to create one
  * that does not exist yet. A stale version is `412 policy_revision_conflict` (someone else saved first,
  * or the policy was deleted and recreated; the caller re-reads and reapplies) and a PUT without either
- * header is `428`. This module carries the version alongside the document and fails closed when the
+ * header is `428`; a DELETE names the version it confirmed the same way. This module carries the version
+ * alongside the document and fails closed when the
  * server does not return one: without it a later save could not be made safely.
  */
 
@@ -208,10 +209,20 @@ export async function putWorkspacePolicy(
   return storedPolicyFrom(response);
 }
 
-/** Delete a policy (204, idempotent). A 204 has no JSON body, so this does not go through `apiRequest`. */
-export async function deleteWorkspacePolicy(workspaceId: string, baseUrl: string = API_BASE_URL): Promise<void> {
+/**
+ * Delete exactly the version of a policy the admin confirmed (`If-Match`; 204). A policy that a colleague
+ * changed, recreated or already removed since is `412` and nothing is deleted: a workspace without its
+ * own policy falls back to the org default, so a stale confirmation must not remove a tightened one.
+ * A 204 has no JSON body, so this does not go through `apiRequest`.
+ */
+export async function deleteWorkspacePolicy(
+  workspaceId: string,
+  precondition: { version: string },
+  baseUrl: string = API_BASE_URL,
+): Promise<void> {
   const response = await authFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/policy`, {
     method: 'DELETE',
+    headers: preconditionHeaders(precondition),
   });
   if (!response.ok) {
     throw await apiErrorFromResponse(response);

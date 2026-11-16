@@ -311,7 +311,7 @@ cannot be read, deploys referencing an integration return `503`.
 | `GET` | `/api/workspaces/policies` | Every workspace policy in the org (flag `workspacePolicy`; `admin` scope; exact `404` while the flag is off). See [docs/WORKSPACES.md](WORKSPACES.md). |
 | `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored); `ETag` is its version, an opaque quoted token (`<incarnation>.<revision>`) |
 | `PUT` | `/api/workspaces/{workspaceId}/policy` | Create (`If-None-Match: *`) or replace (`If-Match: "<token>"`, the `ETag` exactly as read) a policy; never blind: neither header is `428 precondition_required`, a stale or misdirected one (including a token from before a delete and recreate) is `412 policy_revision_conflict` naming `currentVersion`, and nothing changes; `If-Match: *`, a weak validator, a token never issued or both headers is `400`. Strict schema (`422` on unknown keys or `unclassified` in an allow-list); the body's `workspaceId` must equal the path's (`400`). The response's `ETag` is the new version |
-| `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete a policy (`204`, idempotent) |
+| `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete exactly the version read: `If-Match: "<token>"` required (`428` without it; `412 policy_revision_conflict` when the policy changed, was recreated or is already gone, nothing deleted); `204` on success |
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
 

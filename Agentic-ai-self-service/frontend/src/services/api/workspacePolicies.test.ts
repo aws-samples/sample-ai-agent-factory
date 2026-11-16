@@ -16,6 +16,7 @@ vi.mock('../../auth/authFetch', () => ({
 
 import {
   currentVersionOf,
+  deleteWorkspacePolicy,
   getWorkspacePolicy,
   isRevisionConflict,
   preconditionHeaders,
@@ -196,5 +197,46 @@ describe('putWorkspacePolicy', () => {
     expect(isRevisionConflict(caught)).toBe(false);
     expect(currentVersionOf(caught)).toBeNull();
     expect(caught).toMatchObject({ status: 428, message: 'send If-Match' });
+  });
+});
+
+describe('deleteWorkspacePolicy', () => {
+  beforeEach(() => {
+    authFetchMock.mockReset();
+  });
+
+  it('deletes exactly the confirmed version with If-Match', async () => {
+    authFetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    await expect(deleteWorkspacePolicy('finance', { version: V3 }, 'https://api.example')).resolves.toBeUndefined();
+    expect(authFetchMock).toHaveBeenCalledWith('https://api.example/api/workspaces/finance/policy', {
+      method: 'DELETE',
+      headers: { 'If-Match': `"${V3}"` },
+    });
+  });
+
+  it('surfaces a stale confirmation as a 412 conflict', async () => {
+    authFetchMock.mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: 'policy_revision_conflict',
+            workspaceId: 'finance',
+            expectedVersion: V3,
+            currentVersion: V5,
+            message: "The policy for workspace 'finance' changed since it was read (revision 3, now 5); read the current policy before deleting it. Nothing was deleted.",
+          },
+        },
+        412,
+      ),
+    );
+    let caught: unknown;
+    try {
+      await deleteWorkspacePolicy('finance', { version: V3 }, '');
+    } catch (error) {
+      caught = error;
+    }
+    expect(isRevisionConflict(caught)).toBe(true);
+    expect(currentVersionOf(caught)).toBe(V5);
+    expect(caught).toMatchObject({ status: 412, message: expect.stringContaining('Nothing was deleted') });
   });
 });

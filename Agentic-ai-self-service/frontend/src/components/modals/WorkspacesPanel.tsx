@@ -136,7 +136,12 @@ function WorkspacesPanelBody() {
   /** The workspace whose save was refused as stale (412); offers "Reload current version". */
   const [conflict, setConflict] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /**
+   * The policy a delete confirmation is open for, read fresh when the confirmation opened: the admin
+   * confirms exactly this version, and the delete names it (`If-Match`), so a policy a colleague tightened
+   * or recreated meanwhile stays (412) rather than sending the workspace's builders to the default policy.
+   */
+  const [confirming, setConfirming] = useState<{ policy: WorkspacePolicyDocument; version: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -274,16 +279,37 @@ function WorkspacesPanelBody() {
     }
   };
 
-  const remove = async (workspaceId: string) => {
+  const startDelete = async (workspaceId: string) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const stored = await getApiClient().getWorkspacePolicy(workspaceId);
+      setConfirming(stored);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!confirming) return;
+    const { policy, version } = confirming;
     setBusy(true);
     setError(null);
     try {
-      await getApiClient().deleteWorkspacePolicy(workspaceId);
-      setNotice(`Deleted the policy for workspace "${workspaceId}".`);
-      setConfirmingDelete(null);
+      await getApiClient().deleteWorkspacePolicy(policy.workspaceId, { version });
+      setNotice(`Deleted the policy for workspace "${policy.workspaceId}".`);
+      setConfirming(null);
       await load();
     } catch (e) {
+      // A 412 means the policy is not what was confirmed any more (changed, recreated or already gone):
+      // close the confirmation so the admin re-opens it against what is there now.
       setError(getErrorMessage(e));
+      if (isRevisionConflict(e)) {
+        setConfirming(null);
+      }
     } finally {
       setBusy(false);
     }
@@ -379,17 +405,17 @@ function WorkspacesPanelBody() {
                   >
                     Edit
                   </button>
-                  {confirmingDelete === policy.workspaceId ? (
+                  {confirming?.policy.workspaceId === policy.workspaceId ? (
                     <>
                       <button
                         type="button"
                         className={`${BUTTON} text-red-400`}
-                        onClick={() => void remove(policy.workspaceId)}
+                        onClick={() => void remove()}
                         disabled={busy}
                       >
                         Confirm delete
                       </button>
-                      <button type="button" className={BUTTON} onClick={() => setConfirmingDelete(null)}>
+                      <button type="button" className={BUTTON} onClick={() => setConfirming(null)}>
                         Cancel
                       </button>
                     </>
@@ -397,7 +423,7 @@ function WorkspacesPanelBody() {
                     <button
                       type="button"
                       className={BUTTON}
-                      onClick={() => setConfirmingDelete(policy.workspaceId)}
+                      onClick={() => void startDelete(policy.workspaceId)}
                       disabled={busy}
                     >
                       Delete
@@ -405,6 +431,13 @@ function WorkspacesPanelBody() {
                   )}
                 </div>
               </div>
+              {confirming?.policy.workspaceId === policy.workspaceId && (
+                <div role="alert" className="text-[10px] text-amber-500" data-testid="workspace-delete-confirmation">
+                  Deleting &quot;{confirming.policy.name}&quot; (version <code>{confirming.version}</code>: approval{' '}
+                  {summarizeApproval(confirming.policy.approval)}). Its builders then fall under the{' '}
+                  <code>default</code> policy. If someone changes it first, the delete is refused.
+                </div>
+              )}
               <div className="text-[10px] text-gray-500">Members: {membersLine(policy)}</div>
               <div className="text-[10px] text-gray-500">Allowed: {summarizeAllowed(policy.allowed)}</div>
               <div className="text-[10px] text-gray-500">Approval: {summarizeApproval(policy.approval)}</div>

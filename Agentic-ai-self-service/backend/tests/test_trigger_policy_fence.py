@@ -100,7 +100,7 @@ def test_a_policy_deleted_after_the_judgement_cancels_the_write(stores, policy_s
     vstore, sstore, tstore = stores
     seed(vstore, sstore)
     _, fence = _snapshot(policy_store)
-    policy_store.delete(ORG, "finance")
+    policy_store.delete(ORG, "finance", expected=policy_store.read(ORG, "finance").version)
     with pytest.raises(TriggerPolicyConflict):
         tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON, policy_fence=fence)
     assert _rows("Triggers") == []
@@ -123,6 +123,6 @@ def test_without_a_fence_the_transaction_is_the_three_action_one_it_always_was(s
     vstore, sstore, tstore = stores
     seed(vstore, sstore)
     policy_store.put(ORG, _policy(), expected=None)
-    policy_store.delete(ORG, "finance")  # no policy at all: a flag-off or non-ingress create does not care
+    policy_store.delete(ORG, "finance", expected=policy_store.read(ORG, "finance").version)  # no policy at all
     trig = tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON)
     assert [row["trigger_id"] for row in _rows("Triggers")] == [trig.trigger_id]

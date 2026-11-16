@@ -336,15 +336,14 @@ class _FakeTable:
         if self.fail is not None:
             raise self.fail
 
-    def put_item(self, Item, ConditionExpression=None, ExpressionAttributeNames=None, ExpressionAttributeValues=None):
-        """Only the three conditions the store writes are understood, evaluated the way DynamoDB
-        would; an unconditional write is refused, because the store must never issue one."""
-        self._check()
-        assert ConditionExpression is not None, "every workspace policy write must be conditional"
+    def _require(self, operation, key, ConditionExpression, ExpressionAttributeNames, ExpressionAttributeValues):
+        """Only the three conditions the store writes are understood, evaluated the way DynamoDB would; an
+        unconditional write or delete is refused, because the store must never issue one."""
+        assert ConditionExpression is not None, f"every workspace policy {operation} must be conditional"
         expression = ConditionExpression
         for alias, name in (ExpressionAttributeNames or {}).items():
             expression = expression.replace(alias, name)
-        current = self.items.get((Item["org_id"], Item["sk"]))
+        current = self.items.get(key)
         values = ExpressionAttributeValues or {}
         if expression == "attribute_not_exists(sk)":
             holds = current is None
@@ -360,13 +359,18 @@ class _FakeTable:
                 and current.get("revision") == values[":rev"]
             )
         else:
-            raise AssertionError(f"unexpected policy write condition {ConditionExpression!r}")
+            raise AssertionError(f"unexpected policy {operation} condition {ConditionExpression!r}")
         if not holds:
             raise ClientError(
                 {"Error": {"Code": "ConditionalCheckFailedException", "Message": "The conditional request failed"}},
-                "PutItem",
+                operation,
             )
-        self.items[(Item["org_id"], Item["sk"])] = copy.deepcopy(Item)
+
+    def put_item(self, Item, ConditionExpression=None, ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+        self._check()
+        key = (Item["org_id"], Item["sk"])
+        self._require("PutItem", key, ConditionExpression, ExpressionAttributeNames, ExpressionAttributeValues)
+        self.items[key] = copy.deepcopy(Item)
 
     def get_item(self, Key, ConsistentRead=False):
         self._check()
@@ -374,9 +378,11 @@ class _FakeTable:
         item = self.items.get((Key["org_id"], Key["sk"]))
         return {"Item": copy.deepcopy(item)} if item else {}
 
-    def delete_item(self, Key):
+    def delete_item(self, Key, ConditionExpression=None, ExpressionAttributeNames=None, ExpressionAttributeValues=None):
         self._check()
-        self.items.pop((Key["org_id"], Key["sk"]), None)
+        key = (Key["org_id"], Key["sk"])
+        self._require("DeleteItem", key, ConditionExpression, ExpressionAttributeNames, ExpressionAttributeValues)
+        self.items.pop(key, None)
 
     def query(self, KeyConditionExpression, ExpressionAttributeValues, ExclusiveStartKey=None, ConsistentRead=False):
         self._check()
@@ -502,7 +508,7 @@ def test_a_spec_cannot_select_a_workspace_its_deployer_is_not_a_member_of(table)
         wps.resolve_policy(table.store, "default", "closed", ["g-admins-super"])
     assert wps.is_member(table.store.get("default", "default"), []) is True
     # Nothing is admitted when no default exists and the caller belongs nowhere.
-    table.store.delete("default", "default")
+    table.store.delete("default", "default", expected=table.store.read("default", "default").version)
     with pytest.raises(wps.WorkspacePolicyUnavailableError):
         wps.resolve_policy(table.store, "default", None, ["g-users-default"])
 
@@ -851,9 +857,12 @@ def test_an_admin_can_put_get_list_and_delete_a_policy(table, monkeypatch):
     assert got.json() == put.json()
     assert got.headers["ETag"] == put.headers["ETag"]
     assert [p["workspaceId"] for p in client.get("/api/workspaces/policies").json()] == ["finance"]
-    assert client.delete("/api/workspaces/finance/policy").status_code == 204
-    assert client.delete("/api/workspaces/finance/policy").status_code == 204  # idempotent
+    assert client.delete("/api/workspaces/finance/policy").status_code == 428, "a delete names the version it saw"
+    assert client.delete("/api/workspaces/finance/policy", headers={"If-Match": got.headers["ETag"]}).status_code == 204
     assert client.get("/api/workspaces/finance/policy").status_code == 404
+    # The same confirmation cannot fire twice: the policy it named is gone.
+    again = client.delete("/api/workspaces/finance/policy", headers={"If-Match": got.headers["ETag"]})
+    assert again.status_code == 412 and again.json()["detail"]["currentVersion"] is None
 
 
 def test_put_refuses_a_body_filed_under_another_workspace(table, monkeypatch):
@@ -1133,7 +1142,7 @@ def test_a_budget_bearing_policy_writes_and_reads_through_the_real_dynamodb_seri
         assert read == policy
         assert read.budgets.per_agent_monthly_usd == 12.5 and read.budgets.per_workspace_monthly_usd == 1000
         assert [p.workspace_id for p in store.list("default")] == ["finance"]
-        store.delete("default", "finance")
+        store.delete("default", "finance", expected=store.read("default", "finance").version)
         assert store.get("default", "finance") is None
 
 

@@ -463,8 +463,9 @@ export class ApiClient {
     return putWorkspacePolicy(policy, precondition, this.baseUrl);
   }
 
-  async deleteWorkspacePolicy(workspaceId: string): Promise<void> {
-    return deleteWorkspacePolicy(workspaceId, this.baseUrl);
+  /** Deletes exactly the confirmed version (`If-Match`); a changed or recreated policy is a 412 and stays. */
+  async deleteWorkspacePolicy(workspaceId: string, precondition: { version: string }): Promise<void> {
+    return deleteWorkspacePolicy(workspaceId, precondition, this.baseUrl);
   }
 
   async getSlots(runtimeName: string): Promise<RuntimeSlotsSummary> {
