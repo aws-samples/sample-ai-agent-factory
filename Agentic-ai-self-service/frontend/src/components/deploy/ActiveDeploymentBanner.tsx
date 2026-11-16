@@ -11,6 +11,8 @@ export interface ActiveDeployment {
   deployment_id: string;
   workflow_id?: string;
   runtime_id?: string;
+  /** The deployed (normalized) runtime name the management tabs query with. */
+  runtime_name?: string;
   runtime_endpoint?: string;
   runtime_protocol?: 'HTTP' | 'MCP' | 'A2A';
   gateway_url?: string;

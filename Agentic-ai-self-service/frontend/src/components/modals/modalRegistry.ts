@@ -17,6 +17,8 @@ import type {
   KnowledgeBaseToolConfig,
   A2AConfiguration,
   ConnectorConfiguration,
+  CodeInterpreterConfiguration,
+  BrowserConfiguration,
   ComponentConfiguration,
 } from '../../types/components';
 import type { AgentCoreNode } from '../../store/workflowStore';
@@ -36,6 +38,8 @@ const ToolConfigModal = lazy(() => import('./ToolConfigModal').then(m => ({ defa
 const ConnectorConfigModal = lazy(() => import('./ConnectorConfigModal').then(m => ({ default: m.ConnectorConfigModal })));
 const KnowledgeBaseConfigModal = lazy(() => import('./KnowledgeBaseConfigModal').then(m => ({ default: m.KnowledgeBaseConfigModal })));
 const A2AConfigurationModal = lazy(() => import('./A2AConfigurationModal').then(m => ({ default: m.A2AConfigurationModal })));
+const CodeInterpreterConfigurationModal = lazy(() => import('./CodeInterpreterConfigurationModal').then(m => ({ default: m.CodeInterpreterConfigurationModal })));
+const BrowserConfigurationModal = lazy(() => import('./BrowserConfigurationModal').then(m => ({ default: m.BrowserConfigurationModal })));
 
 // Modal props interfaces
 export interface RuntimeModalProps {
@@ -124,6 +128,20 @@ export interface A2AModalProps {
   initialConfig?: Partial<A2AConfiguration>;
 }
 
+export interface CodeInterpreterModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (config: CodeInterpreterConfiguration) => void;
+  initialConfig?: Partial<CodeInterpreterConfiguration>;
+}
+
+export interface BrowserModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (config: BrowserConfiguration) => void;
+  initialConfig?: Partial<BrowserConfiguration>;
+}
+
 // Registry entry type
 export interface ModalRegistryEntry<P = unknown> {
   component: ComponentType<P>;
@@ -144,6 +162,8 @@ export const MODAL_REGISTRY = {
   connector: ConnectorConfigModal,
   knowledgeBase: KnowledgeBaseConfigModal,
   a2a: A2AConfigurationModal,
+  codeInterpreter: CodeInterpreterConfigurationModal,
+  browser: BrowserConfigurationModal,
 } as const;
 
 export type ModalKey = keyof typeof MODAL_REGISTRY;
@@ -168,21 +188,31 @@ export function getModalKeyForComponentType(
   if (componentType === 'observability') return 'observability';
   if (componentType === 'evaluation') return 'evaluation';
   if (componentType === 'a2a') return 'a2a';
+  if (componentType === 'code_interpreter') return 'codeInterpreter';
+  if (componentType === 'browser') return 'browser';
   return null;
 }
 
 /**
  * Whether a newly-created palette/drop node should enter App's pending-modal
  * state. Built-in tools are preconfigured, while connector tools need their
- * credential form. Components without a registered modal (currently Browser
- * and Code Interpreter) must never enter that state: there would be no dialog
- * capable of closing it, and every later configuration modal would be blocked.
+ * credential form.
+ *
+ * Code Interpreter and Browser now DROP with a valid default configuration (see
+ * createNodeFromDrop), so they need no forced dialog on drop; they stay editable
+ * through the Configure button / double-click via their registered modals. They
+ * are listed explicitly here so adding their modals to the registry did not turn
+ * every drop into a modal pop-up.
  */
 export function shouldOpenConfigurationForNewNode(
   componentType: AgentCoreComponentType,
   toolId?: string | null,
 ): boolean {
   if (componentType === 'tool' && !toolId?.startsWith('connector:')) {
+    return false;
+  }
+
+  if (componentType === 'code_interpreter' || componentType === 'browser') {
     return false;
   }
 

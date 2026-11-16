@@ -138,6 +138,7 @@ export function WorkflowCanvas({
     addNode,
     deleteNode,
     deleteEdge,
+    connectToolToRuntime,
     selectedNodeId,
     selectedEdgeId,
     isReadyToDeploy,
@@ -153,6 +154,10 @@ export function WorkflowCanvas({
 
   // Drag state for ghost preview
   const [dragState, setDragState] = useState<DragState>(initialDragState);
+  // Whether the validation indicator's full issue list is expanded. Before this
+  // the chip only said "N Errors" and the reasons were reachable only by hovering
+  // each node's tiny ✗ (customer feedback: "invalid with no stated reason").
+  const [showIssueList, setShowIssueList] = useState(false);
 
   // Handle Delete key press for node/edge deletion
   // Requirement 1.7: WHEN a user presses Delete with a Component_Node selected,
@@ -236,6 +241,21 @@ export function WorkflowCanvas({
       const sourceType = sourceNode.data.componentType;
       const targetType = targetNode.data.componentType;
 
+      // Direct tool <-> runtime wiring: tools are served through an AgentCore
+      // Gateway, so route the tool through the runtime's gateway (reused or
+      // created) instead of drawing an unusable direct edge. This gives the
+      // "add a tool directly to the runtime" gesture while keeping the deploy
+      // path (runtime -> gateway -> tool) intact.
+      if (
+        (sourceType === 'tool' && targetType === 'runtime') ||
+        (sourceType === 'runtime' && targetType === 'tool')
+      ) {
+        const toolId = sourceType === 'tool' ? sourceNode.id : targetNode.id;
+        const runtimeId = sourceType === 'runtime' ? sourceNode.id : targetNode.id;
+        connectToolToRuntime(toolId, runtimeId);
+        return;
+      }
+
       if (!areComponentsCompatible(sourceType, targetType)) {
         // Incompatible connection - do not create edge
         return;
@@ -257,7 +277,7 @@ export function WorkflowCanvas({
       };
       addEdge(newEdge);
     },
-    [nodes, addEdge]
+    [nodes, addEdge, connectToolToRuntime]
   );
 
   // Handle node selection
@@ -497,20 +517,72 @@ export function WorkflowCanvas({
               <span>✓</span>
               <span>Ready to Deploy</span>
             </div>
-          ) : validationState && validationState.errors.length > 0 ? (
-            <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white text-red-600 rounded-md border border-red-300 shadow-sm text-xs font-medium">
-              <span>✗</span>
-              <span>
-                {validationState.errors.length} Error{validationState.errors.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-          ) : validationState && validationState.warnings.length > 0 ? (
-            <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white text-amber-600 rounded-md border border-amber-300 shadow-sm text-xs font-medium">
-              <span>⚠</span>
-              <span>
-                {validationState.warnings.length} Warning{validationState.warnings.length !== 1 ? 's' : ''}
-              </span>
-            </div>
+          ) : validationState && (validationState.errors.length > 0 || validationState.warnings.length > 0) ? (
+            (() => {
+              const errorCount = validationState.errors.length;
+              const warningCount = validationState.warnings.length;
+              const isError = errorCount > 0;
+              // Resolve each issue to "<node label>: <reason>" so the list reads
+              // without hunting across the canvas.
+              const nodeLabel = (id?: string): string | null => {
+                if (!id) return null;
+                const node = nodes.find((n) => n.id === id);
+                return node ? (node.data.label || node.data.componentType) : null;
+              };
+              const issues = isError ? validationState.errors : validationState.warnings;
+              return (
+                <div className="flex flex-col items-end">
+                  <button
+                    type="button"
+                    onClick={() => setShowIssueList((v) => !v)}
+                    aria-expanded={showIssueList}
+                    data-testid="validation-issues-toggle"
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 bg-white rounded-md border shadow-sm text-xs font-medium ${
+                      isError ? 'text-red-600 border-red-300' : 'text-amber-600 border-amber-300'
+                    }`}
+                  >
+                    <span>{isError ? '✗' : '⚠'}</span>
+                    <span>
+                      {isError
+                        ? `${errorCount} Error${errorCount !== 1 ? 's' : ''}`
+                        : `${warningCount} Warning${warningCount !== 1 ? 's' : ''}`}
+                    </span>
+                    <span className="text-[#8d99a8]">{showIssueList ? '▲' : '▼'}</span>
+                  </button>
+                  {showIssueList && (
+                    <div
+                      data-testid="validation-issues-list"
+                      className="mt-1 w-80 max-h-64 overflow-auto rounded-md border border-[#e9ebed] bg-white p-2 shadow-md"
+                    >
+                      <ul className="space-y-1.5 text-xs">
+                        {issues.map((issue, i) => {
+                          const label = nodeLabel(issue.componentId);
+                          return (
+                            <li key={i} className="break-words">
+                              {label && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (issue.componentId) selectNode(issue.componentId);
+                                  }}
+                                  className="font-semibold text-[#0972d3] hover:underline"
+                                >
+                                  {label}
+                                </button>
+                              )}
+                              <span className={isError ? 'text-red-600' : 'text-amber-600'}>
+                                {label ? ': ' : ''}
+                                {issue.message}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              );
+            })()
           ) : (
             <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white text-[#5f6b7a] rounded-md border border-[#e9ebed] shadow-sm text-xs font-medium">
               <span>○</span>

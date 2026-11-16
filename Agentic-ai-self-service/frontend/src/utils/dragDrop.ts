@@ -4,7 +4,12 @@
  */
 
 import type { AgentCoreComponentType } from '../types/workflow';
-import type { ToolConfiguration, ConnectorConfiguration } from '../types/components';
+import type {
+  ToolConfiguration,
+  ConnectorConfiguration,
+  CodeInterpreterConfiguration,
+  BrowserConfiguration,
+} from '../types/components';
 import { CONNECTOR_TOOL_PREFIX } from '../types/components';
 import type { AgentCoreNode } from '../store/workflowStore';
 import { PALETTE_ITEMS } from '../components/palette/ComponentPalette';
@@ -118,8 +123,24 @@ export function createNodeFromDrop(
   const isKBTool = componentType === 'tool' && toolId === 'knowledge_base';
 
   // Build initial configuration for tool / connector nodes
-  let configuration: ToolConfiguration | ConnectorConfiguration | undefined;
-  if (isConnector) {
+  let configuration:
+    | ToolConfiguration
+    | ConnectorConfiguration
+    | CodeInterpreterConfiguration
+    | BrowserConfiguration
+    | undefined;
+  if (componentType === 'code_interpreter' || componentType === 'browser') {
+    // Code Interpreter and Browser nodes carry only a name + enabled flag. Seed a
+    // valid default on drop so the node is immediately valid and deployable.
+    // Before this they dropped with `configuration: undefined`, so validateWorkflow
+    // marked them "Component configuration is required" the instant the canvas
+    // re-validated, and no modal was registered to fix it — the customer-reported
+    // "Code Interpreter / Browser return an error with no configuration dialog" bug.
+    configuration = {
+      name: componentType === 'code_interpreter' ? 'CodeInterpreter' : 'BrowserTool',
+      enabled: true,
+    };
+  } else if (isConnector) {
     configuration = {
       name: label.toLowerCase().replace(/\s+/g, '_'),
       toolId: toolId!,

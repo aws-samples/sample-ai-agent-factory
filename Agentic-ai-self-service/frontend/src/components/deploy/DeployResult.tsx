@@ -6,6 +6,8 @@ interface DeployResultProps {
   message: string;
   simulated?: boolean;
   runtimeId?: string;
+  /** The name the backend deployed under; the management tabs query with this. */
+  runtimeName?: string;
   runtimeProtocol?: 'HTTP' | 'MCP' | 'A2A';
   endpoint?: string;
   gatewayUrl?: string;
@@ -18,6 +20,7 @@ export function DeployResult({
   message,
   simulated,
   runtimeId,
+  runtimeName,
   runtimeProtocol = 'HTTP',
   endpoint,
   gatewayUrl,
@@ -78,6 +81,15 @@ export function DeployResult({
           </button>
         </div>
         <div className="p-4 space-y-3">
+          {runtimeName && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Runtime name</div>
+              <code className="text-sm font-mono text-gray-800 bg-gray-100 px-2 py-1 rounded">{runtimeName}</code>
+              <p className="text-[11px] text-gray-500 mt-1">
+                The name this agent deployed under. Versions, evaluations, cost and observability use it.
+              </p>
+            </div>
+          )}
           <div>
             <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Runtime ID</div>
             <code className="text-sm font-mono text-gray-800 bg-gray-100 px-2 py-1 rounded">{runtimeId}</code>

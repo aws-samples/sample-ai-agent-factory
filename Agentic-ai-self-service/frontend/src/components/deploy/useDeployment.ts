@@ -21,6 +21,14 @@ interface DeploymentStatus {
   message?: string;
   endpoint?: string;
   runtimeId?: string;
+  /**
+   * The runtime name the backend actually deployed under, as served by the API
+   * (`runtime_name` — the sanitized/normalized friendly name). The management
+   * tabs (versions, evals, cost, observability, triggers) MUST query with this,
+   * not the raw canvas `config.name`: the deploy normalizes e.g. "My Agent" to
+   * "My_Agent", so querying the raw name returned 400 and left those tabs empty.
+   */
+  runtimeName?: string;
   runtimeProtocol?: RuntimeConfiguration['protocol'];
   gatewayUrl?: string;
   simulated?: boolean;
@@ -195,6 +203,7 @@ export function useDeployment(params: UseDeploymentParams) {
           message: result.message || 'Deployed successfully!',
           endpoint: result.endpoint,
           runtimeId: result.runtimeId,
+          runtimeName: result.runtime_name || result.runtimeName || config.name || undefined,
           runtimeProtocol,
           gatewayUrl: result.gatewayUrl,
           simulated: result.simulated,
@@ -292,6 +301,8 @@ export function useDeployment(params: UseDeploymentParams) {
               message: 'Deployed successfully!',
               endpoint: rEndpoint,
               runtimeId: rId,
+              runtimeName:
+                statusResult.runtime_name || statusResult.runtimeName || config.name || undefined,
               runtimeProtocol,
               gatewayUrl: statusResult.gateway_url || statusResult.gatewayUrl || undefined,
             });
