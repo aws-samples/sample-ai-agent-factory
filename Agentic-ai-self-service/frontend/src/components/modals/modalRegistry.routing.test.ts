@@ -24,7 +24,7 @@ describe('new-node configuration modal routing', () => {
   });
 
   it.each<AgentCoreComponentType>(['browser', 'code_interpreter'])(
-    'does not enter an uncloseable pending-modal state for %s nodes',
+    'does not force a configuration dialog on drop for %s nodes (they drop valid)',
     (componentType) => {
       expect(shouldOpenConfigurationForNewNode(componentType)).toBe(false);
     },
@@ -93,7 +93,7 @@ describe('new-node configuration modal routing', () => {
     });
   });
 
-  it('offers configuration only when an existing node has a real modal', () => {
+  it('offers configuration for an existing Browser or Code Interpreter node', () => {
     const browserNode = {
       id: 'browser-1',
       type: 'browser',
@@ -101,6 +101,18 @@ describe('new-node configuration modal routing', () => {
       data: {
         label: 'Browser Tool',
         componentType: 'browser',
+        configuration: { name: 'BrowserTool', enabled: true },
+        validationStatus: 'valid',
+      },
+    } satisfies AgentCoreNode;
+    const codeInterpreterNode = {
+      id: 'code_interpreter-1',
+      type: 'code_interpreter',
+      position: { x: 0, y: 0 },
+      data: {
+        label: 'Code Interpreter',
+        componentType: 'code_interpreter',
+        configuration: { name: 'CodeInterpreter', enabled: true },
         validationStatus: 'valid',
       },
     } satisfies AgentCoreNode;
@@ -121,7 +133,14 @@ describe('new-node configuration modal routing', () => {
       },
     } satisfies AgentCoreNode;
 
-    expect(configurationTargetForExistingNode(browserNode)).toBeNull();
+    expect(configurationTargetForExistingNode(browserNode)).toMatchObject({
+      nodeId: 'browser-1',
+      componentType: 'browser',
+    });
+    expect(configurationTargetForExistingNode(codeInterpreterNode)).toMatchObject({
+      nodeId: 'code_interpreter-1',
+      componentType: 'code_interpreter',
+    });
     expect(configurationTargetForExistingNode(existingTool)).toMatchObject({
       nodeId: 'tool-1',
       componentType: 'tool',
