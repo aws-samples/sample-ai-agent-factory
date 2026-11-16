@@ -23,6 +23,7 @@ import {
   type WorkflowNode,
   type WorkflowEdge,
 } from '../utils/validation';
+import { planToolToRuntimeWiring } from '../utils/toolWiring';
 import {
   createUndoRedoManager,
   createAction,
@@ -128,6 +129,12 @@ export interface WorkflowState {
   // Edge operations
   addEdge: (edge: Edge) => void;
   deleteEdge: (edgeId: string) => void;
+  /**
+   * Attach a tool node directly to a runtime node. Tools run behind an AgentCore
+   * Gateway, so this reuses the runtime's gateway or creates and wires one
+   * (runtime -> gateway -> tool) as a single undoable action.
+   */
+  connectToolToRuntime: (toolNodeId: string, runtimeNodeId: string) => void;
 
   // Template operations
   activeTemplateId: string | null;
@@ -450,6 +457,27 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     get().recordAction('ADD_EDGE');
     // Connection validity (validateConnection) is only computed by runValidation,
     // so without this an illegal connection the user just drew renders as valid.
+    get().runValidation();
+  },
+
+  connectToolToRuntime: (toolNodeId, runtimeNodeId) => {
+    const state = get();
+    const plan = planToolToRuntimeWiring(state.nodes, state.edges, toolNodeId, runtimeNodeId);
+    // Already served (tool is on the runtime's gateway): nothing to do.
+    if (!plan.gatewayNode && plan.edgesToAdd.length === 0) return;
+
+    // Capture previous state before change — one BATCH entry undoes the whole
+    // auto-wiring (any new gateway node and both edges) in a single step.
+    previousState = state._getUndoRedoState();
+
+    set((s) => ({
+      nodes: plan.gatewayNode ? [...s.nodes, plan.gatewayNode] : s.nodes,
+      edges: [...s.edges, ...plan.edgesToAdd],
+      activeTemplateId: null,
+      persistenceRevision: s.persistenceRevision + 1,
+    }));
+
+    get().recordAction('BATCH');
     get().runValidation();
   },
 

@@ -138,6 +138,7 @@ export function WorkflowCanvas({
     addNode,
     deleteNode,
     deleteEdge,
+    connectToolToRuntime,
     selectedNodeId,
     selectedEdgeId,
     isReadyToDeploy,
@@ -236,6 +237,21 @@ export function WorkflowCanvas({
       const sourceType = sourceNode.data.componentType;
       const targetType = targetNode.data.componentType;
 
+      // Direct tool <-> runtime wiring: tools are served through an AgentCore
+      // Gateway, so route the tool through the runtime's gateway (reused or
+      // created) instead of drawing an unusable direct edge. This gives the
+      // "add a tool directly to the runtime" gesture while keeping the deploy
+      // path (runtime -> gateway -> tool) intact.
+      if (
+        (sourceType === 'tool' && targetType === 'runtime') ||
+        (sourceType === 'runtime' && targetType === 'tool')
+      ) {
+        const toolId = sourceType === 'tool' ? sourceNode.id : targetNode.id;
+        const runtimeId = sourceType === 'runtime' ? sourceNode.id : targetNode.id;
+        connectToolToRuntime(toolId, runtimeId);
+        return;
+      }
+
       if (!areComponentsCompatible(sourceType, targetType)) {
         // Incompatible connection - do not create edge
         return;
@@ -257,7 +273,7 @@ export function WorkflowCanvas({
       };
       addEdge(newEdge);
     },
-    [nodes, addEdge]
+    [nodes, addEdge, connectToolToRuntime]
   );
 
   // Handle node selection
