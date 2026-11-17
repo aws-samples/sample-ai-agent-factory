@@ -6,11 +6,11 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
 from app.routers import cost, evaluations
 from app.services.cost_tracking import summarize_from_logs
 from app.services.runtime_target_context import OwnedRuntimeTarget
 from app.services.trace_query import fetch_trace_waterfall
+from botocore.exceptions import ClientError
 from fastapi import HTTPException
 
 REGION = "eu-west-1"
@@ -351,7 +351,7 @@ def test_logs_route_uses_target_logs_client_group_and_sanitizes():
     logs = MagicMock(name="target_logs")
     logs.filter_log_events.return_value = {
         "events": [
-            {"timestamp": 1700000000000, "message": "ERROR boom token=AKIAIOSFODNN7EXAMPLE tail"},
+            {"timestamp": 1700000000000, "message": "ERROR boom token=AKIAIOSFODNN7EXAMPLE tail"},  # pragma: allowlist secret
             {"timestamp": 1700000001000, "message": "ok"},
         ]
     }
@@ -369,7 +369,7 @@ def test_logs_route_uses_target_logs_client_group_and_sanitizes():
     assert kw["logGroupName"] == expected_group
     assert kw["startTime"] == 100_000 and kw["endTime"] == 200_000  # seconds -> ms
     assert "filterPattern" not in kw
-    assert "AKIAIOSFODNN7EXAMPLE" not in result["events"][0]["message"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in result["events"][0]["message"]  # pragma: allowlist secret
     assert result["events"][1]["message"] == "ok"
     target.session.client.assert_called_once_with("logs", region_name=REGION)
 
