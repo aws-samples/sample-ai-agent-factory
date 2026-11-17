@@ -97,7 +97,7 @@ describe('WorkspacesPanel', () => {
     api.listWorkspacePolicies.mockResolvedValue([finance]);
     render(<WorkspacesPanel isAdmin />);
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('every deploy is refused (503) until one exists');
+    expect(alert).toHaveTextContent('falls back to the org default');
     fireEvent.click(screen.getByText('Create the default policy'));
     expect(screen.getByLabelText(/Workspace id/)).toHaveValue('default');
     expect(screen.getByLabelText(/Member groups/)).toBeDisabled();

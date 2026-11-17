@@ -5,8 +5,8 @@
  * Developer) and deletes one. The backend is the control: the panel renders only while the
  * `workspacePolicy` flag is on (off, its routes are a 404) and only for admins; a refusal from the
  * strict schema (422), the id guard (400) or the scope gate (403) is shown verbatim, never
- * reinterpreted. It also warns when no `default` policy exists, because with the flag on every
- * deploy is refused (503) until one does.
+ * reinterpreted. It also warns when no `default` policy exists, because with the flag on a deploy that
+ * falls back to the org default is refused (503) until one does.
  *
  * Saving is never a blind replacement. Editing fetches the policy as the server holds it NOW, with its
  * version token (`ETag`), and the save names that version (`If-Match`); a new policy is created only if
@@ -369,7 +369,8 @@ function WorkspacesPanelBody() {
         <div role="alert" className="text-[11px] text-amber-500 flex items-center justify-between gap-2">
           <span>
             No <code>default</code> policy is stored. While the <code>workspacePolicy</code> flag is on,
-            every deploy is refused (503) until one exists.
+            a deploy that falls back to the org default (a builder not in a workspace with its own policy)
+            is refused (503) until one exists.
           </span>
           <button
             type="button"

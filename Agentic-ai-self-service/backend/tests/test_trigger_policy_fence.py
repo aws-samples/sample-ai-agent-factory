@@ -151,3 +151,26 @@ def test_a_policy_restored_to_an_identical_document_after_the_judgement_still_ca
     with pytest.raises(TriggerPolicyConflict):
         tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON, policy_fence=fence)
     assert _rows("Triggers") == []
+
+
+def test_a_policy_deleted_and_recreated_with_an_identical_document_still_cancels_the_write(stores, policy_store):
+    """Codex round-7 follow-up: delete then recreate with a byte-identical document mints a NEW incarnation
+    at revision 1, so the document AND the revision match the fence while only the incarnation differs. The
+    fence pins the incarnation too, so the stale judgement still cannot commit through the trigger
+    transaction (the revision-only restore test above does not exercise the incarnation branch)."""
+    vstore, sstore, tstore = stores
+    seed(vstore, sstore)
+    original = _policy(approval={"medium": [], "high": []}, budgets={"maxAgentMonthlyUsd": 100.5})
+    policy_store.put(ORG, original, expected=None)
+    snapshot = policy_store.get_snapshot(ORG, "finance")
+    assert snapshot is not None
+    _, fence = snapshot
+    policy_store.delete(ORG, "finance", expected=policy_store.read(ORG, "finance").version)
+    policy_store.put(ORG, original, expected=None)  # recreate: identical document, new incarnation, revision 1
+    recreated = policy_store.read(ORG, "finance").version
+    assert recreated.revision == fence.version.revision, "same revision number (1) as the fence"
+    assert recreated.incarnation != fence.version.incarnation, "but a fresh incarnation"
+    assert _rows("OrgConfig")[0]["policy"] == fence.document, "precondition: the document is byte-identical"
+    with pytest.raises(TriggerPolicyConflict):
+        tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON, policy_fence=fence)
+    assert _rows("Triggers") == []
