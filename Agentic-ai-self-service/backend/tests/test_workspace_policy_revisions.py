@@ -489,6 +489,21 @@ def test_a_delete_without_a_precondition_is_428_and_deletes_nothing(admin, polic
     assert policy_store.read(ORG, WS) == before
 
 
+def test_a_delete_with_if_none_match_is_400_and_deletes_nothing(admin, policy_store):
+    """Codex round-6 finding: If-None-Match is meaningless on a delete, and If-Match together with
+    If-None-Match is self-contradictory. Either is 400 (a request that cannot mean one thing is never
+    attempted), so a contradictory confirmation can never remove a restrictive policy and silently drop
+    the workspace's builders to the looser org default. The existing ambiguous-delete parametrization
+    covers If-None-Match alone but not the both-headers case this closes."""
+    before = policy_store.put(ORG, _policy(name="before"), expected=None)
+    etag = admin.get(PATH).headers["ETag"]
+    for headers in ({"If-None-Match": "*"}, {"If-Match": etag, "If-None-Match": "*"}):
+        response = admin.delete(PATH, headers=headers)
+        assert response.status_code == 400, (headers, response.text)
+        assert "If-None-Match" in response.json()["detail"]
+    assert policy_store.read(ORG, WS) == before, "no delete attempt touched the policy"
+
+
 def test_through_the_api_a_stale_delete_confirmation_is_412_and_the_tightened_policy_keeps_refusing_the_webhook(
     admin, policy_store
 ):

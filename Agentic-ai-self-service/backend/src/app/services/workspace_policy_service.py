@@ -293,23 +293,38 @@ def _decimals_to_numbers(value: Any) -> Any:
 
 class PolicyFence(BaseModel):
     """The exact stored policy item a judgement was made against, so a later write can be conditioned
-    on it. ``document`` is the item's ``policy`` attribute exactly as read (``Decimal`` numbers included),
-    so a DynamoDB equality condition holds if and only if the policy has not changed since the read."""
+    on it. ``document`` is the item's ``policy`` attribute exactly as read (``Decimal`` numbers included)
+    and ``version`` is the item's version at read time, so the DynamoDB condition holds if and only if the
+    policy has not changed since the read. Pinning the version as well as the document is what rejects a
+    tighten-then-restore, or a delete-and-recreate that yields a byte-identical document: those leave the
+    document equal but advance the revision (and a recreate mints a fresh incarnation)."""
 
     table_name: str
     key: dict[str, str]
     document: dict[str, Any]
+    version: PolicyVersion
 
     def condition_check(self) -> dict[str, Any]:
         """A ``TransactWriteItems`` ``ConditionCheck`` action that cancels the transaction unless the
-        policy is still exactly this document (a deleted policy fails it too)."""
+        policy is still exactly this document AND still at exactly this version (a deleted policy fails it
+        too, and so does one restored to an identical document under a new revision/incarnation)."""
+        names = {"#policy": "policy", "#inc": INCARNATION_ATTRIBUTE, "#rev": REVISION_ATTRIBUTE}
+        values: dict[str, Any] = {":policy": self.document}
+        if self.version.incarnation is None:
+            # A legacy item (written before versions existed) carries neither version attribute; pin their
+            # absence so a later claim that stamps a version is detected as a change, not matched blindly.
+            version_condition = "attribute_not_exists(#inc) AND attribute_not_exists(#rev)"
+        else:
+            version_condition = "#inc = :inc AND #rev = :rev"
+            values[":inc"] = self.version.incarnation
+            values[":rev"] = self.version.revision
         return {
             "ConditionCheck": {
                 "TableName": self.table_name,
                 "Key": dict(self.key),
-                "ConditionExpression": "#policy = :policy",
-                "ExpressionAttributeNames": {"#policy": "policy"},
-                "ExpressionAttributeValues": {":policy": self.document},
+                "ConditionExpression": f"#policy = :policy AND {version_condition}",
+                "ExpressionAttributeNames": names,
+                "ExpressionAttributeValues": values,
             }
         }
 
@@ -413,7 +428,9 @@ class WorkspacePolicyStore:
         if not item:
             return None
         policy = policy_from_item(item)
-        return policy, PolicyFence(table_name=self._table_name, key=key, document=item["policy"])
+        return policy, PolicyFence(
+            table_name=self._table_name, key=key, document=item["policy"], version=version_of(item)
+        )
 
     def delete(self, org_id: str, workspace_id: str, *, expected: PolicyVersion) -> None:
         """Delete the policy ONLY if it is still exactly at ``expected`` (the legacy version names an item

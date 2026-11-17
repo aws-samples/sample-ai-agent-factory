@@ -126,3 +126,28 @@ def test_without_a_fence_the_transaction_is_the_three_action_one_it_always_was(s
     policy_store.delete(ORG, "finance", expected=policy_store.read(ORG, "finance").version)  # no policy at all
     trig = tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON)
     assert [row["trigger_id"] for row in _rows("Triggers")] == [trig.trigger_id]
+
+
+def test_a_policy_restored_to_an_identical_document_after_the_judgement_still_cancels_the_write(stores, policy_store):
+    """Codex round-6 finding: a document-only fence would let a tighten-then-restore (byte-identical
+    document, advanced revision) commit a judgement made against the policy as it was before the change.
+    The fence pins the version too, so an identical document under a new revision is still a conflict."""
+    vstore, sstore, tstore = stores
+    seed(vstore, sstore)
+    original = _policy(approval={"medium": [], "high": []}, budgets={"maxAgentMonthlyUsd": 100.5})
+    policy_store.put(ORG, original, expected=None)
+    snapshot = policy_store.get_snapshot(ORG, "finance")
+    assert snapshot is not None
+    _, fence = snapshot
+    # Tighten, then restore the byte-identical original: the stored document equals the fence again,
+    # but the revision has advanced twice (and the document-only condition would now pass).
+    policy_store.put(
+        ORG,
+        _policy(approval={"medium": [], "high": ["g-security"]}, budgets={"maxAgentMonthlyUsd": 100.5}),
+        expected=policy_store.read(ORG, "finance").version,
+    )
+    policy_store.put(ORG, original, expected=policy_store.read(ORG, "finance").version)
+    assert _rows("OrgConfig")[0]["policy"] == fence.document, "precondition: the document is byte-identical again"
+    with pytest.raises(TriggerPolicyConflict):
+        tstore.create_trigger(claim=resolve(), owner_sub=OWNER, type=TYPE_CRON, schedule=CRON, policy_fence=fence)
+    assert _rows("Triggers") == []

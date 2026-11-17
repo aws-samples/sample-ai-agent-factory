@@ -159,9 +159,19 @@ def expected_version(if_match: str | None, if_none_match: str | None) -> PolicyV
     return parse_if_match(if_match)
 
 
-def expected_version_for_delete(if_match: str | None) -> PolicyVersion:
+def expected_version_for_delete(if_match: str | None, if_none_match: str | None = None) -> PolicyVersion:
     """The version a DELETE says it is deleting. There is no "create" form for a delete, so the only
-    acceptable precondition is ``If-Match`` with the token as read; without it the request is ``428``."""
+    acceptable precondition is ``If-Match`` with the token as read. An ``If-None-Match`` on a DELETE is
+    meaningless and, together with ``If-Match``, self-contradictory, so any ``If-None-Match`` is ``400``
+    (a request that cannot mean one thing is never attempted); without ``If-Match`` the request is ``428``."""
+    if if_none_match is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "If-None-Match is not valid on a delete: a policy is deleted only by naming the exact "
+                f"version to remove with If-Match. {_PRECONDITION_HELP}. Nothing was deleted."
+            ),
+        )
     if if_match is None:
         raise HTTPException(
             status_code=status.HTTP_428_PRECONDITION_REQUIRED,
@@ -264,9 +274,13 @@ def put_policy(
 
 
 @router.delete("/{workspace_id}/policy", dependencies=_GATES, status_code=status.HTTP_204_NO_CONTENT)
-def delete_policy(workspace_id: str, if_match: Annotated[str | None, Header()] = None) -> Response:
+def delete_policy(
+    workspace_id: str,
+    if_match: Annotated[str | None, Header()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
     workspace_id = _workspace_id(workspace_id)
-    expected = expected_version_for_delete(if_match)
+    expected = expected_version_for_delete(if_match, if_none_match)
     try:
         _store().delete(DEFAULT_ORG_ID, workspace_id, expected=expected)
     except WorkspacePolicyRevisionConflict as exc:

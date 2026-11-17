@@ -52,7 +52,7 @@ from app.services.trigger_store import (
 )
 from app.services.workspace_admission import ADMISSION_VERSION, POLICY_DENIED, admit
 from app.services.workspace_approval import MalformedAdmissionError, approval_record
-from app.services.workspace_policy_service import PolicyFence, WorkspacePolicyUnavailableError
+from app.services.workspace_policy_service import PolicyFence, PolicyVersion, WorkspacePolicyUnavailableError
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -75,6 +75,7 @@ FENCE = PolicyFence(
     table_name="org-config",
     key={"org_id": "org", "sk": "WORKSPACE#finance#POLICY"},
     document={"workspaceId": "finance", "budgets": {"maxAgentMonthlyUsd": Decimal("100")}},
+    version=PolicyVersion(incarnation="a" * 16, revision=1),
 )
 
 READ_ONLY = _spec(tools=[_tool("lookup", "read")])
