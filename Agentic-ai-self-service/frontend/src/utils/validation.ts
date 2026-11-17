@@ -618,12 +618,19 @@ export function validateWorkflow(
         `(${requested.sort().join(', ')}). Disconnect them or use a separate runtime; ` +
         `none will be silently omitted.`;
     } else if (multiAgentEnabled && capabilities.size > 0) {
-      message =
-        `The Multi-Agent ${displayCapability(multiAgentPattern)} pattern cannot currently ` +
-        `assign connected capabilities (${[...capabilities]
-          .map(displayCapability)
-          .sort()
-          .join(', ')}) to individual agents. Disconnect them or use a single-agent runtime.`;
+      // Code Interpreter and Browser now compose with every multi-agent sub-agent
+      // (backend code_generator :: _multi_agent_tool_fragments). Only the rest block.
+      const composable = new Set(['browser', 'code_interpreter']);
+      const unsupported = [...capabilities].filter((capability) => !composable.has(capability));
+      if (unsupported.length > 0) {
+        message =
+          `The Multi-Agent ${displayCapability(multiAgentPattern)} pattern cannot yet ` +
+          `assign these connected capabilities (${unsupported
+            .map(displayCapability)
+            .sort()
+            .join(', ')}) to individual agents. Code Interpreter and Browser compose with ` +
+          `multi-agent; disconnect the rest or use a single-agent runtime.`;
+      }
     }
 
     if (message) {

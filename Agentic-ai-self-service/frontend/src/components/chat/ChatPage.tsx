@@ -17,7 +17,10 @@ import {
   streamInvokeApi,
   getErrorMessage,
   type DeployedAgentSummary,
+  type ChatImageInput,
 } from '../../services/api';
+
+const MAX_CHAT_IMAGES = 5;
 
 interface Msg {
   id: string;
@@ -38,7 +41,38 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [images, setImages] = useState<ChatImageInput[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const IMAGE_FORMATS: Record<string, ChatImageInput['format']> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpeg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+  };
+
+  async function onPickImages(fileList: FileList | null) {
+    if (!fileList) return;
+    const picked: ChatImageInput[] = [];
+    for (const file of Array.from(fileList).slice(0, MAX_CHAT_IMAGES)) {
+      const format = IMAGE_FORMATS[file.type];
+      if (!format) continue; // only the Converse-supported image types
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          const comma = result.indexOf(','); // strip the "data:...;base64," prefix
+          resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      if (data) picked.push({ format, data });
+    }
+    if (picked.length) setImages((prev) => [...prev, ...picked].slice(0, MAX_CHAT_IMAGES));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
 
   useEffect(() => {
     listMyAgentsApi()
@@ -63,19 +97,29 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
   function newConversation() {
     setMessages([]);
     setSessionId(null);
+    setImages([]);
   }
 
   async function send() {
     const text = input.trim();
-    if (!text || !selected?.runtime_name || sending) return;
+    if ((!text && images.length === 0) || !selected?.runtime_name || sending) return;
+    const outgoing = images;
     setInput('');
-    const userMsg: Msg = { id: `u-${Date.now()}`, role: 'user', content: text };
+    setImages([]);
+    const attachNote = outgoing.length ? `📎 ${outgoing.length} image${outgoing.length > 1 ? 's' : ''}` : '';
+    const label = [text, attachNote].filter(Boolean).join('\n');
+    const userMsg: Msg = { id: `u-${Date.now()}`, role: 'user', content: label };
     const asstId = `a-${Date.now()}`;
     setMessages((prev) => [...prev, userMsg, { id: asstId, role: 'assistant', content: '' }]);
     setSending(true);
     try {
       const { sessionId: sid } = await streamInvokeApi(
-        { runtimeName: selected.runtime_name, input: text, sessionId },
+        {
+          runtimeName: selected.runtime_name,
+          input: text,
+          sessionId,
+          images: outgoing.length ? outgoing : undefined,
+        },
         (tok) =>
           setMessages((prev) =>
             prev.map((m) => (m.id === asstId ? { ...m, content: m.content + tok } : m)),
@@ -171,31 +215,74 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
 
         {/* Composer */}
         <div className="border-t px-6 py-3" style={{ borderColor: 'var(--color-border)' }}>
-          <div className="mx-auto max-w-2xl flex gap-2">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  void send();
-                }
-              }}
-              placeholder={selected ? 'Message your agent… (Enter to send, Shift+Enter for newline)' : 'Select an agent first'}
-              aria-label="Message your agent"
-              disabled={!selected || sending}
-              rows={1}
-              className="flex-1 px-3 py-2 text-sm rounded-lg resize-none border focus:outline-none focus:ring-2 focus:ring-blue-500"
-              style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text-primary)' }}
-            />
-            <button
-              type="button"
-              onClick={() => void send()}
-              disabled={!selected || sending || !input.trim()}
-              className="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"
-            >
-              {sending ? '…' : 'Send'}
-            </button>
+          <div className="mx-auto max-w-2xl space-y-2">
+            {images.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {images.map((img, i) => (
+                  <div key={i} className="relative">
+                    <img
+                      src={`data:image/${img.format};base64,${img.data}`}
+                      alt={`attachment ${i + 1}`}
+                      className="h-14 w-14 object-cover rounded-lg border"
+                      style={{ borderColor: 'var(--color-border)' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                      aria-label={`Remove attachment ${i + 1}`}
+                      className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-gray-800 text-white text-xs leading-none"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                className="hidden"
+                onChange={(e) => void onPickImages(e.target.files)}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!selected || sending || images.length >= MAX_CHAT_IMAGES}
+                aria-label="Attach image"
+                title="Attach an image for the agent"
+                className="px-3 py-2 text-sm rounded-lg border disabled:opacity-40"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text-primary)' }}
+              >
+                📎
+              </button>
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}
+                placeholder={selected ? 'Message your agent… (Enter to send, Shift+Enter for newline)' : 'Select an agent first'}
+                aria-label="Message your agent"
+                disabled={!selected || sending}
+                rows={1}
+                className="flex-1 px-3 py-2 text-sm rounded-lg resize-none border focus:outline-none focus:ring-2 focus:ring-blue-500"
+                style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text-primary)' }}
+              />
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={!selected || sending || (!input.trim() && images.length === 0)}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40"
+              >
+                {sending ? '…' : 'Send'}
+              </button>
+            </div>
           </div>
         </div>
       </main>

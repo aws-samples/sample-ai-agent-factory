@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { ComponentPalette } from './components/palette/ComponentPalette';
+import { ComponentPalette, PALETTE_ITEMS } from './components/palette/ComponentPalette';
 import { DeployPanel } from './components/deploy/DeployPanel';
 import { CanvasArea } from './components/canvas/CanvasArea';
 import type { ActiveDeployment } from './components/deploy/ActiveDeploymentBanner';
@@ -29,6 +29,7 @@ import { resolvePersonaRoute, useScopes } from './auth/scopes';
 import { ChatPage } from './components/chat/ChatPage';
 import { AppHeader } from './components/AppHeader';
 import { createNodeFromDrop } from './utils/dragDrop';
+import { connectedToolsForRuntime } from './utils/toolWiring';
 import './App.css';
 
 const PromptLibraryModal = lazy(() => import('./components/modals/PromptLibraryModal').then(
@@ -160,6 +161,8 @@ function App() {
     replaceWorkflowDocument,
     activeTemplateId,
     addNode,
+    connectToolToRuntime,
+    deleteNode,
   } = useWorkflowStore();
 
   // Get selected runtime node for deployment
@@ -214,11 +217,51 @@ function App() {
     if (!configModal.isOpen || !configModal.componentType || !configModal.nodeId) {
       return { key: null, props: null };
     }
+    const runtimeNodeId = configModal.nodeId; // narrowed to string by the guard above
     const cfg = configModal.initialConfig as Record<string, unknown> | undefined;
     const modalKey = getModalKeyForComponentType(configModal.componentType, cfg);
     if (!modalKey) {
       return { key: null, props: null };
     }
+
+    // Runtime "Tools" tab: let the runtime select tools directly. The modal is
+    // config-only (no store), so the host (here) owns the canvas mutation — adding
+    // a tool creates a tool node + the same auto-Gateway wiring a drag produces,
+    // removing one deletes that tool node. KB and connectors are omitted (they need
+    // their own configuration modals before they can deploy).
+    const runtimeProps =
+      modalKey === 'runtime'
+        ? {
+            onOpenPromptLibrary: openPromptPicker,
+            toolCatalog: PALETTE_ITEMS.filter(
+              (item) =>
+                item.type === 'tool' &&
+                !!item.toolId &&
+                item.category === 'tools' &&
+                item.toolId !== 'knowledge_base' &&
+                !item.toolId.startsWith('connector:'),
+            ).map((item) => ({
+              toolId: item.toolId as string,
+              label: item.label,
+              description: item.description,
+            })),
+            connectedToolIds: connectedToolsForRuntime(nodes, edges, runtimeNodeId).map((t) => t.toolId),
+            onAddTool: (toolId: string) => {
+              const runtimeNode = nodes.find((n) => n.id === runtimeNodeId);
+              const base = runtimeNode?.position ?? { x: 0, y: 0 };
+              const toolNode = createNodeFromDrop('tool', { x: base.x + 260, y: base.y + 140 }, toolId);
+              addNode(toolNode);
+              connectToolToRuntime(toolNode.id, runtimeNodeId);
+            },
+            onRemoveTool: (toolId: string) => {
+              const match = connectedToolsForRuntime(nodes, edges, runtimeNodeId).find(
+                (t) => t.toolId === toolId,
+              );
+              if (match) deleteNode(match.nodeId);
+            },
+          }
+        : {};
+
     return {
       key: modalKey,
       props: {
@@ -228,10 +271,10 @@ function App() {
         initialConfig: configModal.initialConfig,
         // Observability needs apiBaseUrl
         ...(modalKey === 'observability' ? { apiBaseUrl: import.meta.env.VITE_API_BASE_URL ?? '' } : {}),
-        ...(modalKey === 'runtime' ? { onOpenPromptLibrary: openPromptPicker } : {}),
+        ...runtimeProps,
       },
     };
-  }, [configModal.isOpen, configModal.componentType, configModal.nodeId, configModal.initialConfig, handleCloseConfig, handleSaveConfig, openPromptPicker]);
+  }, [configModal.isOpen, configModal.componentType, configModal.nodeId, configModal.initialConfig, handleCloseConfig, handleSaveConfig, openPromptPicker, nodes, edges, addNode, connectToolToRuntime, deleteNode]);
 
   const handleToggleCollapse = useCallback(() => {
     setPaletteCollapsed((prev) => !prev);

@@ -2967,12 +2967,72 @@ def _multi_agent_final_text(value):
 '''
 
 
+# Built-in capabilities that compose with every multi-agent sub-agent. Gateway,
+# Memory and Knowledge Base are intentionally excluded: they need the larger
+# credential/MCP/boto preamble and stay refused for multi-agent (handled in the
+# next slice). Keep in sync with the refusal below and frontend validation.ts.
+_MULTI_AGENT_SUPPORTED_TOOLS = frozenset({"browser", "code_interpreter"})
+
+
+def _multi_agent_tool_fragments(
+    region: str,
+    *,
+    has_browser: bool = False,
+    has_code_interpreter: bool = False,
+) -> dict[str, str]:
+    """Built-in-tool wiring shared by the Graph/Swarm/Workflow generators.
+
+    The canvas wires a tool to the RUNTIME, not to one sub-agent, so every
+    sub-agent in the pattern receives the same connected built-in tools and can
+    call them. Reuses ``_built_in_tool_fragments`` so Code Interpreter and
+    Browser behave identically in single- and multi-agent runtimes.
+
+    Returns a dict whose values are all safe to splat into a generator f-string
+    (every value is ``""`` when no built-in tool is connected), with keys:
+    ``imports``, ``defs``, ``globals``, ``tools_kwarg``, ``strands_import``,
+    ``guidance``.
+    """
+    imports, tool_defs, names = _built_in_tool_fragments(
+        has_browser=has_browser,
+        has_code_interpreter=has_code_interpreter,
+        has_kb=False,
+        kb_config=None,
+    )
+    if not names:
+        return {
+            "imports": "",
+            "defs": "",
+            "globals": "",
+            "tools_kwarg": "",
+            "strands_import": "from strands import Agent",
+            "guidance": "",
+        }
+    guidance = ""
+    if has_code_interpreter:
+        guidance += _CODE_INTERPRETER_GUIDANCE
+    if has_browser:
+        guidance += _BROWSER_GUIDANCE
+    return {
+        "imports": "\n".join(imports),
+        "defs": tool_defs,
+        # execute_python calls code_session(REGION) and json.dumps(...); the
+        # multi-agent templates do not otherwise define REGION or import json.
+        "globals": f'import json\nREGION = os.environ.get("AWS_REGION", "{region}")',
+        "tools_kwarg": f"tools=[{', '.join(names)}], ",
+        "strands_import": "from strands import Agent, tool",
+        "guidance": guidance,
+    }
+
+
 def _generate_graph_agent(
     system_prompt: str,
     model_id: str,
     region: str,
     provider: str,
     multi_agent_config: dict,
+    *,
+    has_browser: bool = False,
+    has_code_interpreter: bool = False,
 ) -> str:
     """Generate Strands Graph multi-agent code using GraphBuilder.
 
@@ -2988,18 +3048,19 @@ def _generate_graph_agent(
     edges = multi_agent_config.get("edges", [])
     entry_point = _sanitize_agent_id(multi_agent_config.get("entryPoint", agents[0]["agentId"]))
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     agent_defs = ""
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         ag_init = _sub_agent_model_init(ag, provider, model_id, region)
-        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent.") + frag["guidance"])
         safe_var = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe_var} = ")}
     agent_{safe_var} = Agent(
         model=model_{safe_var},
-        system_prompt="""{ag_prompt}""",
+        {frag["tools_kwarg"]}system_prompt="""{ag_prompt}""",
     )
 '''
 
@@ -3021,13 +3082,16 @@ def _generate_graph_agent(
     provider_key_helper = _provider_key_helper_for(agent_defs)
     return f'''"""AgentCore Runtime — Strands Graph Multi-Agent"""
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands import Agent
+{frag["strands_import"]}
 from strands.multiagent.graph import GraphBuilder
 {model_import}
 import os
+{frag["imports"]}
+{frag["globals"]}
 {provider_key_helper}
 app = BedrockAgentCoreApp()
 {_MULTI_AGENT_RESULT_HELPER}
+{frag["defs"]}
 
 SYSTEM_PROMPT = """{system_prompt}"""
 
@@ -3062,6 +3126,9 @@ def _generate_swarm_agent(
     region: str,
     provider: str,
     multi_agent_config: dict,
+    *,
+    has_browser: bool = False,
+    has_code_interpreter: bool = False,
 ) -> str:
     """Generate Strands Swarm multi-agent code.
 
@@ -3073,13 +3140,14 @@ def _generate_swarm_agent(
     if not agents:
         return _generate_strands_default(system_prompt, model_id, region, provider)
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     agent_defs = ""
     agent_list_items = []
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         ag_init = _sub_agent_model_init(ag, provider, model_id, region)
-        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent.") + frag["guidance"])
         safe = ag_id.replace("-", "_")
         # Strands Swarm requires unique agent names across nodes. Without an
         # explicit name= kwarg, Strands defaults all agents to "Strands Agents",
@@ -3089,7 +3157,7 @@ def _generate_swarm_agent(
     agent_{safe} = Agent(
         name="{safe}",
         model=model_{safe},
-        system_prompt="""{ag_prompt}""",
+        {frag["tools_kwarg"]}system_prompt="""{ag_prompt}""",
     )
 '''
         agent_list_items.append(f"agent_{safe}")
@@ -3099,13 +3167,16 @@ def _generate_swarm_agent(
     provider_key_helper = _provider_key_helper_for(agent_defs)
     return f'''"""AgentCore Runtime — Strands Swarm Multi-Agent"""
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands import Agent
+{frag["strands_import"]}
 from strands.multiagent.swarm import Swarm
 {model_import}
 import os
+{frag["imports"]}
+{frag["globals"]}
 {provider_key_helper}
 app = BedrockAgentCoreApp()
 {_MULTI_AGENT_RESULT_HELPER}
+{frag["defs"]}
 
 SYSTEM_PROMPT = """{system_prompt}"""
 
@@ -3139,24 +3210,28 @@ def _generate_workflow_agent(
     region: str,
     provider: str,
     multi_agent_config: dict,
+    *,
+    has_browser: bool = False,
+    has_code_interpreter: bool = False,
 ) -> str:
     """Generate Strands Workflow (DAG) multi-agent code with sequential steps."""
     agents = multi_agent_config.get("agents", [])
     steps = multi_agent_config.get("steps", [])
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     # Build agent definitions
     agent_defs = ""
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         ag_init = _sub_agent_model_init(ag, provider, model_id, region)
-        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent.") + frag["guidance"])
         safe = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe} = ")}
     agents["{ag_id}"] = Agent(
         model=model_{safe},
-        system_prompt="""{ag_prompt}""",
+        {frag["tools_kwarg"]}system_prompt="""{ag_prompt}""",
     )
 '''
 
@@ -3193,11 +3268,14 @@ def _generate_workflow_agent(
     provider_key_helper = _provider_key_helper_for(agent_defs)
     return f'''"""AgentCore Runtime — Strands Workflow (DAG) Multi-Agent"""
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands import Agent
+{frag["strands_import"]}
 {model_import}
 import os
+{frag["imports"]}
+{frag["globals"]}
 {provider_key_helper}
 app = BedrockAgentCoreApp()
+{frag["defs"]}
 
 SYSTEM_PROMPT = """{system_prompt}"""
 
@@ -3705,6 +3783,79 @@ def _otel_invoke_with_evaluation_span(invoke_fn, *args, **kwargs):
 
 _otel_bootstrap()
 '''
+
+
+_MULTIMODAL_BLOCK = """    # Multimodal input: turn image attachments into Bedrock Converse content
+    # blocks. The text prompt variable is deliberately left untouched so all
+    # string-based logic in the template (e.g. compute-intent detection via
+    # prompt.lower()) keeps operating on text; only the agent(...) invocation
+    # below is rewritten to receive _mm_blocks when images are attached.
+    # Inert for text-only invocations (_mm_blocks stays None).
+    _mm_blocks = None
+    _mm_images = payload.get("images") or []
+    if _mm_images:
+        import base64 as _mm_b64
+        _mm_blocks = []
+        _mm_text = payload.get("prompt")
+        if isinstance(_mm_text, str) and _mm_text:
+            _mm_blocks.append({"text": _mm_text})
+        for _mm_img in _mm_images:
+            if not isinstance(_mm_img, dict):
+                continue
+            _mm_fmt = str(_mm_img.get("format") or "png").lower()
+            try:
+                _mm_raw = _mm_b64.b64decode(_mm_img.get("data") or "")
+            except Exception:
+                _mm_raw = b""
+            if _mm_raw:
+                _mm_blocks.append({"image": {"format": _mm_fmt, "source": {"bytes": _mm_raw}}})
+        if not _mm_blocks:
+            _mm_blocks = None
+"""
+
+
+def _inject_multimodal(code: str) -> str:
+    """Prepend an image-normalization block to the generated ``invoke(payload)``
+    and route any image content blocks into the agent call.
+
+    Converts ``payload['images']`` ([{format, data(base64)}, ...]) into Bedrock
+    Converse content blocks bound to a local ``_mm_blocks`` (``None`` when no
+    images are attached), WITHOUT rebinding ``payload['prompt']`` — the template
+    body keeps doing string operations on the text prompt (compute-intent
+    detection, forced-execute, HITL keyword scans), which would raise
+    ``AttributeError`` on a content-block list. The single ``agent(<prompt>)``
+    invocation is then rewritten to
+    ``agent(_mm_blocks if _mm_blocks is not None else <prompt>)`` so the model
+    receives text + images only when images are present. Inert for text-only.
+
+    Single-agent only: the multi-agent patterns pass plain strings between
+    sub-agents, so a content-block list is not a valid inter-agent message there
+    and that code is left unchanged.
+    """
+    if "strands.multiagent" in code:
+        return code
+    idx = code.find("def invoke(payload")
+    if idx < 0:
+        return code
+    eol = code.find("\n", idx)
+    if eol < 0:
+        return code
+    # 1) Prepend the _mm_blocks normalization at the top of invoke().
+    code = code[: eol + 1] + _MULTIMODAL_BLOCK + code[eol + 1 :]
+    # 2) Rewrite the Strands single-agent invocation ``agent(<ident>)`` to pass
+    #    the content blocks when present. The negative lookbehind on a word or
+    #    ``.`` char excludes ``_get_agent(`` and the capitalised ``Agent(``
+    #    constructor; only a bare ``agent(name)`` call matches. The prepended
+    #    block contains no ``agent(...)`` call, so only the real call site(s) are
+    #    touched.
+    import re as _re
+
+    code = _re.sub(
+        r"(?<![\w.])agent\((\w+)\)",
+        r"agent(_mm_blocks if _mm_blocks is not None else \1)",
+        code,
+    )
+    return code
 
 
 def _inject_otel(code: str) -> str:
@@ -4414,12 +4565,13 @@ def generate_agent_code(
             f"requested capabilities ({_composition_names(requested)}). "
             "Use a separate runtime; none will be silently omitted."
         )
-    if multi_agent_enabled and composable_tools:
+    multi_agent_unsupported = composable_tools - _MULTI_AGENT_SUPPORTED_TOOLS
+    if multi_agent_enabled and multi_agent_unsupported:
         raise CodeGenerationUnsupportedError(
-            f"The multi-agent {multi_agent_pattern} generator cannot currently "
-            "assign the connected capabilities to individual agents "
-            f"({_composition_names(composable_tools)}). Use a single-agent runtime; "
-            "none will be silently omitted."
+            f"The multi-agent {multi_agent_pattern} generator cannot yet assign these "
+            f"connected capabilities to individual agents ({_composition_names(multi_agent_unsupported)}). "
+            "Code Interpreter and Browser compose with multi-agent; for the rest, use a "
+            "single-agent runtime. None will be silently omitted."
         )
     template_refusal = template_composition_refusal(template_id, composable_tools)
     if template_refusal:
@@ -4477,6 +4629,10 @@ def generate_agent_code(
         # templates (langchain web-search, mcp-server) are left untouched.
         if has_hitl and "from strands import" in code:
             code = _maybe_inject_hitl(code)
+        # Multimodal last: prepend an image-normalization block to invoke so
+        # payload['prompt'] carries content blocks when images are attached.
+        # Inert for text-only; skips multi-agent code.
+        code = _inject_multimodal(code)
         return code
 
     # Gap 3A - A2A protocol agent. Gated on protocol=='A2A' OR an 'a2a' tool
@@ -4540,15 +4696,39 @@ def generate_agent_code(
     if multi_agent_pattern != "none" and multi_agent_config_data:
         if multi_agent_pattern == "graph":
             return _maybe_inject_guardrails(
-                _generate_graph_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+                _generate_graph_agent(
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
+                )
             )
         elif multi_agent_pattern == "swarm":
             return _maybe_inject_guardrails(
-                _generate_swarm_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+                _generate_swarm_agent(
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
+                )
             )
         elif multi_agent_pattern == "workflow":
             return _maybe_inject_guardrails(
-                _generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+                _generate_workflow_agent(
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
+                )
             )
 
     # Memory-connected agent (with optional gateway and/or knowledge base)

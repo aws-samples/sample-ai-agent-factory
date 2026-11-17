@@ -17,6 +17,20 @@ export interface DashboardUrlSummary {
   exists: boolean;
 }
 
+export interface RuntimeLogEvent {
+  timestamp: number | null;
+  message: string;
+}
+
+export interface RuntimeLogsSummary {
+  runtime_name: string;
+  version_id: string;
+  log_group: string;
+  events: RuntimeLogEvent[];
+  /** Present (and events empty) when the runtime has produced no logs yet. */
+  note?: string;
+}
+
 // Phase 2 Gap 2B — cost analytics.
 export interface CostModelUsage {
   input_tokens?: number;
@@ -156,6 +170,22 @@ export async function getTraces(
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return apiRequest<TraceWaterfall>(
     `/api/runtimes/${encodeURIComponent(runtimeName)}/traces${suffix}`
+  );
+}
+
+/** Recent CloudWatch log lines for a runtime, shown in-app (owner-scoped, secret-redacted). */
+export async function getRuntimeLogs(
+  runtimeName: string,
+  opts?: { from?: number; to?: number; errorsOnly?: boolean; limit?: number }
+): Promise<RuntimeLogsSummary> {
+  const qs = new URLSearchParams();
+  if (opts?.from) qs.set('from', String(opts.from));
+  if (opts?.to) qs.set('to', String(opts.to));
+  if (opts?.errorsOnly) qs.set('errorsOnly', 'true');
+  if (opts?.limit) qs.set('limit', String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return apiRequest<RuntimeLogsSummary>(
+    `/api/runtimes/${encodeURIComponent(runtimeName)}/logs${suffix}`
   );
 }
 

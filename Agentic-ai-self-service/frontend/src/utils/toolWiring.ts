@@ -55,6 +55,45 @@ export function deriveGatewayName(runtime: AgentCoreNode): string {
   return `${base || 'agent'}-tools`;
 }
 
+export interface RuntimeConnectedTool {
+  toolId: string;
+  nodeId: string;
+}
+
+/**
+ * The tools currently served to a runtime through its Gateway(s), as
+ * `{toolId, nodeId}`. Used by the Runtime "Tools" tab to show which tools are
+ * connected (the checked state) and to locate the exact tool node to remove.
+ * Mirrors the runtime -> gateway -> tool shape planToolToRuntimeWiring builds
+ * and deriveCanvasDeployInputs compiles, so the tab and the canvas agree.
+ */
+export function connectedToolsForRuntime(
+  nodes: AgentCoreNode[],
+  edges: Edge[],
+  runtimeNodeId: string,
+): RuntimeConnectedTool[] {
+  const gatewayIds = nodes
+    .filter(
+      (n) =>
+        n.data.componentType === 'gateway' &&
+        edges.some((e) => edgeConnects(e, n.id, runtimeNodeId)),
+    )
+    .map((n) => n.id);
+  if (gatewayIds.length === 0) return [];
+
+  const out: RuntimeConnectedTool[] = [];
+  const seen = new Set<string>();
+  for (const tool of nodes) {
+    if (tool.data.componentType !== 'tool' || seen.has(tool.id)) continue;
+    if (!gatewayIds.some((gid) => hasEdgeBetween(edges, tool.id, gid))) continue;
+    const toolId = (tool.data.configuration as { toolId?: string } | undefined)?.toolId;
+    if (!toolId) continue;
+    seen.add(tool.id);
+    out.push({ toolId, nodeId: tool.id });
+  }
+  return out;
+}
+
 function makeEdge(source: string, target: string, sourceType: string, targetType: string): Edge {
   return {
     id: `edge-${source}-${target}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

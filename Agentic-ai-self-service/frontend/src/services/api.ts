@@ -99,11 +99,14 @@ export {
   getDashboardUrl,
   getCost,
   getTraces,
+  getRuntimeLogs,
   getAudit,
   type DashboardUrlSummary,
   type CostSummary,
   type TraceSpan,
   type TraceWaterfall,
+  type RuntimeLogEvent,
+  type RuntimeLogsSummary,
   type AuditSummary,
 } from './api/observability';
 
@@ -270,6 +273,7 @@ export {
   listMyAgents as listMyAgentsApi,
   streamInvoke as streamInvokeApi,
   type DeployedAgentSummary,
+  type ChatImageInput,
 } from './api/chat';
 
 // ============================================================================
@@ -322,6 +326,7 @@ import type {
   DashboardUrlSummary,
   CostSummary,
   TraceWaterfall,
+  RuntimeLogsSummary,
   AuditSummary,
 } from './api/observability';
 import type {
@@ -486,6 +491,19 @@ export class ApiClient {
     if (opts?.traceId) qs.set('traceId', opts.traceId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiRequest<TraceWaterfall>(`/api/runtimes/${encodeURIComponent(runtimeName)}/traces${suffix}`, {}, this.baseUrl);
+  }
+
+  async getRuntimeLogs(
+    runtimeName: string,
+    opts?: { from?: number; to?: number; errorsOnly?: boolean; limit?: number }
+  ): Promise<RuntimeLogsSummary> {
+    const qs = new URLSearchParams();
+    if (opts?.from) qs.set('from', String(opts.from));
+    if (opts?.to) qs.set('to', String(opts.to));
+    if (opts?.errorsOnly) qs.set('errorsOnly', 'true');
+    if (opts?.limit) qs.set('limit', String(opts.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiRequest<RuntimeLogsSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/logs${suffix}`, {}, this.baseUrl);
   }
 
   async getAudit(limit = 200): Promise<AuditSummary> {

@@ -2,7 +2,7 @@
  * Tests for direct tool-to-runtime wiring (auto-gateway).
  */
 import { describe, it, expect } from 'vitest';
-import { planToolToRuntimeWiring, deriveGatewayName } from './toolWiring';
+import { planToolToRuntimeWiring, deriveGatewayName, connectedToolsForRuntime } from './toolWiring';
 import { deriveCanvasDeployInputs } from './deployRequestFromCanvas';
 import { createDefaultGatewayConfig } from './gatewayConfig';
 import type { AgentCoreNode } from '../store/workflowStore';
@@ -149,5 +149,34 @@ describe('planToolToRuntimeWiring', () => {
     expect(inputs.tools).toContain('gateway');
     expect(inputs.gatewayConfig).not.toBeNull();
     expect(inputs.gatewayTools).toContain('web_search');
+  });
+});
+
+describe('connectedToolsForRuntime (Runtime Tools tab)', () => {
+  it('lists tools served to the runtime through its gateway', () => {
+    const rt = runtimeNode();
+    const gw = gatewayNode();
+    const tool = toolNode('tool-1', 'web_search');
+    const edges: Edge[] = [
+      { id: 'e1', source: rt.id, target: gw.id, type: 'connection' },
+      { id: 'e2', source: tool.id, target: gw.id, type: 'connection' },
+    ];
+    expect(connectedToolsForRuntime([rt, gw, tool], edges, rt.id)).toEqual([
+      { toolId: 'web_search', nodeId: tool.id },
+    ]);
+  });
+
+  it('returns [] when the runtime has no gateway', () => {
+    const rt = runtimeNode();
+    const tool = toolNode();
+    expect(connectedToolsForRuntime([rt, tool], [], rt.id)).toEqual([]);
+  });
+
+  it('ignores tools on a gateway not connected to this runtime', () => {
+    const rt = runtimeNode();
+    const otherGw = gatewayNode('gateway-other');
+    const tool = toolNode('tool-1', 'web_search');
+    const edges: Edge[] = [{ id: 'e1', source: tool.id, target: otherGw.id, type: 'connection' }];
+    expect(connectedToolsForRuntime([rt, otherGw, tool], edges, rt.id)).toEqual([]);
   });
 });

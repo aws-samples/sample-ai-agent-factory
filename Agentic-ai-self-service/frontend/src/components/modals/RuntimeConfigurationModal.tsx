@@ -62,12 +62,26 @@ function createModalRuntimeConfig(
 // Props Interface
 // ============================================================================
 
+export interface RuntimeToolCatalogItem {
+  toolId: string;
+  label: string;
+  description: string;
+}
+
 export interface RuntimeConfigurationModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (config: RuntimeConfiguration) => void;
   initialConfig?: Partial<RuntimeConfiguration>;
   onOpenPromptLibrary?: (onSelect: (selection: PromptSelection) => void) => void;
+  /** toolIds currently served to this runtime; drives the Tools tab checkboxes. */
+  connectedToolIds?: string[];
+  /** Tools offered in the Tools tab. When omitted the tab is hidden. */
+  toolCatalog?: RuntimeToolCatalogItem[];
+  /** Connect a tool to this runtime — the host creates the node + auto-Gateway wiring. */
+  onAddTool?: (toolId: string) => void;
+  /** Disconnect a tool from this runtime — the host removes its node. */
+  onRemoveTool?: (toolId: string) => void;
 }
 
 // ============================================================================
@@ -80,6 +94,10 @@ export function RuntimeConfigurationModal({
   onSave,
   initialConfig,
   onOpenPromptLibrary,
+  connectedToolIds,
+  toolCatalog,
+  onAddTool,
+  onRemoveTool,
 }: RuntimeConfigurationModalProps) {
   const [config, setConfig] = useState<RuntimeConfiguration>(() =>
     createModalRuntimeConfig(initialConfig),
@@ -785,13 +803,59 @@ export function RuntimeConfigurationModal({
     },
     ];
 
+    // Tools tab — only when the host supplies a catalog (it owns the canvas/store).
+    // Selecting a tool materializes a tool node + auto-Gateway wiring on the canvas,
+    // which is exactly what dragging a tool onto the runtime does. This is the
+    // explicit "tool selection" the evaluators asked a runtime to offer.
+    if (toolCatalog && toolCatalog.length > 0) {
+      allTabs.push({
+        id: 'tools',
+        label: 'Tools',
+        hasError: false,
+        content: (
+          <div className="space-y-4">
+            <FormSection
+              title="Tools"
+              description="Select tools for this runtime. Each is served through an AgentCore Gateway, created and wired automatically. (You can also drag a tool from the palette onto the runtime.)"
+            >
+              <div className="grid grid-cols-1 gap-2 max-h-[400px] overflow-y-auto pr-2">
+                {toolCatalog.map((t) => {
+                  const connected = (connectedToolIds ?? []).includes(t.toolId);
+                  return (
+                    <label
+                      key={t.toolId}
+                      className="flex items-start gap-3 p-3 rounded-lg border-2 border-gray-200 hover:border-gray-300 hover:bg-gray-50 cursor-pointer transition-all"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={connected}
+                        onChange={(e) => {
+                          if (e.target.checked) onAddTool?.(t.toolId);
+                          else onRemoveTool?.(t.toolId);
+                        }}
+                        className="mt-1"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-gray-900">{t.label}</div>
+                        <div className="text-sm text-gray-600 mt-0.5">{t.description}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </FormSection>
+          </div>
+        ),
+      });
+    }
+
     if (isMcpToolServer) {
       return allTabs.filter((tab) =>
         ['general', 'advanced'].includes(tab.id),
       );
     }
     return allTabs;
-  }, [config, validationErrors, availableModels, tokenCount, provider, providerInfo, model.modelId, model.temperature, model.topP, systemPrompt, multiAgentPattern, multiAgentAgents, platformOtelEnabled, platformPolicy.status, providerApiKey, savingProviderCredential, providerCredentialError, onOpenPromptLibrary, updateConfig, updateModel, handleProviderChange, handleStoreProviderCredential, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError, isMcpToolServer, platformV2UnavailableReason]);
+  }, [config, validationErrors, availableModels, tokenCount, provider, providerInfo, model.modelId, model.temperature, model.topP, systemPrompt, multiAgentPattern, multiAgentAgents, platformOtelEnabled, platformPolicy.status, providerApiKey, savingProviderCredential, providerCredentialError, onOpenPromptLibrary, connectedToolIds, toolCatalog, onAddTool, onRemoveTool, updateConfig, updateModel, handleProviderChange, handleStoreProviderCredential, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError, isMcpToolServer, platformV2UnavailableReason]);
 
   return (
     <ConfigurationModal
