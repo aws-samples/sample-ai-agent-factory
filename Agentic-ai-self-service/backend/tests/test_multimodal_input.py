@@ -94,12 +94,7 @@ def test_inject_multimodal_is_a_noop_without_an_invoke():
 
 
 def test_inject_multimodal_skips_multi_agent_code():
-    code = (
-        "from strands.multiagent.graph import GraphBuilder\n"
-        "@app.entrypoint\n"
-        "def invoke(payload):\n"
-        "    return {}\n"
-    )
+    code = "from strands.multiagent.graph import GraphBuilder\n@app.entrypoint\ndef invoke(payload):\n    return {}\n"
     assert _inject_multimodal(code) == code  # unchanged — multi-agent is left alone
 
 

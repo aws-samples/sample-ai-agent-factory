@@ -454,9 +454,7 @@ def resolve_owned_runtime_target(runtime_name: str, caller_sub: str) -> OwnedRun
     return resolve_owned_runtime_slot_target(runtime_name, "production", caller_sub)
 
 
-def resolve_owned_runtime_observability_target(
-    runtime_name: str, caller_sub: str
-) -> OwnedRuntimeTarget:
+def resolve_owned_runtime_observability_target(runtime_name: str, caller_sub: str) -> OwnedRuntimeTarget:
     """Resolve an owner-checked target for in-app runtime log reads, preferring
     the production slot but falling back to the caller's staging slot.
 

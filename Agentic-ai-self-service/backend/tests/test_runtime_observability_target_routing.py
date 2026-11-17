@@ -351,7 +351,10 @@ def test_logs_route_uses_target_logs_client_group_and_sanitizes():
     logs = MagicMock(name="target_logs")
     logs.filter_log_events.return_value = {
         "events": [
-            {"timestamp": 1700000000000, "message": "ERROR boom token=AKIAIOSFODNN7EXAMPLE tail"},  # pragma: allowlist secret
+            {
+                "timestamp": 1700000000000,
+                "message": "ERROR boom token=AKIAIOSFODNN7EXAMPLE tail",  # pragma: allowlist secret
+            },
             {"timestamp": 1700000001000, "message": "ok"},
         ]
     }
@@ -394,9 +397,7 @@ def test_logs_route_errors_only_passes_a_filter_pattern():
     logs.filter_log_events.return_value = {"events": []}
     target = _target(logs=logs)
     with patch.object(cost, "resolve_owned_runtime_observability_target", return_value=target):
-        asyncio.run(
-            cost.get_runtime_logs("orders", from_=100, to=200, errors_only=True, limit=100, caller_sub="owner")
-        )
+        asyncio.run(cost.get_runtime_logs("orders", from_=100, to=200, errors_only=True, limit=100, caller_sub="owner"))
     _, kw = logs.filter_log_events.call_args
     assert kw.get("filterPattern")
 

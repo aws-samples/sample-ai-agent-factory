@@ -3048,9 +3048,7 @@ def _generate_graph_agent(
     edges = multi_agent_config.get("edges", [])
     entry_point = _sanitize_agent_id(multi_agent_config.get("entryPoint", agents[0]["agentId"]))
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
-    frag = _multi_agent_tool_fragments(
-        region, has_browser=has_browser, has_code_interpreter=has_code_interpreter
-    )
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     agent_defs = ""
     for ag in agents:
@@ -3142,9 +3140,7 @@ def _generate_swarm_agent(
     if not agents:
         return _generate_strands_default(system_prompt, model_id, region, provider)
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
-    frag = _multi_agent_tool_fragments(
-        region, has_browser=has_browser, has_code_interpreter=has_code_interpreter
-    )
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     agent_defs = ""
     agent_list_items = []
@@ -3222,9 +3218,7 @@ def _generate_workflow_agent(
     agents = multi_agent_config.get("agents", [])
     steps = multi_agent_config.get("steps", [])
     model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
-    frag = _multi_agent_tool_fragments(
-        region, has_browser=has_browser, has_code_interpreter=has_code_interpreter
-    )
+    frag = _multi_agent_tool_fragments(region, has_browser=has_browser, has_code_interpreter=has_code_interpreter)
 
     # Build agent definitions
     agent_defs = ""
@@ -3791,7 +3785,7 @@ _otel_bootstrap()
 '''
 
 
-_MULTIMODAL_BLOCK = '''    # Multimodal input: turn image attachments into Bedrock Converse content
+_MULTIMODAL_BLOCK = """    # Multimodal input: turn image attachments into Bedrock Converse content
     # blocks. The text prompt variable is deliberately left untouched so all
     # string-based logic in the template (e.g. compute-intent detection via
     # prompt.lower()) keeps operating on text; only the agent(...) invocation
@@ -3817,7 +3811,7 @@ _MULTIMODAL_BLOCK = '''    # Multimodal input: turn image attachments into Bedro
                 _mm_blocks.append({"image": {"format": _mm_fmt, "source": {"bytes": _mm_raw}}})
         if not _mm_blocks:
             _mm_blocks = None
-'''
+"""
 
 
 def _inject_multimodal(code: str) -> str:
@@ -4703,22 +4697,37 @@ def generate_agent_code(
         if multi_agent_pattern == "graph":
             return _maybe_inject_guardrails(
                 _generate_graph_agent(
-                    system_prompt, model_id, region, provider, multi_agent_config_data,
-                    has_browser=has_browser, has_code_interpreter=has_code_interpreter,
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
                 )
             )
         elif multi_agent_pattern == "swarm":
             return _maybe_inject_guardrails(
                 _generate_swarm_agent(
-                    system_prompt, model_id, region, provider, multi_agent_config_data,
-                    has_browser=has_browser, has_code_interpreter=has_code_interpreter,
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
                 )
             )
         elif multi_agent_pattern == "workflow":
             return _maybe_inject_guardrails(
                 _generate_workflow_agent(
-                    system_prompt, model_id, region, provider, multi_agent_config_data,
-                    has_browser=has_browser, has_code_interpreter=has_code_interpreter,
+                    system_prompt,
+                    model_id,
+                    region,
+                    provider,
+                    multi_agent_config_data,
+                    has_browser=has_browser,
+                    has_code_interpreter=has_code_interpreter,
                 )
             )
 
