@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from app.routers import cost, evaluations
 from app.services.cost_tracking import summarize_from_logs
 from app.services.runtime_target_context import OwnedRuntimeTarget
@@ -342,3 +343,121 @@ def test_runtime_observability_helper_rejects_partial_failed_queries(
             logs_client=logs,
             poll_seconds=1,
         )
+
+
+def test_logs_route_uses_target_logs_client_group_and_sanitizes():
+    """The in-app logs panel reads the runtime's own log group through the
+    owner-checked target client, in a bounded ms window, and redacts secrets."""
+    logs = MagicMock(name="target_logs")
+    logs.filter_log_events.return_value = {
+        "events": [
+            {"timestamp": 1700000000000, "message": "ERROR boom token=AKIAIOSFODNN7EXAMPLE tail"},
+            {"timestamp": 1700000001000, "message": "ok"},
+        ]
+    }
+    target = _target(logs=logs)
+    with patch.object(cost, "resolve_owned_runtime_observability_target", return_value=target):
+        result = asyncio.run(
+            cost.get_runtime_logs("orders", from_=100, to=200, errors_only=False, limit=100, caller_sub="owner")
+        )
+
+    expected_group = f"/aws/bedrock-agentcore/runtimes/{RUNTIME_ID}-DEFAULT"
+    assert result["log_group"] == expected_group
+    assert result["version_id"] == "v1"
+    logs.filter_log_events.assert_called_once()
+    _, kw = logs.filter_log_events.call_args
+    assert kw["logGroupName"] == expected_group
+    assert kw["startTime"] == 100_000 and kw["endTime"] == 200_000  # seconds -> ms
+    assert "filterPattern" not in kw
+    assert "AKIAIOSFODNN7EXAMPLE" not in result["events"][0]["message"]
+    assert result["events"][1]["message"] == "ok"
+    target.session.client.assert_called_once_with("logs", region_name=REGION)
+
+
+def test_logs_route_missing_group_reports_no_logs_not_error():
+    logs = MagicMock(name="target_logs")
+    logs.filter_log_events.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "no group"}},
+        "FilterLogEvents",
+    )
+    target = _target(logs=logs)
+    with patch.object(cost, "resolve_owned_runtime_observability_target", return_value=target):
+        result = asyncio.run(
+            cost.get_runtime_logs("orders", from_=100, to=200, errors_only=False, limit=100, caller_sub="owner")
+        )
+    assert result["events"] == []
+    assert "No runtime logs" in result["note"]
+
+
+def test_logs_route_errors_only_passes_a_filter_pattern():
+    logs = MagicMock(name="target_logs")
+    logs.filter_log_events.return_value = {"events": []}
+    target = _target(logs=logs)
+    with patch.object(cost, "resolve_owned_runtime_observability_target", return_value=target):
+        asyncio.run(
+            cost.get_runtime_logs("orders", from_=100, to=200, errors_only=True, limit=100, caller_sub="owner")
+        )
+    _, kw = logs.filter_log_events.call_args
+    assert kw.get("filterPattern")
+
+
+def test_logs_route_query_failure_is_sanitized_503():
+    logs = MagicMock(name="target_logs")
+    logs.filter_log_events.side_effect = RuntimeError(
+        "Access denied to arn:aws:logs:eu-west-1:222222222222:log-group:private"
+    )
+    target = _target(logs=logs)
+    with patch.object(cost, "resolve_owned_runtime_observability_target", return_value=target):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                cost.get_runtime_logs("orders", from_=100, to=200, errors_only=False, limit=100, caller_sub="owner")
+            )
+    assert exc_info.value.status_code == 503
+    assert "222222222222" not in exc_info.value.detail
+
+
+def test_observability_target_prefers_production_slot():
+    """In-app log reads resolve the production slot when one is promoted."""
+    from app.services import runtime_target_context as rtc
+
+    target = _target()
+    with patch.object(rtc, "resolve_owned_runtime_slot_target", return_value=target) as resolve:
+        result = rtc.resolve_owned_runtime_observability_target("orders", "owner")
+    assert result is target
+    resolve.assert_called_once()
+    assert resolve.call_args.args[1] == "production"
+
+
+def test_observability_target_falls_back_to_staging_when_no_production():
+    """A just-deployed (staging-only) runtime stays diagnosable in-app: a 404 on
+    the production slot falls back to the owner's staging slot."""
+    from app.services import runtime_target_context as rtc
+
+    staging_target = _target()
+    seen: list = []
+
+    def fake_slot(runtime_name, slot, caller_sub, **kw):
+        seen.append(slot)
+        if slot == "production":
+            raise HTTPException(status_code=404, detail="Not found")
+        return staging_target
+
+    with patch.object(rtc, "resolve_owned_runtime_slot_target", side_effect=fake_slot):
+        result = rtc.resolve_owned_runtime_observability_target("orders", "owner")
+    assert result is staging_target
+    assert seen == ["production", "staging"]
+
+
+def test_observability_target_propagates_non_404_authorization_failures():
+    """Only a missing-slot 404 triggers the fallback; an ownership/binding failure
+    (403/409/503) must surface unchanged, never masked by trying staging."""
+    from app.services import runtime_target_context as rtc
+
+    with patch.object(
+        rtc,
+        "resolve_owned_runtime_slot_target",
+        side_effect=HTTPException(status_code=403, detail="nope"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            rtc.resolve_owned_runtime_observability_target("orders", "owner")
+    assert exc_info.value.status_code == 403

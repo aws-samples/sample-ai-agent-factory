@@ -34,8 +34,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.services.auth import get_caller_sub
 from app.services.aws_errors import error_code
 from app.services.cost_tracking import summarize_from_logs
+from app.services.error_sanitizer import redact_secrets
 from app.services.rbac import SCOPE_ADMIN, has_scopes, require_scopes
-from app.services.runtime_target_context import resolve_owned_runtime_target
+from app.services.runtime_target_context import (
+    resolve_owned_runtime_observability_target,
+    resolve_owned_runtime_target,
+)
 
 logger = logging.getLogger(__name__)
 _OBSERVABILITY_UNAVAILABLE = "Runtime observability is temporarily unavailable. Try again shortly."
@@ -126,6 +130,75 @@ async def get_runtime_traces(
         raise _service_unavailable("query runtime traces", exc) from exc
     wf.update({"runtime_name": runtime_name, "version_id": version_id})
     return wf
+
+
+# Bounds the single-page response and the UI render. The errors-only view uses an
+# unanchored OR of common failure tokens (valid CloudWatch Logs filter syntax).
+_MAX_LOG_EVENTS = 200
+_ERROR_FILTER_PATTERN = "?ERROR ?Error ?Exception ?Traceback ?CRITICAL"
+
+
+@router.get("/{runtime_name}/logs", dependencies=[Depends(require_scopes("observability:read"))])
+async def get_runtime_logs(
+    runtime_name: str,
+    from_: int | None = Query(default=None, alias="from"),
+    to: int | None = Query(default=None),
+    errors_only: bool = Query(default=False, alias="errorsOnly"),
+    limit: int = Query(default=100, ge=1, le=_MAX_LOG_EVENTS),
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Recent CloudWatch log lines for *runtime_name*'s runtime, shown in-app.
+
+    Owner-checked through the same resolver as ``/traces`` and ``/cost`` (a
+    cross-tenant request 404s). Lets a deploy/invoke failure be diagnosed inside
+    the UI instead of only through a CloudWatch dashboard link the caller may
+    have no console access to. Every message is passed through
+    :func:`redact_secrets` so a credential or principal never reaches the
+    browser, and both the window and the line count are bounded. The runtime log
+    group only exists once the runtime has emitted output, so a missing group is
+    reported as "no logs yet", not an error.
+    """
+    runtime_name = _validate_runtime_name(runtime_name)
+    from_ts, to_ts = _resolve_window(from_, to)
+    # Logs fall back to the caller's staging slot when nothing is promoted to
+    # production, so a just-deployed runtime can be diagnosed in-app (traces/cost
+    # keep the production-only contract). Still fully owner-checked.
+    target = resolve_owned_runtime_observability_target(runtime_name, caller_sub)
+    log_group = f"/aws/bedrock-agentcore/runtimes/{target.runtime_id}-DEFAULT"
+    params = {
+        "logGroupName": log_group,
+        # filter_log_events takes epoch MILLISECONDS; _resolve_window returns seconds.
+        "startTime": from_ts * 1000,
+        "endTime": to_ts * 1000,
+        "limit": int(limit),
+    }
+    if errors_only:
+        params["filterPattern"] = _ERROR_FILTER_PATTERN
+    try:
+        resp = target.client("logs").filter_log_events(**params)
+    except Exception as exc:  # noqa: BLE001 — classify by service error code below
+        if error_code(exc) == "ResourceNotFoundException":
+            return {
+                "runtime_name": runtime_name,
+                "version_id": target.version_id,
+                "log_group": log_group,
+                "events": [],
+                "note": "No runtime logs in this window yet.",
+            }
+        raise _service_unavailable("read runtime logs", exc) from exc
+    events = [
+        {
+            "timestamp": event.get("timestamp"),
+            "message": redact_secrets(str(event.get("message", "")))[:2000],
+        }
+        for event in resp.get("events", [])
+    ]
+    return {
+        "runtime_name": runtime_name,
+        "version_id": target.version_id,
+        "log_group": log_group,
+        "events": events,
+    }
 
 
 @router.get("/{runtime_name}/cost", dependencies=[Depends(require_scopes("cost:read"))])

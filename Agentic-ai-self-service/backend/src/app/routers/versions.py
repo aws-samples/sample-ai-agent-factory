@@ -179,6 +179,20 @@ class SlotHistoryMessage(BaseModel):
     content: str = Field(max_length=10000)
 
 
+class InvokeImageInput(BaseModel):
+    """One multimodal image attachment for an invoke.
+
+    Bounded so the AgentCore invoke payload stays within limits; the generated
+    agent converts these into Bedrock Converse image content blocks.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    format: Literal["png", "jpeg", "gif", "webp"] = "png"
+    # Base64-encoded image bytes (~5 MB raw max; base64 is ~4/3 the raw size).
+    data: str = Field(alias="bytesB64", max_length=7_000_000, min_length=1)
+
+
 class SlotInvokeRequest(BaseModel):
     """Only conversational input; target authority comes from the slot."""
 
@@ -187,6 +201,7 @@ class SlotInvokeRequest(BaseModel):
     input: str = Field(max_length=10000)
     session_id: str | None = Field(alias="sessionId", default=None, max_length=256)
     history: list[SlotHistoryMessage] | None = Field(default=None, max_length=50)
+    images: list[InvokeImageInput] | None = Field(default=None, max_length=5)
 
 
 class SlotInvokeResponse(TestResponse):
@@ -273,6 +288,7 @@ async def invoke_runtime_slot(
         input=body.input,
         sessionId=body.session_id,
         history=([message.model_dump(mode="json") for message in body.history] if body.history else None),
+        images=([image.model_dump(mode="json") for image in body.images] if body.images else None),
     )
 
     def _promote_policy(state: dict, region: str) -> bool:

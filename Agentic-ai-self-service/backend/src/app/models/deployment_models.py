@@ -1259,12 +1259,17 @@ class DeployRequest(BaseModel):
                 "capabilities or use a separate runtime; none will be silently omitted."
             )
 
-        if multi_agent_enabled and capabilities:
+        # Code Interpreter and Browser now compose with every multi-agent sub-agent
+        # (services/code_generator.py :: _multi_agent_tool_fragments). The rest
+        # (Gateway, Memory, Knowledge Base) still have no per-agent assignment.
+        multi_agent_composable = {"browser", "code_interpreter"}
+        multi_agent_unsupported = capabilities - multi_agent_composable
+        if multi_agent_enabled and multi_agent_unsupported:
             raise ValueError(
-                f"The multi-agent {multi_agent_pattern} generator cannot currently "
-                "assign the connected capabilities to individual agents "
-                f"({_display(capabilities)}). Disconnect them or use a single-agent "
-                "runtime; none will be silently omitted."
+                f"The multi-agent {multi_agent_pattern} generator cannot yet assign these "
+                f"connected capabilities to individual agents ({_display(multi_agent_unsupported)}). "
+                "Code Interpreter and Browser compose with multi-agent; disconnect the rest "
+                "or use a single-agent runtime. None will be silently omitted."
             )
 
         template_refusal = template_composition_refusal(self.template_id, capabilities)
@@ -1460,6 +1465,9 @@ class TestRequest(BaseModel):
     runtime_id: str | None = Field(alias="runtimeId", default=None, max_length=256)
     session_id: str | None = Field(alias="sessionId", default=None, max_length=256)
     history: list | None = Field(default=None, max_length=50)
+    # Multimodal input: [{format, data(base64)}, ...], validated at the public
+    # request boundary (SlotInvokeRequest) and carried through to the payload.
+    images: list[dict] | None = Field(default=None, max_length=5)
     # Set only by the deploy-time warmup ping. A generated Memory agent returns before
     # Memory and the model, so the ping is not recorded as a turn in the owner's stream.
     warmup: bool = False

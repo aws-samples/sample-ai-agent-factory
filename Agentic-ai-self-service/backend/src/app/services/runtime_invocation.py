@@ -106,16 +106,21 @@ def runtime_payload(
     memory_identity: InvocationIdentity | None,
     warmup: bool = False,
     evaluation_capture: bool = False,
-) -> dict[str, str | bool]:
+    images: list[dict] | None = None,
+) -> dict[str, Any]:
     """Build the exact payload consumed by generated HTTP agents.
 
     ``evaluation_capture`` is an internal control-plane bit. Public request
     models forbid extra fields, and only the owner-checked staging-slot route
     for an immutable production-gated version enables it; production-slot,
     ungated staging, and direct client invocations remain redacted.
+
+    ``images`` carries multimodal input ([{format, data(base64)}, ...]); it is
+    added ONLY when non-empty, so a text-only invoke produces a byte-identical
+    payload to before (the generated agent turns images into content blocks).
     """
 
-    payload: dict[str, str | bool] = {"prompt": prompt}
+    payload: dict[str, Any] = {"prompt": prompt}
     if session_id:
         payload["session_id"] = session_id
     if memory_identity:
@@ -124,6 +129,8 @@ def runtime_payload(
         payload["warmup"] = True
     if evaluation_capture:
         payload["_agentcore_evaluation_capture"] = True
+    if images:
+        payload["images"] = images
     return payload
 
 
@@ -505,6 +512,7 @@ def invoke_verified_http_runtime(
             memory_identity,
             warmup=request.warmup,
             evaluation_capture=evaluation_capture,
+            images=getattr(request, "images", None),
         )
         if obo_required:
             if not user_bearer_token:

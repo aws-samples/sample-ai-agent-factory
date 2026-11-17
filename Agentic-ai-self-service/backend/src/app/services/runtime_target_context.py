@@ -452,3 +452,28 @@ def resolve_owned_runtime_target(runtime_name: str, caller_sub: str) -> OwnedRun
     """Resolve the owner-checked production slot for existing read surfaces."""
 
     return resolve_owned_runtime_slot_target(runtime_name, "production", caller_sub)
+
+
+def resolve_owned_runtime_observability_target(
+    runtime_name: str, caller_sub: str
+) -> OwnedRuntimeTarget:
+    """Resolve an owner-checked target for in-app runtime log reads, preferring
+    the production slot but falling back to the caller's staging slot.
+
+    The management surface queries observability by the DEPLOYED runtime name,
+    and a fresh deploy occupies the *staging* slot (production stays empty until
+    an explicit promote). A production-only resolution therefore 404s exactly
+    when an owner is trying to diagnose a just-deployed runtime — the opposite of
+    "diagnose runtime errors in-app". Both slots are owner-checked by
+    :func:`resolve_owned_runtime_slot_target`, so this only widens which of the
+    caller's OWN slots the logs read may target; tenant isolation is unchanged.
+    Only a missing-slot 404 triggers the fallback; every other authorization
+    failure (ownership, binding, unavailable) propagates unchanged. Cost and
+    trace reads keep the stricter production-only contract.
+    """
+    try:
+        return resolve_owned_runtime_slot_target(runtime_name, "production", caller_sub)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        return resolve_owned_runtime_slot_target(runtime_name, "staging", caller_sub)

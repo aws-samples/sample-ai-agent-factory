@@ -881,6 +881,104 @@ describe('Code-generation component composition', () => {
     expect(message).toContain('Knowledge Base');
   });
 
+  it('allows multi-agent composed with Code Interpreter and Browser', () => {
+    const nodes: WorkflowNode[] = [
+      {
+        id: 'runtime',
+        type: 'runtime',
+        data: {
+          configuration: runtimeConfig({
+            multiAgentPattern: 'graph',
+            multiAgentConfig: {
+              agents: [
+                {
+                  agentId: 'researcher',
+                  name: 'researcher',
+                  systemPrompt: 'Research.',
+                  modelProvider: 'bedrock',
+                  modelId: 'us.anthropic.claude-sonnet-5',
+                  tools: [],
+                },
+                {
+                  agentId: 'writer',
+                  name: 'writer',
+                  systemPrompt: 'Write.',
+                  modelProvider: 'bedrock',
+                  modelId: 'us.anthropic.claude-sonnet-5',
+                  tools: [],
+                },
+              ],
+              edges: [{ source: 'researcher', target: 'writer' }],
+              entryPoint: 'researcher',
+            },
+          }),
+        },
+      },
+      {
+        id: 'code-interpreter',
+        type: 'code_interpreter',
+        data: { configuration: { name: 'CodeInterpreter', enabled: true } },
+      },
+      {
+        id: 'browser',
+        type: 'browser',
+        data: { configuration: { name: 'BrowserTool', enabled: true } },
+      },
+    ];
+    const edges: WorkflowEdge[] = [
+      { id: 'runtime-ci', source: 'runtime', target: 'code-interpreter' },
+      { id: 'runtime-browser', source: 'runtime', target: 'browser' },
+    ];
+
+    const result = validateWorkflow(nodes, edges);
+
+    // Code Interpreter and Browser now compose with every multi-agent sub-agent,
+    // so there must be no composition refusal on the runtime.
+    const compositionError = result.nodeStates
+      .get('runtime')
+      ?.errors.find((error) => error.field === 'connectedComponents');
+    expect(compositionError).toBeUndefined();
+  });
+
+  it('still blocks multi-agent composed with a Gateway (not yet assignable per sub-agent)', () => {
+    const nodes: WorkflowNode[] = [
+      {
+        id: 'runtime',
+        type: 'runtime',
+        data: {
+          configuration: runtimeConfig({
+            multiAgentPattern: 'swarm',
+            multiAgentConfig: { agents: [] },
+          }),
+        },
+      },
+      {
+        id: 'gateway',
+        type: 'gateway',
+        data: {
+          configuration: {
+            name: 'Tools Gateway',
+            targetType: 'lambda',
+            targetConfig: {
+              type: 'lambda',
+              functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:composition',
+            },
+            enableSemanticSearch: true,
+          },
+        },
+      },
+    ];
+    const edges: WorkflowEdge[] = [{ id: 'runtime-gateway', source: 'runtime', target: 'gateway' }];
+
+    const result = validateWorkflow(nodes, edges);
+
+    const message = result.nodeStates
+      .get('runtime')
+      ?.errors.find((error) => error.field === 'connectedComponents')?.message;
+    expect(message).toContain('Multi-Agent Swarm');
+    expect(message).toContain('Gateway');
+  });
+
   it('keeps feasible single-agent compositions deployable', () => {
     const nodes: WorkflowNode[] = [
       {

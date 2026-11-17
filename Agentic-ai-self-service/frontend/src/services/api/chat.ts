@@ -46,8 +46,20 @@ export async function listMyAgents(baseUrl: string = API_BASE_URL): Promise<Depl
  * clean up the scratch row; they never replay a timed-out model/tool turn.
  * Production-slot calls retain their immutable slot invocation contract.
  */
+export interface ChatImageInput {
+  format: 'png' | 'jpeg' | 'gif' | 'webp';
+  /** Base64-encoded image bytes (no data: URI prefix). */
+  data: string;
+}
+
 export async function streamInvoke(
-  params: { runtimeId?: string; runtimeName?: string; input: string; sessionId?: string | null },
+  params: {
+    runtimeId?: string;
+    runtimeName?: string;
+    input: string;
+    sessionId?: string | null;
+    images?: ChatImageInput[];
+  },
   onToken: (t: string) => void,
   baseUrl: string = API_BASE_URL,
 ): Promise<{ sessionId: string | null; fullText: string }> {
@@ -63,6 +75,7 @@ export async function streamInvoke(
         body: JSON.stringify({
           input: params.input,
           ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+          ...(params.images && params.images.length ? { images: params.images } : {}),
         }),
       },
     );

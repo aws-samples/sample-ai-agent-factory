@@ -295,6 +295,36 @@ def test_multi_agent_patterns_do_not_silently_drop_connected_components(tool):
     _assert_composes_or_refuses([tool], multi_agent=True)
 
 
+@pytest.mark.parametrize("pattern", ["graph", "swarm", "workflow"])
+@pytest.mark.parametrize(
+    "tool,wired_symbol",
+    [("code_interpreter", "execute_python"), ("browser", "browse_web")],
+)
+def test_multi_agent_sub_agents_are_wired_with_connected_builtin_tools(pattern, tool, wired_symbol):
+    """Built-in tools must be passed to EVERY sub-agent, not merely defined.
+
+    A tool defined at module level but absent from the sub-agents' Agent(...,
+    tools=...) is the silent-drop defect this suite guards against (the
+    single-agent analogue is test_feasible_components_are_wired_into_the_agent_tool_list).
+    Code Interpreter and Browser are the capabilities that compose with the
+    multi-agent patterns; the rest stay refused (covered above).
+    """
+    config = _config(multi_agent=True)
+    config.multi_agent_pattern = pattern
+    source = generate_agent_code(config=config, tools=[tool], portable=True)
+
+    compile(source, f"<multi-agent-{pattern}-{tool}.py>", "exec")
+    compact = "".join(source.split())
+    assert f"tools=[{wired_symbol}]" in compact, (
+        f"{pattern}+{tool}: the tool is defined but not wired into any sub-agent Agent(tools=...)"
+    )
+    # Two sub-agents in the probe config — both must carry the tool.
+    assert compact.count(f"tools=[{wired_symbol}]") >= 2, (
+        f"{pattern}+{tool}: not every sub-agent received the connected tool"
+    )
+    _assert_feature(source, tool)
+
+
 @pytest.mark.parametrize(
     "tools,multi_agent",
     [

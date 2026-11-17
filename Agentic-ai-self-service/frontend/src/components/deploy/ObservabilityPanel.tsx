@@ -13,6 +13,7 @@ import {
   getErrorMessage,
   isNotReadyError,
   type DashboardUrlSummary,
+  type RuntimeLogEvent,
 } from '../../services/api';
 
 interface ObservabilityPanelProps {
@@ -25,6 +26,11 @@ export function ObservabilityPanel({ runtimeName, refreshKey }: ObservabilityPan
   const [dashboard, setDashboard] = useState<DashboardUrlSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<RuntimeLogEvent[]>([]);
+  const [logsNote, setLogsNote] = useState<string | null>(null);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [errorsOnly, setErrorsOnly] = useState(false);
 
   const reload = useCallback(async () => {
     if (!runtimeName) {
@@ -53,9 +59,39 @@ export function ObservabilityPanel({ runtimeName, refreshKey }: ObservabilityPan
     }
   }, [runtimeName]);
 
+  const loadLogs = useCallback(async () => {
+    if (!runtimeName) {
+      setLogs([]);
+      setLogsNote(null);
+      return;
+    }
+    setLogsLoading(true);
+    setLogsError(null);
+    try {
+      const api = getApiClient();
+      const result = await api.getRuntimeLogs(runtimeName, { errorsOnly, limit: 100 });
+      setLogs(result.events);
+      setLogsNote(result.note ?? null);
+    } catch (e) {
+      if (isNotReadyError(e)) {
+        setLogs([]);
+        setLogsNote(null);
+        setLogsError(null);
+      } else {
+        setLogsError(getErrorMessage(e));
+      }
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [runtimeName, errorsOnly]);
+
   useEffect(() => {
     void reload();
   }, [reload, refreshKey]);
+
+  useEffect(() => {
+    void loadLogs();
+  }, [loadLogs, refreshKey]);
 
   if (!runtimeName) {
     return (
@@ -76,11 +112,14 @@ export function ObservabilityPanel({ runtimeName, refreshKey }: ObservabilityPan
         </div>
         <button
           type="button"
-          onClick={() => void reload()}
-          disabled={loading}
+          onClick={() => {
+            void reload();
+            void loadLogs();
+          }}
+          disabled={loading || logsLoading}
           className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50"
         >
-          {loading ? 'Loading…' : 'Refresh'}
+          {loading || logsLoading ? 'Loading…' : 'Refresh'}
         </button>
       </div>
 
@@ -146,6 +185,53 @@ export function ObservabilityPanel({ runtimeName, refreshKey }: ObservabilityPan
           )}
         </div>
       )}
+
+      {/* In-app runtime logs — a failure can be diagnosed here directly instead of
+          only through the CloudWatch dashboard link, which needs console access the
+          caller may not have. Messages are secret-redacted server-side. */}
+      <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-medium text-gray-800">Recent runtime logs</div>
+          <label className="flex items-center gap-1.5 text-[11px] text-gray-600 select-none">
+            <input
+              type="checkbox"
+              checked={errorsOnly}
+              onChange={(e) => setErrorsOnly(e.target.checked)}
+            />
+            Errors only
+          </label>
+        </div>
+
+        {logsError && (
+          <div className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700">
+            {logsError}
+          </div>
+        )}
+
+        {logsLoading && logs.length === 0 ? (
+          <div className="text-[11px] text-gray-500">Loading logs…</div>
+        ) : logs.length === 0 ? (
+          <div className="text-[11px] text-gray-500">
+            {logsNote ??
+              (errorsOnly
+                ? 'No error log lines in the last 24 hours.'
+                : 'No log lines in the last 24 hours.')}
+          </div>
+        ) : (
+          <pre className="max-h-64 overflow-auto rounded bg-gray-900 text-gray-100 text-[10px] leading-relaxed p-2 font-mono whitespace-pre-wrap break-words">
+            {logs.map((event, index) => (
+              <div key={index}>
+                <span className="text-gray-500">
+                  {event.timestamp
+                    ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19)
+                    : ''}
+                </span>{' '}
+                {event.message}
+              </div>
+            ))}
+          </pre>
+        )}
+      </div>
     </div>
   );
 }
