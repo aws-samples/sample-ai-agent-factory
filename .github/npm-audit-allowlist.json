@@ -32,8 +32,8 @@
       {
         "project": "docs-site",
         "inline": "sha256",
-        "sha256": "c3f5b1ce2768e5a436ac8faa1ae8053d05f0bef8b6d72cf108602902d61fa211",
-        "reason": "The legacy hash-router redirect shim in docs-site/index.html (the <!-- hash-shim --> block that maps '/#/security' style URLs to their new paths); plain DOM code with no dependencies."
+        "sha256": "dec6b402c9ac1de82052066bdf51f892e149e5a58d20c63c33c30a8d960ac8ad",
+        "reason": "The legacy hash-router redirect shim in docs-site/index.html (the <!-- hash-shim --> block that maps '/#/security' style URLs to their new paths), as Vite emits it into every prerendered page; plain DOM code with no dependencies."
       },
       {
         "project": "docs-site",
