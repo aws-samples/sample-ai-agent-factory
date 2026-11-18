@@ -131,17 +131,31 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
   if (path.includes(NODE_MODULES)) {
-    const start = path.lastIndexOf(NODE_MODULES) + NODE_MODULES.length;
-    const segments = path.slice(start).split("/");
-    const scoped = segments[0]?.startsWith("@") ?? false;
-    const label = scoped ? segments.slice(0, 2).join("/") : segments[0] ?? "";
-    const labelSegments = scoped ? 2 : 1;
-    if (label === "" || label.startsWith(".") || label.includes("/.") || segments.length <= labelSegments || (scoped && !isNonEmptyString(segments[1]))) {
-      return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
+    // Walk the node_modules boundaries from the innermost outward: the innermost boundary whose package.json
+    // has a readable name owns the module. A vendored segment without a manifest (…/dist/esm/node_modules/
+    // tslib/) therefore belongs to the package that ships it, while a directory whose manifest is missing,
+    // unreadable or nameless establishes no identity at all and fails closed: an alias (node_modules/matcher
+    // holding picomatch) must never pass under its directory label when its manifest cannot be read.
+    let innermost = null;
+    let searchEnd = path.length;
+    for (;;) {
+      const at = path.lastIndexOf(NODE_MODULES, searchEnd - 1);
+      if (at === -1) break;
+      const start = at + NODE_MODULES.length;
+      const segments = path.slice(start).split("/");
+      const scoped = segments[0]?.startsWith("@") ?? false;
+      const label = scoped ? segments.slice(0, 2).join("/") : segments[0] ?? "";
+      const labelSegments = scoped ? 2 : 1;
+      const valid = label !== "" && !label.startsWith(".") && !label.includes("/.") && segments.length > labelSegments && !(scoped && !isNonEmptyString(segments[1]));
+      if (valid) {
+        innermost ??= label;
+        const manifestName = readName(path.slice(0, start) + label);
+        if (isNonEmptyString(manifestName) && !manifestName.startsWith(".")) return { kind: "package", name: manifestName, dir: label };
+      }
+      searchEnd = at;
     }
-    const manifestName = readName(path.slice(0, start) + label);
-    const name = isNonEmptyString(manifestName) && !manifestName.startsWith(".") ? manifestName : label;
-    return { kind: "package", name, dir: label };
+    if (innermost === null) return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
+    return { kind: "unknown", why: `the installed directory ${innermost} has no readable package.json name (${path})` };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
     if (BUILTIN_VIRTUAL.has(path) || BROWSER_EXTERNAL_RE.test(path)) return { kind: "virtual" };
@@ -369,9 +383,10 @@ export function parseStartTag(rawAttrs, label) {
 
 // The named character references this gate models, case-sensitive as in the HTML Standard: the common
 // escapes plus every name that decodes to ASCII punctuation or whitespace, i.e. everything that can change
-// how a URL or a semantic attribute reads. (&nbsp; maps to a plain space on purpose: the stricter reading.)
+// how a URL or a semantic attribute reads. &nbsp; is U+00A0 exactly: a browser keeps it in a URL (percent-
+// encoded, so the request differs from the known chunk), and the resolver refuses such paths.
 const ENTITIES = {
-  amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'", nbsp: " ", NonBreakingSpace: " ",
+  amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'", nbsp: " ", NonBreakingSpace: " ",
   Tab: "\t", NewLine: "\n", excl: "!", num: "#", dollar: "$", percnt: "%", lpar: "(", rpar: ")", ast: "*", midast: "*", plus: "+",
   comma: ",", period: ".", sol: "/", colon: ":", semi: ";", equals: "=", quest: "?", commat: "@", lsqb: "[", lbrack: "[", bsol: "\\",
   rsqb: "]", rbrack: "]", Hat: "^", lowbar: "_", UnderBar: "_", grave: "`", DiacriticalGrave: "`", lcub: "{", lbrace: "{", verbar: "|",
@@ -383,10 +398,18 @@ const ENTITIES = {
  * knows more than two thousand names ("&bsol;" is a backslash) and would read something this scanner did
  * not see. An unterminated unknown name ("&display=swap" in a query string) is literal to a browser too.
  */
-// The modelled names a browser also decodes WITHOUT a semicolon (the HTML Standard's legacy set; the rest
-// of that set decodes to Latin-1 letters and symbols, which cannot change how a URL reads, and is left
-// literal here as unmodelled). Every other name needs its ";" to be a reference at all.
-const LEGACY_UNTERMINATED = new Set(["amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT", "nbsp"]);
+// The HTML Standard's legacy names: the only ones a browser also decodes WITHOUT a semicolon. Every other
+// name needs its ";" to be a reference at all. The modelled ones decode here; the others (Latin-1 letters
+// and symbols) are refused when a browser would decode them, so a source URL is never read differently.
+const LEGACY_NAMES = new Set([
+  "AElig", "AMP", "Aacute", "Acirc", "Agrave", "Aring", "Atilde", "Auml", "COPY", "Ccedil", "ETH", "Eacute", "Ecirc", "Egrave", "Euml", "GT",
+  "Iacute", "Icirc", "Igrave", "Iuml", "LT", "Ntilde", "Oacute", "Ocirc", "Ograve", "Oslash", "Otilde", "Ouml", "QUOT", "REG", "THORN", "Uacute",
+  "Ucirc", "Ugrave", "Uuml", "Yacute", "aacute", "acirc", "acute", "aelig", "agrave", "amp", "aring", "atilde", "auml", "brvbar", "ccedil", "cedil",
+  "cent", "copy", "curren", "deg", "divide", "eacute", "ecirc", "egrave", "eth", "euml", "frac12", "frac14", "frac34", "gt", "iacute", "icirc", "iexcl",
+  "igrave", "iquest", "iuml", "laquo", "lt", "macr", "micro", "middot", "nbsp", "not", "ntilde", "oacute", "ocirc", "ograve", "ordf", "ordm", "oslash",
+  "otilde", "ouml", "para", "plusmn", "pound", "quot", "raquo", "reg", "sect", "shy", "sup1", "sup2", "sup3", "szlig", "thorn", "times", "uacute",
+  "ucirc", "ugrave", "uml", "uuml", "yacute", "yen", "yuml",
+]);
 // HTML's numeric-reference remapping of the C1 range (the windows-1252 code points a browser substitutes).
 const C1_REMAP = {
   0x80: "€", 0x82: "‚", 0x83: "ƒ", 0x84: "„", 0x85: "…", 0x86: "†", 0x87: "‡", 0x88: "ˆ", 0x89: "‰",
@@ -407,9 +430,11 @@ export function decodeEntities(text) {
       throw new GateError(`unsupported character reference ${match} in an attribute value; refused`);
     }
     // Unterminated: only a legacy name decodes, and inside an attribute value not when "=" or an ASCII
-    // alphanumeric follows it ("&amp=x", "&ampx" and "&num" stay literal, as in a browser).
-    if (!LEGACY_UNTERMINATED.has(entity)) return match;
-    return /[=A-Za-z0-9]/.test(text[offset + match.length] ?? "") ? match : ENTITIES[entity];
+    // alphanumeric follows it ("&amp=x", "&ampx" and "&num" stay literal, as in a browser). A legacy name a
+    // browser would decode but this gate does not model ("&copy.js") is refused rather than left literal.
+    if (!LEGACY_NAMES.has(entity) || /[=A-Za-z0-9]/.test(text[offset + match.length] ?? "")) return match;
+    if (Object.hasOwn(ENTITIES, entity)) return ENTITIES[entity];
+    throw new GateError(`unsupported character reference ${match} in an attribute value (a browser decodes this legacy name); refused`);
   });
 }
 const normaliseUrl = (value) => decodeEntities(value).replace(/[\u0000- \u007f]+/g, "").toLowerCase();
@@ -499,6 +524,9 @@ export function refuseAttributes(name, attrs, label) {
   for (const [attr, raw] of attrs) {
     if (attr.startsWith("on")) throw new GateError(`${label}: <${name} ${attr}> is an inline event handler; refused`);
     if (attr === "srcdoc") throw new GateError(`${label}: <${name} srcdoc> embeds a document; refused`);
+    // XML Base re-roots every relative URL below the element (an SVG <script xlink:href="/known.js"> would
+    // then be fetched from another origin), while this scanner resolves against the document; refused.
+    if (attr === "xml:base") throw new GateError(`${label}: <${name} xml:base> changes how URLs resolve; refused`);
     if (raw === null) continue;
     const value = normaliseUrl(raw);
     if (/^(?:javascript|vbscript|livescript|mocha):/.test(value)) throw new GateError(`${label}: <${name} ${attr}> uses an executable URL scheme; refused`);

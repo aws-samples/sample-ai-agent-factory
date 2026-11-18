@@ -86,12 +86,16 @@ test("module ids are attributed to the package NAMED in their installed director
   assert.deepEqual(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`).name, "picomatch");
   // An npm alias installs picomatch under another directory name: the package.json name wins.
   assert.deepEqual(pkg(`${ROOT}/node_modules/matcher/index.js`), { kind: "package", name: "picomatch", dir: "matcher" });
-  // A library vendored under its own node_modules segment inside another package's dist is attributed by
-  // that segment (so a vendored copy of the allowlisted package is still caught); without a package.json
-  // of its own, the directory label is its name.
-  assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/node_modules/tslib/tslib.es6.mjs`), { kind: "package", name: "tslib", dir: "tslib" });
+  // A library vendored under its own node_modules segment inside another package's dist, with no manifest of
+  // its own, belongs to the package that ships it (the innermost boundary with a readable name); a vendored
+  // segment that does carry a named manifest is attributed by that manifest.
+  assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/node_modules/tslib/tslib.es6.mjs`), { kind: "package", name: "@aws-amplify/core", dir: "@aws-amplify/core" });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/react/dist/node_modules/matcher/index.js`), { kind: "package", name: "picomatch", dir: "matcher" });
   assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/vendor/picomatch/index.js`).name, "@aws-amplify/core"); // embedded copy: the shipping package
-  assert.deepEqual(pkg(`${ROOT}/node_modules/broken/index.js`), { kind: "package", name: "broken", dir: "broken" }); // no manifest: the label
+  // No readable manifest name at any boundary establishes no identity: the label is never trusted (an alias
+  // directory holding the allowlisted package must not pass as its label when its manifest is unreadable).
+  assert.match(pkg(`${ROOT}/node_modules/broken/index.js`).why, /the installed directory broken has no readable package\.json name/);
+  assert.match(pkg(`${ROOT}/node_modules/aliasx/lib/picomatch.js`).why, /no readable package\.json name/);
   assert.deepEqual(pkg(`${ROOT}/src/main.tsx`), { kind: "first-party" });
   assert.deepEqual(pkg(`${ROOT}/src/../index.html`), { kind: "first-party" });
   // Vite's own helpers (exact names), and the virtual module the fixture allowlist trusts explicitly.
@@ -134,7 +138,7 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   throwsGate(() => graph([["a.js", [...APP, "/elsewhere/x.js"]]]), /ownership cannot be established: outside the first-party root/);
   throwsGate(() => graph([["a.js", [...APP, "\u0000virtual:matcher"]]]), /not listed in bundle\.trustedVirtualModules/);
   throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/.vite/deps/picomatch.js`]]]), /no installed package directory/);
-  assert.doesNotThrow(() => graph([["a.js", [...APP, `${ROOT}/node_modules/broken/index.js`]]])); // no manifest: attributed by its label, just another package
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/broken/index.js`]]]), /no readable package\.json name/); // no identity: fail closed
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
@@ -291,6 +295,9 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=/site/&amp;num;/../../other-app/">').refreshes, ["/site/&num;/../../other-app/"]); // decoded once
   throwsGate(() => scan('<a href="&Backslash;&Backslash;attacker.example/">x</a>'), /unsupported character reference &Backslash;/);
   throwsGate(() => scan('<p title="&copy; 2026">x</p>'), /unsupported character reference &copy;/);
+  // XML Base re-roots relative URLs for a browser honouring it; this scanner resolves against the document.
+  throwsGate(() => scan('<svg xml:base="https://attacker.example/"><rect/></svg>'), /xml:base/);
+  throwsGate(() => scan('<svg xml:base="/other/"><rect/></svg>', { xml: true }), /xml:base/);
   assert.equal(scan('<link rel="stylesheet" href="https://fonts.example/css2?family=Inter&display=swap"><img alt="a &amp; b &lt; c" src="x.png">').scripts.length, 0);
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
@@ -339,7 +346,11 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   throwsGate(() => decodeEntities("&copy;"), /unsupported character reference &copy;/);
   throwsGate(() => decodeEntities("&TAB;"), /unsupported character reference &TAB;/); // not a name: only &Tab; is
   // Unterminated: only legacy names decode, and not before "=" or an alphanumeric; a value decodes exactly once.
-  assert.equal(decodeEntities("a &amp b &ampx &amp=1 &lt&gt &nbsp;"), "a & b &ampx &amp=1 <>  ");
+  assert.equal(decodeEntities("a &amp b &ampx &amp=1 &lt&gt &nbsp;"), "a & b &ampx &amp=1 <>  "); // &nbsp; is U+00A0 exactly
+  // A legacy name a browser decodes without a semicolon but the gate does not model is refused when the
+  // browser would decode it ("&copy.js" → "©.js"); followed by an alphanumeric or "=" it is literal to both.
+  throwsGate(() => decodeEntities("/site/assets/x&copy.js"), /unsupported character reference &copy /);
+  assert.equal(decodeEntities("&copyx &copy=1 &notin"), "&copyx &copy=1 &notin");
   assert.equal(decodeEntities("/site/&num/../../other-app/payload.html"), "/site/&num/../../other-app/payload.html"); // "&num" is literal to a browser
   assert.equal(decodeEntities("/site/&amp;num;/../../x"), "/site/&num;/../../x"); // one pass: "&amp;" becomes "&", nothing re-decodes
   assert.equal(decodeEntities("&#38;#35;"), "&#35;");
@@ -436,6 +447,10 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=https://document.invalid/site/">'), /outside this site/);
     throwsGate(() => judge('<script src="//document.invalid/site/embed.js"></script>'), /external script/);
     throwsGate(() => judge('<link rel="modulepreload" href="https://document.invalid/site/embed.js">'), /preloads an external script/);
+    // "&nbsp;" is U+00A0 to a browser, which requests "index-abc.js%C2%A0", not the known chunk; and xml:base
+    // would make a browser fetch a known-looking path from another origin.
+    throwsGate(() => judge('<script src="/site/assets/index-abc.js&nbsp;"></script>'), /percent-encoded local path/);
+    throwsGate(() => judge('<svg xml:base="https://attacker.example/" xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="/site/assets/index-abc.js"/></svg>'), /xml:base/);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /<noscript>: <script> without <\/script>/); // the body is judged as markup too
     throwsGate(() => judge('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -710,6 +725,14 @@ test("a real npm-alias install (picomatch under node_modules/matcher) is attribu
     const lines = [];
     await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .* \(installed as matcher\)/.test(line)), lines.join("\n"));
+    // The same alias with a nameless manifest (Vite still resolves it through "main") establishes no identity:
+    // the gate fails closed instead of trusting the directory label "matcher". (A second project: manifest
+    // names are cached per directory.)
+    const app2 = join(dir, "app2");
+    miniProject(app2, nodeModules, ["react", "matcher"], { publicScript: false, farm: true });
+    cpSync(realpathSync(join(nodeModules, "picomatch")), join(app2, "node_modules", "matcher"), { recursive: true });
+    writeFileSync(join(app2, "node_modules", "matcher", "package.json"), JSON.stringify({ main: "index.js", private: true }));
+    await rejectsGate(run(argvFor(dir, app2), []), /the installed directory matcher has no readable package\.json name/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -851,6 +874,8 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml('<noscript><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"></noscript>'), /outside this site/);
     await refused(inHtml('<meta http-equiv="refresh" content="0; url=https://document.invalid/">'), /outside this site/);
     await refused(inHtml('<script src="//document.invalid/assets/x.js"></script>'), /external script/);
+    await refused(inHtml(`<svg xml:base="https://attacker.example/" xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="/${chunk}"/></svg>`), /xml:base/);
+    await refused(inHtml(`<script src="/${chunk}&nbsp;"></script>`), /percent-encoded local path/);
     await refused(inHtml('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
     await refused(inHtml('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
     await refused(() => writeFileSync(join(dist, "evil.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>'), /SVG animation element/);
