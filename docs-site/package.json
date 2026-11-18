@@ -15,7 +15,7 @@
     "test": "DESIGN_LINT=1 vitest run",
     "test:watch": "DESIGN_LINT=1 vitest",
     "validate:static": "python3 scripts/validate_static.py",
-    "audit": "npm audit --audit-level=high",
+    "audit": "node scripts/audit.mjs",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "clean": "node scripts/clean.mjs",
     "test:browser": "playwright test"
@@ -36,8 +36,8 @@
     "@types/node": "20.19.43",
     "@types/react": "18.3.5",
     "@types/react-dom": "18.3.0",
-    "@typescript-eslint/eslint-plugin": "8.70.1",
-    "@typescript-eslint/parser": "8.70.1",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
+    "@typescript-eslint/parser": "^8.73.0",
     "@vitejs/plugin-react": "5.2.0",
     "axe-core": "4.10.2",
     "eslint": "8.57.0",
@@ -56,7 +56,8 @@
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0",
     "vite": "7.3.7",
-    "vitest": "4.1.12"
+    "vitest": "4.1.12",
+    "__audit_test__": "1.0.0"
   },
   "engines": {
     "node": ">=22.12"

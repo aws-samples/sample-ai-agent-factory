@@ -7,6 +7,7 @@ Static, prerendered React + TypeScript + Vite site for the Agentic AI Factory re
 - Node.js 22.12 or newer locally (`.nvmrc` pins 24, which CI uses)
 - npm 10 or newer
 - The lockfile pins the audited build/test toolchain (Vite 7.3.7 and Vitest 4.1.12); CI audits development dependencies as well as production dependencies
+- `npm run audit` uses `scripts/audit.mjs` to fail on every high-severity advisory except the explicitly documented `GHSA-fc5q-39xc-vjpf` exception. That exception covers only the unpatched `picomatch` dependency used by the build toolchain and expires on 2027-01-31; remove it when a patched release is available. Any unrelated advisory fails the build.
 - Python 3 (for `npm run validate:static`)
 
 ## Setup
