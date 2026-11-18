@@ -22,20 +22,28 @@
  *     no script, handler or executable URL; text data (css, json, xml, txt, …) and binary media are inert
  *     and tripwire-scanned where textual; anything else (wasm, unknown types) is refused as opaque;
  *   - HTML documents are tokenised conservatively: comments may hold plain text only, declarations other
- *     than <!doctype> and processing instructions are refused, every "<" must start a tag, start tags are
- *     scanned quote-aware with exact attribute names, <iframe>/<frame>/<object>/<embed>/<applet>/<base>
- *     are refused, as are srcdoc, inline event handlers, javascript:/vbscript: URLs and non-image data:
- *     URLs anywhere; a <script src> must be a known chunk or pinned copy with an empty body, never
- *     external; every inline script body must match a pin (sha256 of its normalised text, or an anchored
- *     pattern for generated stubs); import maps are refused; modulepreload/preload-as-script links must
- *     name known scripts; <meta http-equiv="refresh"> may only target a dot-free path under the base;
+ *     than <!doctype> and processing instructions are refused, every "<" must start a tag and tag names
+ *     end at whitespace, "/" or ">" (no "<script!"), qualified names ("s:script") are refused, start
+ *     tags are scanned quote-aware with exact attribute names, raw-text elements (script, style, title,
+ *     textarea, noscript, …) run to their real end tag; <iframe>/<frame>/<object>/<embed>/<applet>/<base>
+ *     and SVG animation elements are refused, as are srcdoc, inline event handlers, javascript:/vbscript:
+ *     URLs and non-image data: URLs anywhere; attribute semantics (type, rel, http-equiv) are read
+ *     entity-decoded as the browser does; every URL (script src/href/xlink:href, script preloads, meta
+ *     refresh) is resolved with the WHATWG URL parser against the document's own deployment URL and must
+ *     stay same-origin under the base without percent-encoding; a <script> with a source must be a known
+ *     chunk or pinned copy with an empty body; every inline script of a JavaScript type must match a pin
+ *     (sha256 of its normalised text, or an anchored pattern for generated stubs), other types are inert
+ *     data blocks, import maps are refused;
  *   - publicDir must lie inside the first-party root; symlinks in the output fail;
  *   - with --verify-dist, the real deployment build's output is judged the same way, so the judged graph
  *     is the shipped artifact.
  * Trust boundary, stated plainly: code authored in this repository (modules under the first-party root,
  * pinned public copies and inline scripts, the Vite configuration and its plugins) is trusted as
  * reviewed; this gate establishes what the npm dependency graph of that build contains. Data blocks and
- * text files are inert unless repository code chooses to execute them, which is that code's review.
+ * text files are inert unless repository code chooses to execute them, which is that code's review. A
+ * copy of one package's code embedded inside another package's published files is attributed to the
+ * package that ships it (the same limitation npm audit has), so the gate's claim is about packages as
+ * installed, not about code provenance inside them.
  *
  * Usage: node npm-audit-allowlist-bundle-check.mjs --out <scratch dir OUTSIDE the project>
  *          [--project <dir, default cwd>] [--first-party-root <dir, default project>]
@@ -346,10 +354,54 @@ export function decodeEntities(text) {
   });
 }
 const normaliseUrl = (value) => decodeEntities(value).replace(/[\u0000- \u007f]+/g, "").toLowerCase();
-const EXTERNAL_RE = /^(?:[a-z][a-z0-9+.-]*:)?\/\//i;
-const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp"]);
+// Raw-text elements: their content is never markup (noscript, noembed and noframes included, as a browser
+// with scripting enabled reads them), so the only thing to find is the matching end tag.
+const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp", "noscript", "noembed", "noframes"]);
 const REFUSED_TAGS = new Set(["iframe", "frame", "frameset", "object", "embed", "applet", "base", "portal", "fencedframe"]);
-const JS_TYPES = new Set(["", "module", "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript", "text/jscript", "text/livescript"]);
+// SVG animation can rewrite an attribute (an anchor's href) into something executable after the fact.
+const SVG_ANIMATION = new Set(["animate", "set", "animatemotion", "animatetransform", "animatecolor", "discard"]);
+// Every JavaScript MIME type essence a browser executes (HTML Standard), plus "module" and the empty type.
+const JS_MIME = new Set([
+  "", "module", "application/ecmascript", "application/javascript", "application/x-ecmascript", "application/x-javascript", "text/ecmascript",
+  "text/javascript", "text/javascript1.0", "text/javascript1.1", "text/javascript1.2", "text/javascript1.3", "text/javascript1.4", "text/javascript1.5",
+  "text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript",
+]);
+const SCRIPT_SOURCE_ATTRS = ["src", "href", "xlink:href"];
+const DOCUMENT_ORIGIN = "https://document.invalid";
+
+/** An attribute value as the browser reads it for semantics: entity-decoded, trimmed, lower-cased. */
+const semantic = (attrs, name) => decodeEntities(attrs.get(name) ?? "").trim().toLowerCase();
+
+/**
+ * A browser's first pass over a URL attribute: entity-decode, drop tabs and newlines, trim leading and
+ * trailing controls and spaces. Anything odd left over (inner whitespace, controls, a backslash) fails.
+ */
+export function cleanUrl(raw, label) {
+  const value = decodeEntities(raw).replace(/[\t\n\r]/g, "").replace(/^[\u0000- \u007f]+|[\u0000- \u007f]+$/g, "");
+  if (/[\u0000- \u007f\\]/.test(value)) throw new GateError(`${label}: URL ${JSON.stringify(raw)} contains whitespace, control characters or a backslash; refused`);
+  return value;
+}
+
+/**
+ * Resolve a URL the way the browser would, against the document's own deployment URL (a fixed origin,
+ * the base path, the document's path). Returns { external: true } for another origin, or the
+ * output-relative path for a same-origin location under the base; anything percent-encoded or outside
+ * the base fails.
+ */
+export function resolveLocal(raw, rel, prefix, label) {
+  const value = cleanUrl(raw, label);
+  const base = new URL(`${DOCUMENT_ORIGIN}${prefix}${rel}`);
+  let url;
+  try {
+    url = new URL(value, base);
+  } catch {
+    throw new GateError(`${label}: URL ${JSON.stringify(raw)} does not parse; refused`);
+  }
+  if (url.origin !== base.origin) return { external: true };
+  if (url.pathname.includes("%")) throw new GateError(`${label}: URL ${JSON.stringify(raw)} resolves to a percent-encoded local path ${url.pathname}; refused`);
+  if (!url.pathname.startsWith(prefix)) throw new GateError(`${label}: URL ${JSON.stringify(raw)} resolves to ${url.pathname}, outside the base ${prefix}; refused`);
+  return { external: false, target: url.pathname.slice(prefix.length) };
+}
 
 /** Refuse attributes a browser could execute: handlers, srcdoc, executable or non-image data URL schemes. */
 export function refuseAttributes(name, attrs, label) {
@@ -393,7 +445,8 @@ export function scanDocument(text, label, { svg = false } = {}) {
       continue;
     }
     if (text[lt + 1] === "?") {
-      if (!svg || !lower.startsWith("<?xml", lt)) throw new GateError(`${label}: processing instructions are refused`);
+      // Only the XML declaration itself, in SVG mode; "<?xml-stylesheet …?>" and the like are refused.
+      if (!svg || !lower.startsWith("<?xml", lt) || !/\s/.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
       const end = text.indexOf("?>", lt);
       if (end === -1) throw new GateError(`${label}: unterminated XML prolog`);
       i = end + 2;
@@ -408,6 +461,12 @@ export function scanDocument(text, label, { svg = false } = {}) {
     const nameMatch = /^<([a-zA-Z][a-zA-Z0-9:_-]*)/.exec(text.slice(lt, lt + 80));
     if (!nameMatch) throw new GateError(`${label}: "<" at offset ${lt} does not start a tag; text must be escaped as &lt;`);
     const name = nameMatch[1].toLowerCase();
+    // A browser reads the tag name up to whitespace, "/" or ">": "<script!" is an unknown element, not a
+    // script with an attribute. Anything but those three delimiters after the name is refused.
+    const delimiter = text[lt + 1 + nameMatch[1].length];
+    if (delimiter !== undefined && !/[\s/>]/.test(delimiter)) throw new GateError(`${label}: unsupported tag name at offset ${lt} ("<${nameMatch[1]}${delimiter}"); refused`);
+    // Namespace-qualified element names (an SVG "s:script") are refused in both modes.
+    if (name.includes(":")) throw new GateError(`${label}: qualified element name <${name}> is refused`);
     let j = lt + 1 + nameMatch[1].length;
     let quote = null;
     while (j < text.length) {
@@ -424,37 +483,34 @@ export function scanDocument(text, label, { svg = false } = {}) {
     const attrs = parseAttributes(rawAttrs.replace(/\/\s*$/, ""), `${label}: <${name}>`);
     refuseAttributes(name, attrs, label);
     if (REFUSED_TAGS.has(name)) throw new GateError(`${label}: <${name}> is refused (an embedded or external executable context)`);
-    if (svg && name === "foreignobject") throw new GateError(`${label}: <foreignObject> embeds HTML inside SVG; refused`);
+    if (name === "foreignobject") throw new GateError(`${label}: <foreignObject> embeds HTML inside SVG; refused`);
+    if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
     if (name === "link") {
-      const rel = (attrs.get("rel") ?? "").toLowerCase().split(/\s+/);
+      const rel = semantic(attrs, "rel").split(/\s+/);
       if (rel.includes("import")) throw new GateError(`${label}: <link rel="import"> is refused`);
-      if (rel.includes("modulepreload") || (rel.includes("preload") && (attrs.get("as") ?? "").toLowerCase() === "script")) {
+      if (rel.includes("modulepreload") || (rel.includes("preload") && semantic(attrs, "as") === "script")) {
         const href = attrs.get("href");
         if (!isNonEmptyString(href)) throw new GateError(`${label}: a script preload without href`);
         out.preloads.push(href);
       }
     }
-    if (name === "meta" && (attrs.get("http-equiv") ?? "").toLowerCase() === "refresh") {
-      const match = /^\s*\d+\s*;\s*url\s*=\s*(.+?)\s*$/i.exec(attrs.get("content") ?? "");
+    if (name === "meta" && semantic(attrs, "http-equiv") === "refresh") {
+      const match = /^\s*\d+\s*;\s*url\s*=\s*(.+?)\s*$/i.exec(decodeEntities(attrs.get("content") ?? ""));
       if (!match) throw new GateError(`${label}: <meta http-equiv="refresh"> without a url`);
       out.refreshes.push(match[1].replace(/^['"]|['"]$/g, ""));
     }
     i = j + 1;
     if (RAW_TEXT.has(name)) {
       if (selfClosing) throw new GateError(`${label}: a self-closing <${name}/> is not how browsers read it; refused`);
-      const close = lower.indexOf(`</${name}`, i);
-      if (close === -1) throw new GateError(`${label}: <${name}> without </${name}>`);
+      // The end tag must be the real one: "</stylex>" does not close <style>.
+      const match = new RegExp(`</${name}(?=[\\s/>])`, "i").exec(text.slice(i));
+      if (!match) throw new GateError(`${label}: <${name}> without </${name}>`);
+      const close = i + match.index;
       if (name === "script") out.scripts.push({ attrs, body: text.slice(i, close) });
       i = close; // the end tag is consumed on the next iteration
     }
   }
   return out;
-}
-
-/** Resolve a local URL in a document to an output-relative path (base prefix stripped, else root-relative, else document-relative). */
-function resolveLocal(url, rel, prefix) {
-  const path = url.split(/[?#]/)[0];
-  return posix.normalize(path.startsWith(prefix) ? path.slice(prefix.length) : path.startsWith("/") ? path.slice(1) : posix.join(posix.dirname(rel), path));
 }
 
 /**
@@ -471,22 +527,25 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
     result.documents += 1;
     const doc = scanDocument(readFileSync(join(dir, rel), "utf8"), tag(rel));
     for (const { attrs, body } of doc.scripts) {
-      const type = (attrs.get("type") ?? "").trim().toLowerCase();
+      // The type the browser acts on: `type` when present (even empty), else `language` as text/<language>.
+      const type = attrs.has("type") ? semantic(attrs, "type") : attrs.has("language") ? `text/${semantic(attrs, "language")}` : "";
       if (type === "importmap") throw new GateError(`${tag(rel)}: import maps are refused`);
-      const isData = !JS_TYPES.has(type);
-      if (attrs.has("src")) {
-        if (isData) throw new GateError(`${tag(rel)}: a <script src> with a non-script type is refused`);
-        if (body.trim() !== "") throw new GateError(`${tag(rel)}: a <script src> must have an empty body`);
-        const url = attrs.get("src");
-        if (!isNonEmptyString(url)) throw new GateError(`${tag(rel)}: <script> with an empty src`);
-        if (EXTERNAL_RE.test(url)) throw new GateError(`${tag(rel)} loads an external script ${url}; it is outside the module graph`);
-        const target = resolveLocal(url, rel, prefix);
-        if (!known.has(target)) throw new GateError(`${tag(rel)} loads ${url}, which is not a chunk of this build nor a pinned public copy`);
+      const executable = JS_MIME.has(type);
+      const sources = SCRIPT_SOURCE_ATTRS.filter((attr) => attrs.has(attr));
+      if (sources.length > 1) throw new GateError(`${tag(rel)}: a <script> with several source attributes (${sources.join(", ")}) is refused`);
+      if (sources.length === 1) {
+        if (!executable) throw new GateError(`${tag(rel)}: a <script ${sources[0]}> with a non-script type is refused`);
+        if (body.trim() !== "") throw new GateError(`${tag(rel)}: a <script ${sources[0]}> must have an empty body`);
+        const url = attrs.get(sources[0]);
+        if (!isNonEmptyString(url)) throw new GateError(`${tag(rel)}: <script> with an empty ${sources[0]}`);
+        const resolved = resolveLocal(url, rel, prefix, tag(rel));
+        if (resolved.external) throw new GateError(`${tag(rel)} loads an external script ${url}; it is outside the module graph`);
+        if (!known.has(resolved.target)) throw new GateError(`${tag(rel)} loads ${url}, which is not a chunk of this build nor a pinned public copy`);
         continue;
       }
       const normalised = normalizeInline(body);
       if (normalised.length === 0) continue;
-      if (isData) {
+      if (!executable) {
         result.data += 1;
         tripwire(`data block ${result.data} of ${tag(rel)}`, normalised, packages);
         continue;
@@ -499,16 +558,14 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
       else throw new GateError(`${tag(rel)}: inline script ${result.inline} is not pinned in bundle.firstPartyScripts (sha256 of its normalised body: ${digest})`);
     }
     for (const href of doc.preloads) {
-      if (EXTERNAL_RE.test(href)) throw new GateError(`${tag(rel)} preloads an external script ${href}; refused`);
-      if (!known.has(resolveLocal(href, rel, prefix))) throw new GateError(`${tag(rel)} preloads ${href}, which is not a chunk of this build nor a pinned public copy`);
+      const resolved = resolveLocal(href, rel, prefix, tag(rel));
+      if (resolved.external) throw new GateError(`${tag(rel)} preloads an external script ${href}; refused`);
+      if (!known.has(resolved.target)) throw new GateError(`${tag(rel)} preloads ${href}, which is not a chunk of this build nor a pinned public copy`);
     }
     for (const url of doc.refreshes) {
-      const value = decodeEntities(url).trim();
-      if (EXTERNAL_RE.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(value)) throw new GateError(`${tag(rel)} refreshes to ${url}, outside this site; refused`);
-      const path = value.split(/[?#]/)[0];
-      if (!path.startsWith(prefix) || path.split("/").some((segment) => segment === "." || segment === "..")) {
-        throw new GateError(`${tag(rel)} refreshes to ${url}, which is not a dot-free path under ${prefix}; refused`);
-      }
+      // Resolved like the browser (dot segments and %2e collapse), it must stay a same-origin path under the base.
+      const resolved = resolveLocal(url, rel, prefix, `${tag(rel)} refresh`);
+      if (resolved.external) throw new GateError(`${tag(rel)} refreshes to ${url}, outside this site; refused`);
     }
   }
   return result;

