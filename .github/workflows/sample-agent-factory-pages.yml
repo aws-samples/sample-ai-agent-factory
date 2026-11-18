@@ -88,8 +88,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Same gate as `npm run audit` (npm audit --audit-level=high) plus the repository's narrow expiring
+      # allowlist for advisories with no patched release (.github/npm-audit-allowlist.json).
       - name: Audit dependencies
-        run: npm run audit
+        run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
 
       - name: TypeScript check
         run: npm run typecheck

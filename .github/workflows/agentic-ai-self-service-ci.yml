@@ -366,9 +366,11 @@ jobs:
       - name: Install
         working-directory: Agentic-ai-self-service/frontend
         run: npm ci
+      # Full `npm audit --audit-level=high` (runtime AND build/dev dependencies), with a narrow expiring
+      # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json).
       - name: Audit dependencies
         working-directory: Agentic-ai-self-service/frontend
-        run: npm audit --audit-level=high
+        run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
       - name: Lint
         working-directory: Agentic-ai-self-service/frontend
         run: npx eslint .

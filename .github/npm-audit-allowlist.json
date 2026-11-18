@@ -1,0 +1,16 @@
+{
+  "_comment": "Narrow, EXPIRING exceptions for `npm audit --audit-level=high`, enforced by .github/scripts/npm-audit-allowlist.mjs in CI. Add an entry only for an advisory with NO patched release, after confirming it does not reach the shipped bundle; always set an expiry so it is re-reviewed. An expired entry fails CI until it is removed (fixed upstream) or renewed with a fresh review.",
+  "allow": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "reason": "ReDoS in picomatch's extglob parser (CVE-2026-112366). Every published version is affected (range <= 4.0.7, and 4.0.7 is the latest release); the upstream fix is picomatch PR #194, still unmerged, so no patched version can be installed and npm's only 'fix' is a major downgrade of vite/vitest. picomatch is reached ONLY through build/lint/test tooling (vite -> tinyglobby -> fdir/picomatch, vitest, typescript-eslint -> typescript-estree -> tinyglobby, @rollup/pluginutils); it is not in the production dependency tree and is not part of the deployed bundle (`npm audit --omit=dev --audit-level=high` reports 0). Exposure is limited to CI/build availability from attacker-controlled glob patterns, on isolated unprivileged runners.",
+      "references": [
+        "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+        "https://github.com/micromatch/picomatch/pull/194"
+      ],
+      "added": "2026-11-18",
+      "expires": "2026-12-16T00:00:00Z"
+    }
+  ]
+}
