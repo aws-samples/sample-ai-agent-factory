@@ -606,6 +606,14 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     put("assets/guide.pdf", "%PDF-1.4\n1 0 obj << /OpenAction << /S /JavaScript /JS (app.alert(1)) >> >> endobj\n");
     throwsGate(() => check(), /guide\.pdf is neither a chunk/); // a PDF can carry JavaScript: not inert
     rmSync(join(outDir, "assets", "guide.pdf"));
+    // On POSIX a backslash is a filename character: a root-level file literally named "assets\logo.svg" must not be
+    // read as "assets/logo.svg" (the harmless file next to it), or its script would never be inspected.
+    put("assets\\logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    throwsGate(() => walkOutput(outDir), /name containing a backslash, a slash or a control character/);
+    throwsGate(() => check(), /name containing a backslash, a slash or a control character/);
+    rmSync(join(outDir, "assets\\logo.svg"));
+    throwsGate(() => { put("ctl\u0001.txt", "x"); check(); }, /control character/);
+    rmSync(join(outDir, "ctl\u0001.txt"));
     // Inert text and SVG documents are tripwire-scanned; SVG may carry no script or handler.
     put("robots.txt", "# built with picomatch\n");
     throwsGate(() => check(), /robots\.txt mentions allowlisted package picomatch/);
@@ -1022,7 +1030,7 @@ test("the deployment build's output must equal this build's chunks and pins (--v
       writeFileSync(join(dist, chunk), originalChunk);
       writeFileSync(join(dist, "index.html"), html);
       writeFileSync(join(dist, "embed.js"), EMBED);
-      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg", "feed.xml", "payload.xhtml", "payload.pdf"]) rmSync(join(dist, extra), { force: true });
+      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg", "feed.xml", "payload.xhtml", "payload.pdf", "assets\\logo.svg"]) rmSync(join(dist, extra), { force: true });
     };
     const inHtml = (snippet) => () => writeFileSync(join(dist, "index.html"), html.replace("</body>", `${snippet}</body>`));
     await refused(() => writeFileSync(join(dist, chunk), Buffer.concat([originalChunk, Buffer.from("\n/* appended */\n")])), /rewritten after the build/);
@@ -1081,6 +1089,7 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml(`<script src="/${chunk}&nbsp;"></script>`), /percent-encoded local path/);
     await refused(inHtml(`<script src="/${chunk}&#127;"></script>`), /control characters/);
     await refused(inHtml('<svg><use href="/other-app/payload.svg#p"/></svg>'), /references another resource/);
+    await refused(() => writeFileSync(join(dist, "assets\\logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), /name containing a backslash, a slash or a control character/);
     await refused(inHtml('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
     await refused(inHtml('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
     await refused(() => writeFileSync(join(dist, "evil.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>'), /SVG animation element/);

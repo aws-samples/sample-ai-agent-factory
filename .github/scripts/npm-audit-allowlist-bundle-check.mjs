@@ -304,19 +304,33 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
   return { violations, modules, firstParty, virtual, packages };
 }
 
-/** Every regular file under `dir` as a sorted posix path relative to it; a symlink anywhere fails closed. */
+/**
+ * Every regular file under `dir` as a sorted posix path relative to it; a symlink anywhere fails closed.
+ * Names are joined segment by segment, never by rewriting characters: on POSIX a backslash is an ordinary
+ * filename character, and turning "assets\index.js" into "assets/index.js" would make two files share one
+ * path, so the gate would hash one and never read the other. A name holding a backslash, a slash, a NUL or
+ * any other control character is refused outright; no build tool writes such names.
+ */
 export function walkOutput(dir) {
   const files = [];
-  const walk = (current) => {
+  const seen = new Set();
+  const walk = (current, segments) => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const full = join(current, entry.name);
+      if (/[\\/\u0000-\u001f\u007f]/.test(entry.name)) {
+        throw new GateError(`${full} has a name containing a backslash, a slash or a control character; refused`);
+      }
       if (entry.isSymbolicLink()) throw new GateError(`${full} is a symlink; the output directory must contain only regular files`);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.isFile()) files.push(toPosix(relative(dir, full)));
-      else throw new GateError(`${full} is not a regular file`);
+      if (entry.isDirectory()) walk(full, [...segments, entry.name]);
+      else if (entry.isFile()) {
+        const rel = [...segments, entry.name].join("/");
+        if (seen.has(rel)) throw new GateError(`${full} maps to an output path already seen (${rel}); two files may not share one identity`);
+        seen.add(rel);
+        files.push(rel);
+      } else throw new GateError(`${full} is not a regular file`);
     }
   };
-  walk(dir);
+  walk(dir, []);
   return files.sort();
 }
 
