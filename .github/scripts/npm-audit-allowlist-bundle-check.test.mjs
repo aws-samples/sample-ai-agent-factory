@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
@@ -99,7 +99,9 @@ test("module ids are attributed to the package NAMED in their installed director
   assert.deepEqual(pkg(`${ROOT}/node_modules/other/../picomatch/lib/picomatch.js`).name, "picomatch");
   assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/index.js?commonjs-exports`).name, "picomatch");
   assert.deepEqual(pkg(`\u0000${ROOT}/node_modules/picomatch/index.js?commonjs-proxy`).name, "picomatch");
-  assert.deepEqual(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`).name, "picomatch");
+  // Windows separators are converted only on Windows; on POSIX a backslash is a filename character and is refused.
+  if (sep === "\\") assert.deepEqual(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`).name, "picomatch");
+  else assert.match(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`).why, /contains a backslash/);
   // An npm alias installs picomatch under another directory name: the package.json name wins.
   assert.deepEqual(pkg(`${ROOT}/node_modules/matcher/index.js`), { kind: "package", name: "picomatch", dir: "matcher" });
   // A library vendored under its own node_modules segment inside another package's dist, with no manifest of
@@ -114,6 +116,10 @@ test("module ids are attributed to the package NAMED in their installed director
   // A declared vendor copy anywhere inside the installation, not only under a node_modules segment, is carried too.
   assert.deepEqual(pkg(`${ROOT}/node_modules/react/vendor/picomatch/index.js`), { kind: "package", name: "react", dir: "react", declares: ["picomatch"] });
   assert.match(pkg(`${ROOT}/node_modules/loose/index.js`).why, /loose declares itself loose but no lockfile records an installation containing it/);
+  // On POSIX a backslash is a filename character: a package file literally named "..\..\src\payload.mjs" must
+  // never be rewritten and collapsed into the first-party root. Such ids (and control characters) are refused.
+  assert.match(pkg(`${ROOT}/node_modules/picomatch/..\\..\\src\\payload.mjs`).why, /contains a backslash/);
+  assert.match(pkg(`${ROOT}/node_modules/picomatch/lib\u0001/x.js`).why, /contains a control character/);
   assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/vendor/picomatch/index.js`).name, "@aws-amplify/core"); // embedded copy: the shipping package
   // No readable manifest name at any boundary establishes no identity: the label is never trusted (an alias
   // directory holding the allowlisted package must not pass as its label when its manifest is unreadable).
@@ -213,6 +219,7 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/react/dist/node_modules/matcher/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*matcher\/index\.js \(a vendored copy declaring itself picomatch, shipped inside react\)$/);
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/picomatch/dist/node_modules/benign/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*benign\/index\.js \(declares itself benign\)$/);
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/react/vendor/picomatch/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*vendor\/picomatch\/index\.js \(a vendored copy declaring itself picomatch, shipped inside react\)$/);
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/picomatch/..\\..\\src\\payload.mjs`]]]), /contains a backslash/); // never rewritten into the first-party root
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
@@ -965,6 +972,27 @@ test("a real recorded host package shipping a declared vendor copy (host/vendor/
     const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
     assert.ok(outcome instanceof GateError && /allowlist premise/.test(outcome.message), `the gate did not fail on the vendored copy:\n${lines.join("\n")}`);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*host\/vendor\/picomatch\/.* \(a vendored copy declaring itself picomatch, shipped inside host\)/.test(line)), lines.join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a real install whose file is literally named ..\\..\\src\\payload.mjs is never rewritten into the first-party root and FAILS the gate", async () => {
+  const { nodeModules } = viteProject();
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
+  try {
+    const app = join(dir, "app");
+    const payload = "..\\..\\src\\payload.mjs"; // one file name holding two literal backslash-separated parent segments
+    miniProject(app, nodeModules, ["react", `picomatch/${payload}`], { publicScript: false, farm: true });
+    rmSync(join(app, "node_modules", "picomatch"));
+    const pico = join(app, "node_modules", "picomatch");
+    cpSync(realpathSync(join(nodeModules, "picomatch")), pico, { recursive: true });
+    writeFileSync(join(pico, payload), "export const payload = 1;\nconsole.log(payload);\n");
+    writeFileSync(join(app, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/picomatch": { version: "4.0.7" } } }));
+    writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
+    const lines = [];
+    const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
+    assert.ok(outcome instanceof GateError && /contains a backslash|allowlist premise/.test(outcome.message), `the gate did not fail on the backslash-named module:\n${outcome?.message ?? ""}\n${lines.join("\n")}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

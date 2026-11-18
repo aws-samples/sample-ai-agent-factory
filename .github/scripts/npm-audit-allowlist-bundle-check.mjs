@@ -77,7 +77,8 @@ export const WORKER_PREFIX = "worker";
 export const BUILTIN_VIRTUAL = new Set(["commonjsHelpers.js", "vite/preload-helper.js", "vite/modulepreload-polyfill.js"]);
 const BROWSER_EXTERNAL_RE = /^__vite-browser-external(?::[^\s/]+)?$/;
 
-const toPosix = (path) => path.replace(/\\/g, "/");
+// Only Windows uses the backslash as a separator; on POSIX it is an ordinary filename character and is left alone.
+const toPosix = (path) => (sep === "\\" ? path.replace(/\\/g, "/") : path);
 export const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const isPlainObject = (value) => value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype;
 const isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
@@ -177,6 +178,12 @@ export function readInstalledLock(installRoot) {
 export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readManifest = readInstalledManifest, readLock = readInstalledLock } = {}) {
   if (typeof id !== "string" || id.length === 0) return { kind: "unknown", why: "empty module id" };
   const nul = id.startsWith("\u0000");
+  // On POSIX a backslash is a filename character and only Windows uses it as a separator: rewriting it, or
+  // letting posix.normalize() collapse a literal "..\..\src" file name into parent directories, could move a
+  // package's file under another owner (even the first-party root). Such ids, and ids carrying control
+  // characters, are refused before any normalisation; no build tool emits them.
+  if (sep !== "\\" && id.includes("\\")) return { kind: "unknown", why: `module id ${JSON.stringify(id)} contains a backslash, a filename character on this platform; refused` };
+  if (/[\u0000-\u001f\u007f]/.test(nul ? id.slice(1) : id)) return { kind: "unknown", why: `module id ${JSON.stringify(id)} contains a control character; refused` };
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
   if (path.includes(NODE_MODULES)) {
