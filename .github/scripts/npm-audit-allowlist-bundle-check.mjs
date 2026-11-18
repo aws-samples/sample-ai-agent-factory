@@ -43,7 +43,12 @@
  * text files are inert unless repository code chooses to execute them, which is that code's review. A
  * copy of one package's code embedded inside another package's published files is attributed to the
  * package that ships it (the same limitation npm audit has), so the gate's claim is about packages as
- * installed, not about code provenance inside them.
+ * installed, not about code provenance inside them; a copy that declares its own name in a package.json
+ * anywhere inside the shipping installation is carried as an identity and checked. Every static and dynamic
+ * import edge of every chunk (worker sub-builds included) must point at a chunk of the same build, so no
+ * module Rollup left external (a URL import, a configured external) is loaded by the browser outside the
+ * judged graph; what static edges cannot prove is a computed run-time loader (import() of a computed URL,
+ * fetch-and-evaluate) inside trusted or third-party code, which is the review of that code.
  *
  * Usage: node npm-audit-allowlist-bundle-check.mjs --out <scratch dir OUTSIDE the project>
  *          [--project <dir, default cwd>] [--first-party-root <dir, default project>]
@@ -1053,6 +1058,14 @@ export async function buildGraph({ projectDir, outDir, vite }) {
         const key = prefix ? `${prefix}:${fileName}` : fileName;
         if (output.type === "chunk") {
           if (record.chunks.has(key)) throw new GateError(`chunk ${key} was recorded twice; cannot judge an ambiguous graph`);
+          // Every static or dynamic import edge must point at a chunk of this same bundle. Anything else is a
+          // module Rollup left external (a URL import, a bare specifier configured as external): the browser
+          // would load it at run time from outside the judged graph, so the graph is not closed; refused.
+          for (const imported of [...(output.imports ?? []), ...(output.dynamicImports ?? [])]) {
+            if (!Object.hasOwn(bundle, imported) || bundle[imported].type !== "chunk") {
+              throw new GateError(`chunk ${key} imports ${JSON.stringify(imported)}, which is not a chunk of this build; an external module the browser would load from outside the judged graph is refused`);
+            }
+          }
           record.chunks.set(key, output.moduleIds ?? Object.keys(output.modules ?? {}));
         } else if (!prefix) record.assets.set(fileName, output.type);
       }

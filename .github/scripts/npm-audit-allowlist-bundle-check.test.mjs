@@ -194,6 +194,13 @@ test("lockfiles are validated and reconciled: malformed or incomplete hidden met
     assert.deepEqual(classifyModule(`${recorded}/node_modules/devtool/node_modules/matcher/lib/picomatch.js`, dir, { readManifest: nameless }), { kind: "package", name: "picomatch", dir: "matcher" });
     const omitted = root({ lockfileVersion: 3, packages: { "node_modules/devtool": {} } });
     assert.match(classifyModule(`${omitted}/node_modules/devtool/node_modules/matcher/lib/picomatch.js`, dir, { readManifest: nameless }).why, /package\.json has no readable name/);
+    // A "?" suffix reads as a query only while no file with the literal name exists on disk.
+    const literal = root({ lockfileVersion: 3, packages: { "node_modules/picomatch": {} } });
+    mkdirSync(join(literal, "node_modules", "picomatch"), { recursive: true });
+    const named = () => ({ present: true, name: "picomatch" });
+    assert.deepEqual(classifyModule(`${literal}/node_modules/picomatch/index.js?commonjs-exports`, dir, { readManifest: named }), { kind: "package", name: "picomatch", dir: "picomatch" });
+    writeFileSync(join(literal, "node_modules", "picomatch", "index.js?commonjs-exports"), "export const literal = 1;\n");
+    assert.match(classifyModule(`${literal}/node_modules/picomatch/index.js?commonjs-exports`, dir, { readManifest: named }).why, /question mark that is part of a file or directory name/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1012,6 +1019,43 @@ test("a real install whose file is literally named ..\\..\\src\\payload.mjs is n
     const lines = [];
     const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
     assert.ok(outcome instanceof GateError && /contains a backslash|allowlist premise/.test(outcome.message), `the gate did not fail on the backslash-named module:\n${outcome?.message ?? ""}\n${lines.join("\n")}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("external import edges are refused: a chunk may import only chunks of its own build (static URL import, re-export, dynamic import, inline worker, configured external)", async () => {
+  const { nodeModules } = viteProject();
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
+  try {
+    writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
+    const cdn = "https://cdn.example.invalid/picomatch-4.0.7.mjs";
+    /** A recorded ESM package "host" (index.js = `code`, plus `files`) imported by the app; returns the gate's outcome. */
+    const hostBuild = async (name, code, files = {}, config = null) => {
+      const app = join(dir, name);
+      miniProject(app, nodeModules, ["react", "host"], { publicScript: false, farm: true, config });
+      const host = join(app, "node_modules", "host");
+      mkdirSync(host, { recursive: true });
+      writeFileSync(join(host, "package.json"), JSON.stringify({ name: "host", version: "1.0.0", type: "module", main: "index.js" }));
+      writeFileSync(join(host, "index.js"), code);
+      for (const [file, content] of Object.entries(files)) writeFileSync(join(host, file), content);
+      writeFileSync(join(app, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/host": { version: "1.0.0" } } }));
+      const lines = [];
+      const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
+      return { outcome, lines };
+    };
+    const external = /imports .* which is not a chunk of this build; an external module the browser would load/;
+    const cases = [
+      ["static", `import pm from ${JSON.stringify(cdn)};\nexport default pm;\n`, {}, null],
+      ["reexport", `export * from ${JSON.stringify(cdn)};\n`, {}, null],
+      ["dynamic", `export const load = () => import(${JSON.stringify(cdn)});\nload();\n`, {}, null],
+      ["worker", 'import W from "./w.js?worker&inline";\nnew W().postMessage(1);\nexport default W;\n', { "w.js": `import ${JSON.stringify(cdn)};\nself.onmessage = () => self.postMessage(2);\n` }, null],
+      ["configured", 'import * as m from "matcher";\nexport default m;\n', {}, 'export default { build: { rollupOptions: { external: ["matcher"] } } };\n'],
+    ];
+    for (const [name, code, files, config] of cases) {
+      const { outcome, lines } = await hostBuild(name, code, files, config);
+      assert.ok(outcome instanceof GateError && external.test(outcome.message), `${name}: ${outcome?.message ?? "the gate passed"}\n${lines.join("\n")}`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
