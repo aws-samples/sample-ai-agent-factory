@@ -67,7 +67,9 @@ const HTML_RE = /\.html?$/i;
 const XML_RE = /\.(?:svg|xml|xsl|xslt|rss|atom|xhtml|xht)$/i;
 // Inert data a browser does not run: textual kinds are tripwire-scanned, binary kinds are accepted as is.
 const INERT_TEXT_RE = /\.(?:css|json|webmanifest|txt|map|ts|md|vtt|csv)$/i;
-const INERT_BINARY_RE = /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|pdf|mp4|webm|mp3|ogg|wav)$/i;
+// Images, fonts and media carry no script. PDF is deliberately absent: a PDF can embed JavaScript that a
+// browser's viewer may run, so it is an opaque payload here until it has a validator of its own.
+const INERT_BINARY_RE = /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|mp4|webm|mp3|ogg|wav)$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const NODE_MODULES = "/node_modules/";
 export const WORKER_PREFIX = "worker";
@@ -112,12 +114,16 @@ export function readInstalledName(dir) {
 /**
  * Classify one Rollup module id: { kind: "package", name, dir } | { kind: "first-party" } | { kind: "virtual" }
  * | { kind: "unknown", why }. Query strings are stripped and the path normalised; a module under
- * node_modules belongs to the nearest ancestor directory with a named package.json (nested, vendored and
- * pnpm layouts; a NUL-prefixed commonjs proxy of a node_modules file counts for its package; dot
- * directories such as .vite are caches, not packages), so the package's canonical name comes from its
- * own package.json, not from the directory label. Virtual ids (NUL prefix,
- * `vite/...`, `__vite-...`, `virtual:...`) are trusted only when they are Vite's own helpers or listed in
- * `trustedVirtual`. Ids under the first-party root (compared as paths) are first-party. Else unknown.
+ * node_modules belongs to the package at npm's installation boundary: the directory right after the LAST
+ * "node_modules/" segment ("name" or "@scope/name"). Everything below that directory was installed as that
+ * package, so a nested package.json inside the package's own files cannot re-attribute it, while a library
+ * vendored under its own node_modules segment (…/dist/esm/node_modules/tslib/) is attributed by that
+ * segment. The canonical name is the boundary's package.json name when it has one (an npm alias such as
+ * node_modules/matcher holding picomatch), else the directory label; a NUL-prefixed commonjs proxy of a
+ * node_modules file counts for its package; dot directories such as .vite are caches, not packages.
+ * Virtual ids (NUL prefix, `vite/...`, `__vite-...`, `virtual:...`) are trusted only when they are Vite's
+ * own helpers or listed in `trustedVirtual`. Ids under the first-party root (compared as paths) are
+ * first-party. Else unknown.
  */
 export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readName = readInstalledName } = {}) {
   if (typeof id !== "string" || id.length === 0) return { kind: "unknown", why: "empty module id" };
@@ -125,21 +131,17 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
   if (path.includes(NODE_MODULES)) {
-    // Node's own rule: a file belongs to the nearest ancestor directory holding a named package.json, and
-    // the search never leaves node_modules. This attributes a package's vendored copy of another library
-    // (…/@aws-amplify/core/dist/esm/node_modules/tslib/, no package.json of its own) to the shipping
-    // package, and an npm alias (node_modules/matcher holding picomatch) to the package it really is.
-    // Dot directories (.vite, .pnpm, .cache) are never packages.
-    let dir = posix.dirname(path);
-    while (dir.includes(NODE_MODULES) || dir.endsWith("/node_modules")) {
-      const label = dir.slice(dir.lastIndexOf(NODE_MODULES) + NODE_MODULES.length);
-      if (label && !label.startsWith(".") && !label.includes("/.")) {
-        const name = readName(dir);
-        if (isNonEmptyString(name) && !name.startsWith(".")) return { kind: "package", name, dir: label };
-      }
-      dir = posix.dirname(dir);
+    const start = path.lastIndexOf(NODE_MODULES) + NODE_MODULES.length;
+    const segments = path.slice(start).split("/");
+    const scoped = segments[0]?.startsWith("@") ?? false;
+    const label = scoped ? segments.slice(0, 2).join("/") : segments[0] ?? "";
+    const labelSegments = scoped ? 2 : 1;
+    if (label === "" || label.startsWith(".") || label.includes("/.") || segments.length <= labelSegments || (scoped && !isNonEmptyString(segments[1]))) {
+      return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
     }
-    return { kind: "unknown", why: `no named package.json between ${path} and its node_modules root` };
+    const manifestName = readName(path.slice(0, start) + label);
+    const name = isNonEmptyString(manifestName) && !manifestName.startsWith(".") ? manifestName : label;
+    return { kind: "package", name, dir: label };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
     if (BUILTIN_VIRTUAL.has(path) || BROWSER_EXTERNAL_RE.test(path)) return { kind: "virtual" };
@@ -365,15 +367,31 @@ export function parseStartTag(rawAttrs, label) {
   return { attrs: parseAttributes(before, label), selfClosing: true };
 }
 
-const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", colon: ":", tab: "\t", newline: "\n", sol: "/", nbsp: " " };
-/** Decode numeric and the few named entities that matter for URL schemes. */
+// The named character references this gate models, case-sensitive as in the HTML Standard: the common
+// escapes plus every name that decodes to ASCII punctuation or whitespace, i.e. everything that can change
+// how a URL or a semantic attribute reads. (&nbsp; maps to a plain space on purpose: the stricter reading.)
+const ENTITIES = {
+  amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'", nbsp: " ", NonBreakingSpace: " ",
+  Tab: "\t", NewLine: "\n", excl: "!", num: "#", dollar: "$", percnt: "%", lpar: "(", rpar: ")", ast: "*", midast: "*", plus: "+",
+  comma: ",", period: ".", sol: "/", colon: ":", semi: ";", equals: "=", quest: "?", commat: "@", lsqb: "[", lbrack: "[", bsol: "\\",
+  rsqb: "]", rbrack: "]", Hat: "^", lowbar: "_", UnderBar: "_", grave: "`", DiacriticalGrave: "`", lcub: "{", lbrace: "{", verbar: "|",
+  vert: "|", VerticalLine: "|", rcub: "}", rbrace: "}",
+};
+/**
+ * Decode the character references in an attribute value. Numeric references and the modelled names decode;
+ * a terminated "&name;" this gate does not model is refused rather than left literal, because a browser
+ * knows more than two thousand names ("&bsol;" is a backslash) and would read something this scanner did
+ * not see. An unterminated unknown name ("&display=swap" in a query string) is literal to a browser too.
+ */
 export function decodeEntities(text) {
-  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);?/gi, (match, entity) => {
+  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*)(;?)/g, (match, entity, semicolon) => {
     if (entity[0] === "#") {
       const code = entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
       return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
     }
-    return ENTITIES[entity.toLowerCase()] ?? match;
+    if (Object.hasOwn(ENTITIES, entity)) return ENTITIES[entity];
+    if (semicolon) throw new GateError(`unsupported character reference ${match} in an attribute value; refused`);
+    return match;
   });
 }
 const normaliseUrl = (value) => decodeEntities(value).replace(/[\u0000- \u007f]+/g, "").toLowerCase();
