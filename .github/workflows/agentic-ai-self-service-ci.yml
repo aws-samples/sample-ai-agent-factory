@@ -367,7 +367,10 @@ jobs:
         working-directory: Agentic-ai-self-service/frontend
         run: npm ci
       # Full `npm audit --audit-level=high` (runtime AND build/dev dependencies), with a narrow expiring
-      # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json).
+      # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json). The
+      # gate's own self-test runs first so a regression in the gate can never pass as a clean audit.
+      - name: Audit gate self-test
+        run: node --test "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs"
       - name: Audit dependencies
         working-directory: Agentic-ai-self-service/frontend
         run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
