@@ -185,15 +185,21 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
     // innermost outward: a recorded boundary is an installed package whose identity is the lockfile's `name`
     // (an alias) or its directory, cross-checked against a readable package.json name (a lockfile conflict or a
     // contradicting manifest is no identity); an unrecorded boundary whose package.json has a name is a
-    // vendored copy declaring itself and is attributed by that name; an unrecorded boundary whose package.json
-    // exists but is unreadable or nameless fails closed, because npm never installs such a package and never
-    // leaves an installation unrecorded; an unrecorded boundary with no package.json at all is a vendored
-    // segment (…/dist/esm/node_modules/tslib/) and belongs to the package that ships it. No lockfile, or no
-    // identity at any boundary, fails closed; a directory label is never a name.
+    // vendored copy declaring itself: that name is carried as an additional identity the gate checks while the
+    // walk continues outward to the recorded installation that ships it, which owns the module (so neither a
+    // vendored copy nor a harmlessly named inner directory can displace the shipping package's identity); an
+    // unrecorded boundary whose package.json exists but is unreadable or nameless fails closed, because npm
+    // never installs such a package and never leaves an installation unrecorded; an unrecorded boundary with no
+    // package.json at all is a vendored segment (…/dist/esm/node_modules/tslib/) of the package that ships it.
+    // No lockfile, or no recorded installation at any boundary, fails closed; a directory label is never a name.
     const first = path.indexOf(NODE_MODULES);
     const installRoot = path.slice(0, first);
     const lock = readLock(installRoot);
     if (lock === null) return { kind: "unknown", why: `no valid lockfile (node_modules/.package-lock.json or package-lock.json, v2/v3) under ${installRoot} records the installation that ${path} belongs to` };
+    // Names declared by unrecorded (vendored) manifests on the way out: additional identities the gate
+    // checks, never the owner — the owner is the recorded installation that ships them, so a harmless inner
+    // name can no more hide an allowlisted installation than a vendored copy can hide behind its shipper.
+    const declared = [];
     let innermost = null;
     let searchEnd = path.length;
     for (;;) {
@@ -219,16 +225,17 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
           if (named !== null && named !== identity) {
             return { kind: "unknown", why: `${dir} is recorded in the lockfile as ${identity} but its package.json is named ${named}` };
           }
-          return { kind: "package", name: identity, dir: label };
+          return { kind: "package", name: identity, dir: label, ...(declared.length > 0 ? { declares: declared } : {}) };
         }
-        if (named !== null) return { kind: "package", name: named, dir: label };
-        if (manifest.present) {
+        if (named !== null) declared.push(named);
+        else if (manifest.present) {
           return { kind: "unknown", why: `${dir} is not recorded in a lockfile and its package.json has no readable name; npm records every package it installs, so this is no installation this gate can name (${path})` };
         }
       }
       searchEnd = at;
     }
     if (innermost === null) return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
+    if (declared.length > 0) return { kind: "unknown", why: `${innermost} declares itself ${declared.join(", ")} but no lockfile records an installation containing it (${path})` };
     return { kind: "unknown", why: `the directory ${innermost} is not recorded in a lockfile and has no package.json (${path})` };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
@@ -264,8 +271,14 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
       else if (owner.kind === "first-party") firstParty += 1;
       else {
         packages.add(owner.name);
+        const declares = owner.declares ?? [];
+        const installedAs = owner.dir !== owner.name ? `, installed as ${owner.dir}` : "";
         if (allowlisted.has(owner.name)) {
-          violations.push(`${owner.name} is bundled into ${fileName}: ${id}${owner.dir !== owner.name ? ` (installed as ${owner.dir})` : ""}`);
+          violations.push(`${owner.name} is bundled into ${fileName}: ${id}${owner.dir !== owner.name ? ` (installed as ${owner.dir})` : ""}${declares.length > 0 ? ` (declares itself ${declares.join(", ")})` : ""}`);
+        } else {
+          // A vendored copy that declares an allowlisted name is that package's code, whoever ships it.
+          const hit = declares.find((name) => allowlisted.has(name));
+          if (hit !== undefined) violations.push(`${hit} is bundled into ${fileName}: ${id} (a vendored copy declaring itself ${hit}, shipped inside ${owner.name}${installedAs})`);
         }
       }
     }
