@@ -8,25 +8,34 @@
  * transitive package is bundled all the same. So this check runs the project's own Vite build (same
  * config file, production mode, same environment as the deployment build) into a scratch directory with
  * one recording plugin, and judges what Rollup actually resolved and wrote:
- *   - every chunk's resolved module ids (`generateBundle`), main build and worker sub-builds alike
- *     (`worker.plugins`): a module under node_modules/<pkg>/ is attributed to <pkg> (paths normalised,
- *     query strings stripped, commonjs proxy ids included); an allowlisted package anywhere fails; a
- *     module that is neither a package, nor under the first-party root, nor one of Vite's own helper
- *     modules, nor a virtual module listed in the allowlist's bundle.trustedVirtualModules, fails closed;
- *   - every emitted asset: a script extension (a file worker or plugin-emitted code) or any type a browser
- *     could run as a program is refused; only inert types (styles, images, fonts, data, wasm, html) pass;
- *   - every chunk's final bytes (`writeBundle`): the file on disk must still hash the same;
- *   - every script written to the output: a chunk of this build, or a repository-authored file PINNED by
- *     sha256 in bundle.firstPartyScripts that is also a byte-identical, git-tracked copy from publicDir;
- *   - every HTML document: no <base> element; a <script src> must be a known chunk or pinned copy, never
+ *   - every chunk's resolved module ids (`generateBundle`), main build and every worker sub-build alike
+ *     (`worker.plugins`, one record per sub-build): a module under node_modules/<dir>/ is attributed to
+ *     the package NAMED in that directory's package.json (an npm alias installs one package under another
+ *     directory name); an allowlisted package anywhere fails; a module that is neither a package, nor
+ *     under the first-party root, nor one of Vite's own helper modules, nor a virtual module listed in the
+ *     allowlist's bundle.trustedVirtualModules, fails closed;
+ *   - every chunk's final bytes (`writeBundle`): the file on disk must still hash the same, whatever its
+ *     extension;
+ *   - every other file in the output, judged by what a browser would do with it: a script must be a
+ *     repository-authored file PINNED by sha256 in bundle.firstPartyScripts that is also a byte-identical,
+ *     git-tracked copy from publicDir; an HTML document is tokenised (below); an SVG document may carry
+ *     no script, handler or executable URL; text data (css, json, xml, txt, …) and binary media are inert
+ *     and tripwire-scanned where textual; anything else (wasm, unknown types) is refused as opaque;
+ *   - HTML documents are tokenised conservatively: comments may hold plain text only, declarations other
+ *     than <!doctype> and processing instructions are refused, every "<" must start a tag, start tags are
+ *     scanned quote-aware with exact attribute names, <iframe>/<frame>/<object>/<embed>/<applet>/<base>
+ *     are refused, as are srcdoc, inline event handlers, javascript:/vbscript: URLs and non-image data:
+ *     URLs anywhere; a <script src> must be a known chunk or pinned copy with an empty body, never
  *     external; every inline script body must match a pin (sha256 of its normalised text, or an anchored
- *     pattern for generated stubs); attributes are parsed quote-aware with exact names;
+ *     pattern for generated stubs); import maps are refused; modulepreload/preload-as-script links must
+ *     name known scripts; <meta http-equiv="refresh"> may only target a dot-free path under the base;
  *   - publicDir must lie inside the first-party root; symlinks in the output fail;
- *   - with --verify-dist, the real deployment build's output must consist of exactly those chunks
- *     (same bytes), pinned copies and pinned documents, so the judged graph is the shipped artifact.
+ *   - with --verify-dist, the real deployment build's output is judged the same way, so the judged graph
+ *     is the shipped artifact.
  * Trust boundary, stated plainly: code authored in this repository (modules under the first-party root,
  * pinned public copies and inline scripts, the Vite configuration and its plugins) is trusted as
- * reviewed; this gate establishes what the npm dependency graph of that build contains.
+ * reviewed; this gate establishes what the npm dependency graph of that build contains. Data blocks and
+ * text files are inert unless repository code chooses to execute them, which is that code's review.
  *
  * Usage: node npm-audit-allowlist-bundle-check.mjs --out <scratch dir OUTSIDE the project>
  *          [--project <dir, default cwd>] [--first-party-root <dir, default project>]
@@ -46,13 +55,16 @@ import { GateError, parseAllowlist } from "./npm-audit-allowlist.mjs";
 
 export const SCRIPT_RE = /\.(?:m?js|cjs)$/i;
 const HTML_RE = /\.html?$/i;
-// Emitted (non-chunk) assets a browser does not run as a program. Anything else is refused.
-const INERT_ASSET_RE = /\.(?:css|svg|png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|json|webmanifest|xml|pdf|mp4|webm|mp3|wasm|html?)$/i;
+const SVG_RE = /\.svg$/i;
+// Inert data a browser does not run: textual kinds are tripwire-scanned, binary kinds are accepted as is.
+const INERT_TEXT_RE = /\.(?:css|json|xml|webmanifest|txt|map|ts|md|vtt|csv)$/i;
+const INERT_BINARY_RE = /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|pdf|mp4|webm|mp3|ogg|wav)$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const NODE_MODULES = "/node_modules/";
-export const WORKER_PREFIX = "worker:";
-/** Virtual modules Vite itself injects into every browser build; nothing else is trusted implicitly. */
+export const WORKER_PREFIX = "worker";
+/** Virtual modules Vite itself injects into browser builds; nothing else is trusted implicitly. */
 export const BUILTIN_VIRTUAL = new Set(["commonjsHelpers.js", "vite/preload-helper.js", "vite/modulepreload-polyfill.js"]);
+const BROWSER_EXTERNAL_RE = /^__vite-browser-external(?::[^\s/]+)?$/;
 
 const toPosix = (path) => path.replace(/\\/g, "/");
 export const sha256 = (data) => createHash("sha256").update(data).digest("hex");
@@ -64,31 +76,64 @@ const under = (path, root) => {
   return normalisedPath === normalisedRoot || normalisedPath.startsWith(`${normalisedRoot}/`);
 };
 
+/** What a browser does with an output file that is not a chunk: "html" | "svg" | "text" | "binary" | null (opaque). */
+export function inertKind(fileName) {
+  if (HTML_RE.test(fileName)) return "html";
+  if (SVG_RE.test(fileName)) return "svg";
+  if (INERT_TEXT_RE.test(fileName)) return "text";
+  if (INERT_BINARY_RE.test(fileName)) return "binary";
+  return null;
+}
+
+const installedNames = new Map();
+/** The `name` in an installed package directory's package.json, or null; cached. */
+export function readInstalledName(dir) {
+  if (installedNames.has(dir)) return installedNames.get(dir);
+  let name = null;
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    if (isNonEmptyString(pkg.name)) name = pkg.name;
+  } catch {
+    name = null;
+  }
+  installedNames.set(dir, name);
+  return name;
+}
+
 /**
- * Classify one Rollup module id: { kind: "package", name } | { kind: "first-party" } | { kind: "virtual" } |
- * { kind: "unknown", why }. Query strings are stripped and the path normalised before the LAST
- * node_modules/ segment names the package (nested and pnpm layouts; a NUL-prefixed commonjs proxy of a
- * node_modules file counts for its package; a dot-prefixed entry such as .vite is a cache, not a package).
- * Virtual ids (NUL prefix, `vite/...`, `__vite-...`, `virtual:...`) are trusted only when they are Vite's
- * own helpers or listed in `trustedVirtual`. Ids under the first-party root (compared as paths) are
- * first-party. Everything else is unknown.
+ * Classify one Rollup module id: { kind: "package", name, dir } | { kind: "first-party" } | { kind: "virtual" }
+ * | { kind: "unknown", why }. Query strings are stripped and the path normalised; a module under
+ * node_modules belongs to the nearest ancestor directory with a named package.json (nested, vendored and
+ * pnpm layouts; a NUL-prefixed commonjs proxy of a node_modules file counts for its package; dot
+ * directories such as .vite are caches, not packages), so the package's canonical name comes from its
+ * own package.json, not from the directory label. Virtual ids (NUL prefix,
+ * `vite/...`, `__vite-...`, `virtual:...`) are trusted only when they are Vite's own helpers or listed in
+ * `trustedVirtual`. Ids under the first-party root (compared as paths) are first-party. Else unknown.
  */
-export function classifyModule(id, firstPartyRoot, trustedVirtual = new Set()) {
+export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readName = readInstalledName } = {}) {
   if (typeof id !== "string" || id.length === 0) return { kind: "unknown", why: "empty module id" };
   const nul = id.startsWith("\u0000");
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
-  const index = path.lastIndexOf(NODE_MODULES);
-  if (index !== -1) {
-    const [first, second] = path.slice(index + NODE_MODULES.length).split("/");
-    if (!first || first.startsWith(".")) return { kind: "unknown", why: `node_modules entry ${JSON.stringify(first ?? "")} is not a package name` };
-    if (first.startsWith("@")) {
-      return second && !second.startsWith(".") ? { kind: "package", name: `${first}/${second}` } : { kind: "unknown", why: "incomplete scoped package name" };
+  if (path.includes(NODE_MODULES)) {
+    // Node's own rule: a file belongs to the nearest ancestor directory holding a named package.json, and
+    // the search never leaves node_modules. This attributes a package's vendored copy of another library
+    // (…/@aws-amplify/core/dist/esm/node_modules/tslib/, no package.json of its own) to the shipping
+    // package, and an npm alias (node_modules/matcher holding picomatch) to the package it really is.
+    // Dot directories (.vite, .pnpm, .cache) are never packages.
+    let dir = posix.dirname(path);
+    while (dir.includes(NODE_MODULES) || dir.endsWith("/node_modules")) {
+      const label = dir.slice(dir.lastIndexOf(NODE_MODULES) + NODE_MODULES.length);
+      if (label && !label.startsWith(".") && !label.includes("/.")) {
+        const name = readName(dir);
+        if (isNonEmptyString(name) && !name.startsWith(".")) return { kind: "package", name, dir: label };
+      }
+      dir = posix.dirname(dir);
     }
-    return { kind: "package", name: first };
+    return { kind: "unknown", why: `no named package.json between ${path} and its node_modules root` };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
-    if (BUILTIN_VIRTUAL.has(path) || path.startsWith("__vite-browser-external")) return { kind: "virtual" };
+    if (BUILTIN_VIRTUAL.has(path) || BROWSER_EXTERNAL_RE.test(path)) return { kind: "virtual" };
     if (trustedVirtual.has(id) || trustedVirtual.has(path) || trustedVirtual.has(`\u0000${path}`)) return { kind: "virtual" };
     return { kind: "unknown", why: "a virtual module that is not one of Vite's helpers and not listed in bundle.trustedVirtualModules" };
   }
@@ -97,10 +142,10 @@ export function classifyModule(id, firstPartyRoot, trustedVirtual = new Set()) {
 }
 
 /**
- * Judge the resolved graph. `chunks` is Map<key, moduleIds[]> (worker sub-build chunks keyed "worker:…"),
+ * Judge the resolved graph. `chunks` is Map<key, moduleIds[]> (worker sub-build chunks keyed "workerN:…"),
  * `assets` Map<fileName, type>. Returns { violations, modules, firstParty, virtual, packages: Set }.
  */
-export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set() }) {
+export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set(), readName = readInstalledName }) {
   const allowlisted = new Set([...allow.values()].map((entry) => entry.package));
   if (chunks.size === 0) throw new GateError("the build emitted no JavaScript chunk; this is not a browser build");
   const violations = [];
@@ -112,7 +157,7 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
     if (!Array.isArray(ids) || ids.length === 0) throw new GateError(`chunk ${fileName} lists no modules; the module graph is incomplete`);
     for (const id of ids) {
       modules += 1;
-      const owner = classifyModule(id, firstPartyRoot, trustedVirtual);
+      const owner = classifyModule(id, firstPartyRoot, { trustedVirtual, readName });
       if (owner.kind === "unknown") {
         throw new GateError(`chunk ${fileName} contains module ${JSON.stringify(id)} whose ownership cannot be established: ${owner.why}`);
       }
@@ -120,7 +165,9 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
       else if (owner.kind === "first-party") firstParty += 1;
       else {
         packages.add(owner.name);
-        if (allowlisted.has(owner.name)) violations.push(`${owner.name} is bundled into ${fileName}: ${id}`);
+        if (allowlisted.has(owner.name)) {
+          violations.push(`${owner.name} is bundled into ${fileName}: ${id}${owner.dir !== owner.name ? ` (installed as ${owner.dir})` : ""}`);
+        }
       }
     }
   }
@@ -131,7 +178,7 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
           "workers are judged); refusing an opaque executable",
       );
     }
-    if (!INERT_ASSET_RE.test(fileName)) throw new GateError(`emitted asset ${fileName} has no recognised inert type; refusing an opaque payload`);
+    if (inertKind(fileName) === null) throw new GateError(`emitted asset ${fileName} has no recognised inert type; refusing an opaque payload`);
   }
   if (firstParty === 0) throw new GateError("no first-party module in any chunk; this is not a build of this project");
   if (packages.size === 0) throw new GateError("no npm package in any chunk; module ids look rewritten, so packages cannot be identified");
@@ -287,115 +334,239 @@ export function parseAttributes(text, label) {
   return attrs;
 }
 
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", colon: ":", tab: "\t", newline: "\n", sol: "/", nbsp: " " };
+/** Decode numeric and the few named entities that matter for URL schemes. */
+export function decodeEntities(text) {
+  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);?/gi, (match, entity) => {
+    if (entity[0] === "#") {
+      const code = entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
+      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+    }
+    return ENTITIES[entity.toLowerCase()] ?? match;
+  });
+}
+const normaliseUrl = (value) => decodeEntities(value).replace(/[\u0000- \u007f]+/g, "").toLowerCase();
+const EXTERNAL_RE = /^(?:[a-z][a-z0-9+.-]*:)?\/\//i;
+const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp"]);
+const REFUSED_TAGS = new Set(["iframe", "frame", "frameset", "object", "embed", "applet", "base", "portal", "fencedframe"]);
+const JS_TYPES = new Set(["", "module", "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript", "text/jscript", "text/livescript"]);
+
+/** Refuse attributes a browser could execute: handlers, srcdoc, executable or non-image data URL schemes. */
+export function refuseAttributes(name, attrs, label) {
+  for (const [attr, raw] of attrs) {
+    if (attr.startsWith("on")) throw new GateError(`${label}: <${name} ${attr}> is an inline event handler; refused`);
+    if (attr === "srcdoc") throw new GateError(`${label}: <${name} srcdoc> embeds a document; refused`);
+    if (raw === null) continue;
+    const value = normaliseUrl(raw);
+    if (/^(?:javascript|vbscript|livescript|mocha):/.test(value)) throw new GateError(`${label}: <${name} ${attr}> uses an executable URL scheme; refused`);
+    if (value.startsWith("data:") && !value.startsWith("data:image/")) throw new GateError(`${label}: <${name} ${attr}> is a data: URL that is not an image; refused`);
+  }
+}
+
 /**
- * Every <script> element of an HTML document in order: { attrs: Map, body }. The start tag is scanned
- * quote-aware (a ">" inside a quoted value does not end it) and the body runs to the matching </script>,
- * so a "<script" inside a script body is not a tag. Unterminated markup fails closed.
+ * Tokenise an HTML (or, with svg: true, an SVG) document conservatively. Returns { scripts: [{ attrs, body }],
+ * preloads: string[], refreshes: string[] }. Refuses: comments holding markup, declarations other than
+ * <!doctype> (the XML prolog is allowed in svg mode), processing instructions, CDATA, a "<" that does not
+ * start a tag, unterminated tags, self-closing raw-text elements, refused tags, <link rel="import">,
+ * <meta http-equiv="refresh"> without a url, and every attribute refuseAttributes() rejects.
  */
-export function scanScripts(html, label) {
-  const scripts = [];
-  const lower = html.toLowerCase();
-  let from = 0;
-  for (;;) {
-    const at = lower.indexOf("<script", from);
-    if (at === -1) break;
-    const after = lower[at + 7];
-    if (after !== undefined && !/[\s/>]/.test(after)) {
-      from = at + 7;
+export function scanDocument(text, label, { svg = false } = {}) {
+  const out = { scripts: [], preloads: [], refreshes: [] };
+  const lower = text.toLowerCase();
+  let i = 0;
+  while (i < text.length) {
+    const lt = text.indexOf("<", i);
+    if (lt === -1) break;
+    if (lower.startsWith("<!--", lt)) {
+      const end = text.indexOf("-->", lt + 4);
+      if (end === -1) throw new GateError(`${label}: unterminated comment`);
+      if (/[<>]/.test(text.slice(lt + 4, end))) throw new GateError(`${label}: a comment contains markup; comments may hold plain text only`);
+      i = end + 3;
       continue;
     }
-    let i = at + 7;
+    if (lower.startsWith("<![cdata[", lt)) throw new GateError(`${label}: CDATA sections are refused`);
+    if (text[lt + 1] === "!") {
+      if (!/^<!doctype\s/i.test(text.slice(lt, lt + 10))) throw new GateError(`${label}: unsupported declaration at offset ${lt}`);
+      const end = text.indexOf(">", lt);
+      if (end === -1) throw new GateError(`${label}: unterminated doctype`);
+      i = end + 1;
+      continue;
+    }
+    if (text[lt + 1] === "?") {
+      if (!svg || !lower.startsWith("<?xml", lt)) throw new GateError(`${label}: processing instructions are refused`);
+      const end = text.indexOf("?>", lt);
+      if (end === -1) throw new GateError(`${label}: unterminated XML prolog`);
+      i = end + 2;
+      continue;
+    }
+    if (text[lt + 1] === "/") {
+      const end = text.indexOf(">", lt);
+      if (end === -1) throw new GateError(`${label}: unterminated end tag`);
+      i = end + 1;
+      continue;
+    }
+    const nameMatch = /^<([a-zA-Z][a-zA-Z0-9:_-]*)/.exec(text.slice(lt, lt + 80));
+    if (!nameMatch) throw new GateError(`${label}: "<" at offset ${lt} does not start a tag; text must be escaped as &lt;`);
+    const name = nameMatch[1].toLowerCase();
+    let j = lt + 1 + nameMatch[1].length;
     let quote = null;
-    while (i < html.length) {
-      const ch = html[i];
+    while (j < text.length) {
+      const ch = text[j];
       if (quote) {
         if (ch === quote) quote = null;
       } else if (ch === '"' || ch === "'") quote = ch;
       else if (ch === ">") break;
-      i += 1;
+      j += 1;
     }
-    if (i >= html.length) throw new GateError(`${label}: unterminated <script> start tag`);
-    const attrs = parseAttributes(html.slice(at + 7, i).replace(/\/\s*$/, ""), `${label}: <script>`);
-    const close = lower.indexOf("</script", i + 1);
-    if (close === -1) throw new GateError(`${label}: <script> without </script>`);
-    scripts.push({ attrs, body: html.slice(i + 1, close) });
-    from = close + 8;
+    if (j >= text.length) throw new GateError(`${label}: unterminated <${name}> tag`);
+    const rawAttrs = text.slice(lt + 1 + nameMatch[1].length, j);
+    const selfClosing = /\/\s*$/.test(rawAttrs);
+    const attrs = parseAttributes(rawAttrs.replace(/\/\s*$/, ""), `${label}: <${name}>`);
+    refuseAttributes(name, attrs, label);
+    if (REFUSED_TAGS.has(name)) throw new GateError(`${label}: <${name}> is refused (an embedded or external executable context)`);
+    if (svg && name === "foreignobject") throw new GateError(`${label}: <foreignObject> embeds HTML inside SVG; refused`);
+    if (name === "link") {
+      const rel = (attrs.get("rel") ?? "").toLowerCase().split(/\s+/);
+      if (rel.includes("import")) throw new GateError(`${label}: <link rel="import"> is refused`);
+      if (rel.includes("modulepreload") || (rel.includes("preload") && (attrs.get("as") ?? "").toLowerCase() === "script")) {
+        const href = attrs.get("href");
+        if (!isNonEmptyString(href)) throw new GateError(`${label}: a script preload without href`);
+        out.preloads.push(href);
+      }
+    }
+    if (name === "meta" && (attrs.get("http-equiv") ?? "").toLowerCase() === "refresh") {
+      const match = /^\s*\d+\s*;\s*url\s*=\s*(.+?)\s*$/i.exec(attrs.get("content") ?? "");
+      if (!match) throw new GateError(`${label}: <meta http-equiv="refresh"> without a url`);
+      out.refreshes.push(match[1].replace(/^['"]|['"]$/g, ""));
+    }
+    i = j + 1;
+    if (RAW_TEXT.has(name)) {
+      if (selfClosing) throw new GateError(`${label}: a self-closing <${name}/> is not how browsers read it; refused`);
+      const close = lower.indexOf(`</${name}`, i);
+      if (close === -1) throw new GateError(`${label}: <${name}> without </${name}>`);
+      if (name === "script") out.scripts.push({ attrs, body: text.slice(i, close) });
+      i = close; // the end tag is consumed on the next iteration
+    }
   }
-  return scripts;
+  return out;
 }
 
-const EXTERNAL_RE = /^(?:[a-z][a-z0-9+.-]*:)?\/\//i;
+/** Resolve a local URL in a document to an output-relative path (base prefix stripped, else root-relative, else document-relative). */
+function resolveLocal(url, rel, prefix) {
+  const path = url.split(/[?#]/)[0];
+  return posix.normalize(path.startsWith(prefix) ? path.slice(prefix.length) : path.startsWith("/") ? path.slice(1) : posix.join(posix.dirname(rel), path));
+}
 
 /**
- * Judge the HTML documents among `files`: no <base>; external or unknown script sources fail; inline
- * bodies must match a pin. Returns { documents, inline, pinnedBySha256, pinnedByPattern }.
+ * Judge the HTML documents among `files`: tokenised by scanDocument(), external or unknown script sources
+ * fail, inline bodies must match a pin, data blocks are inert, refresh targets stay under the base.
+ * Returns { documents, inline, data, pinnedBySha256, pinnedByPattern }.
  */
 export function checkDocuments({ dir, files, known, base, trust, packages = [], label = "" }) {
   const prefix = base.endsWith("/") ? base : `${base}/`;
   const tag = (rel) => `${label}${rel}`;
-  let documents = 0;
-  let inline = 0;
-  let pinnedBySha256 = 0;
-  let pinnedByPattern = 0;
+  const result = { documents: 0, inline: 0, data: 0, pinnedBySha256: 0, pinnedByPattern: 0 };
   for (const rel of files) {
     if (!HTML_RE.test(rel)) continue;
-    documents += 1;
-    const html = readFileSync(join(dir, rel), "utf8");
-    if (/<base[\s/>]/i.test(html)) throw new GateError(`${tag(rel)} declares a <base> element; document-relative resolution is refused`);
-    for (const { attrs, body } of scanScripts(html, tag(rel))) {
-      if (!attrs.has("src")) {
-        const normalised = normalizeInline(body);
-        if (normalised.length === 0) continue;
-        inline += 1;
-        tripwire(`inline script ${inline} of ${tag(rel)}`, normalised, packages);
-        const digest = sha256(normalised);
-        if (trust.inline.some((pin) => pin.sha256 === digest)) pinnedBySha256 += 1;
-        else if (trust.inline.some((pin) => pin.pattern instanceof RegExp && pin.pattern.test(normalised))) pinnedByPattern += 1;
-        else throw new GateError(`${tag(rel)}: inline script ${inline} is not pinned in bundle.firstPartyScripts (sha256 of its normalised body: ${digest})`);
+    result.documents += 1;
+    const doc = scanDocument(readFileSync(join(dir, rel), "utf8"), tag(rel));
+    for (const { attrs, body } of doc.scripts) {
+      const type = (attrs.get("type") ?? "").trim().toLowerCase();
+      if (type === "importmap") throw new GateError(`${tag(rel)}: import maps are refused`);
+      const isData = !JS_TYPES.has(type);
+      if (attrs.has("src")) {
+        if (isData) throw new GateError(`${tag(rel)}: a <script src> with a non-script type is refused`);
+        if (body.trim() !== "") throw new GateError(`${tag(rel)}: a <script src> must have an empty body`);
+        const url = attrs.get("src");
+        if (!isNonEmptyString(url)) throw new GateError(`${tag(rel)}: <script> with an empty src`);
+        if (EXTERNAL_RE.test(url)) throw new GateError(`${tag(rel)} loads an external script ${url}; it is outside the module graph`);
+        const target = resolveLocal(url, rel, prefix);
+        if (!known.has(target)) throw new GateError(`${tag(rel)} loads ${url}, which is not a chunk of this build nor a pinned public copy`);
         continue;
       }
-      const url = attrs.get("src");
-      if (!isNonEmptyString(url)) throw new GateError(`${tag(rel)}: <script> with an empty src`);
-      if (EXTERNAL_RE.test(url)) throw new GateError(`${tag(rel)} loads an external script ${url}; it is outside the module graph`);
-      const path = url.split(/[?#]/)[0];
-      const target = posix.normalize(path.startsWith(prefix) ? path.slice(prefix.length) : path.startsWith("/") ? path.slice(1) : posix.join(posix.dirname(rel), path));
-      if (!known.has(target)) throw new GateError(`${tag(rel)} loads ${url}, which is not a chunk of this build nor a pinned public copy`);
+      const normalised = normalizeInline(body);
+      if (normalised.length === 0) continue;
+      if (isData) {
+        result.data += 1;
+        tripwire(`data block ${result.data} of ${tag(rel)}`, normalised, packages);
+        continue;
+      }
+      result.inline += 1;
+      tripwire(`inline script ${result.inline} of ${tag(rel)}`, normalised, packages);
+      const digest = sha256(normalised);
+      if (trust.inline.some((pin) => pin.sha256 === digest)) result.pinnedBySha256 += 1;
+      else if (trust.inline.some((pin) => pin.pattern instanceof RegExp && pin.pattern.test(normalised))) result.pinnedByPattern += 1;
+      else throw new GateError(`${tag(rel)}: inline script ${result.inline} is not pinned in bundle.firstPartyScripts (sha256 of its normalised body: ${digest})`);
+    }
+    for (const href of doc.preloads) {
+      if (EXTERNAL_RE.test(href)) throw new GateError(`${tag(rel)} preloads an external script ${href}; refused`);
+      if (!known.has(resolveLocal(href, rel, prefix))) throw new GateError(`${tag(rel)} preloads ${href}, which is not a chunk of this build nor a pinned public copy`);
+    }
+    for (const url of doc.refreshes) {
+      const value = decodeEntities(url).trim();
+      if (EXTERNAL_RE.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(value)) throw new GateError(`${tag(rel)} refreshes to ${url}, outside this site; refused`);
+      const path = value.split(/[?#]/)[0];
+      if (!path.startsWith(prefix) || path.split("/").some((segment) => segment === "." || segment === "..")) {
+        throw new GateError(`${tag(rel)} refreshes to ${url}, which is not a dot-free path under ${prefix}; refused`);
+      }
     }
   }
-  return { documents, inline, pinnedBySha256, pinnedByPattern };
+  return result;
 }
 
 /**
- * Judge the scripts among `files` in `dir`: a chunk of this build (same bytes as Rollup wrote), or a pinned,
- * git-tracked, byte-identical copy from publicDir. Returns { known: Set<rel>, publicCopies: string[] }.
+ * Judge every file written to `dir`: a chunk of this build (same bytes, any extension), a pinned and
+ * git-tracked public script copy, an HTML document (judged by checkDocuments), an SVG document without
+ * script, inert text (tripwire-scanned) or inert binary data. Anything else is an opaque payload.
+ * Returns { files, scripts, publicCopies, documents, inline, data, pinnedBySha256, pinnedByPattern }.
  */
-export function checkScripts({ dir, files, chunkHashes, trust, publicDir, packages = [], isTracked = gitTracked, label = "" }) {
+export function judgeOutput({ dir, chunkHashes, trust, publicDir, base, packages = [], isTracked = gitTracked, label = "" }) {
+  const files = walkOutput(dir);
   const known = new Set();
   const publicCopies = [];
   for (const rel of files) {
-    if (!SCRIPT_RE.test(rel)) continue;
-    const written = readFileSync(join(dir, rel));
-    const digest = sha256(written);
+    const written = () => readFileSync(join(dir, rel));
     if (chunkHashes.has(rel)) {
-      if (chunkHashes.get(rel) !== digest) throw new GateError(`${label}${rel} differs from the chunk Rollup wrote; it was rewritten after the build`);
+      if (chunkHashes.get(rel) !== sha256(written())) throw new GateError(`${label}${rel} differs from the chunk Rollup wrote; it was rewritten after the build`);
       known.add(rel);
       continue;
     }
-    const pin = trust.publicScripts.get(rel);
-    if (pin === undefined) {
-      throw new GateError(`${label}${rel} is a script that is not a chunk of this build and not pinned in bundle.firstPartyScripts (sha256 ${digest})`);
+    if (SCRIPT_RE.test(rel)) {
+      const bytes = written();
+      const digest = sha256(bytes);
+      const pin = trust.publicScripts.get(rel);
+      if (pin === undefined) {
+        throw new GateError(`${label}${rel} is a script that is not a chunk of this build and not pinned in bundle.firstPartyScripts (sha256 ${digest})`);
+      }
+      if (pin !== digest) throw new GateError(`${label}${rel} does not match its pin (sha256 ${digest}); review the change and re-pin it`);
+      const copy = publicDir ? join(publicDir, rel) : null;
+      if (copy === null || !existsSync(copy) || !lstatSync(copy).isFile() || !readFileSync(copy).equals(bytes)) {
+        throw new GateError(`${label}${rel} is pinned but is not a byte-identical copy of ${copy ?? "(no publicDir)"}`);
+      }
+      if (!isTracked(copy)) throw new GateError(`${label}${rel} comes from ${copy}, which git does not track; a repository-authored static asset must be version-controlled`);
+      tripwire(`public copy ${label}${rel}`, bytes.toString("utf8"), packages);
+      publicCopies.push(rel);
+      known.add(rel);
+      continue;
     }
-    if (pin !== digest) throw new GateError(`${label}${rel} does not match its pin (sha256 ${digest}); review the change and re-pin it`);
-    const copy = publicDir ? join(publicDir, rel) : null;
-    if (copy === null || !existsSync(copy) || !lstatSync(copy).isFile() || !readFileSync(copy).equals(written)) {
-      throw new GateError(`${label}${rel} is pinned but is not a byte-identical copy of ${copy ?? "(no publicDir)"}`);
+    const kind = inertKind(rel);
+    if (kind === "html") continue; // judged below, once every script is known
+    if (kind === "svg") {
+      const text = written().toString("utf8");
+      const doc = scanDocument(text, `${label}${rel}`, { svg: true });
+      if (doc.scripts.length > 0) throw new GateError(`${label}${rel} is an SVG document carrying a <script>; refused`);
+      tripwire(`${label}${rel}`, text, packages);
+      continue;
     }
-    if (!isTracked(copy)) throw new GateError(`${label}${rel} comes from ${copy}, which git does not track; a repository-authored static asset must be version-controlled`);
-    tripwire(`public copy ${label}${rel}`, written.toString("utf8"), packages);
-    publicCopies.push(rel);
-    known.add(rel);
+    if (kind === "text") {
+      tripwire(`${label}${rel}`, written().toString("utf8"), packages);
+      continue;
+    }
+    if (kind === "binary") continue;
+    throw new GateError(`${label}${rel} is neither a chunk of this build nor of a recognised inert type; refusing an opaque payload`);
   }
-  return { known, publicCopies };
+  const documents = checkDocuments({ dir, files, known, base, trust, packages, label });
+  return { files: files.length, scripts: known.size, publicCopies, ...documents };
 }
 
 /** Locate the project's own Vite (its ESM entry and version) through the project's resolution. */
@@ -415,22 +586,26 @@ export function resolveVite(projectDir) {
 }
 
 /**
- * Run the project's Vite build into `outDir` with the recording plugin (also installed into worker
- * sub-builds). Returns { chunks: Map<key, moduleIds[]>, assets: Map<fileName, type>, hashes:
- * Map<fileName, sha256 of the final chunk code>, config: { root, base, publicDir } }.
+ * Run the project's Vite build into `outDir` with the recording plugin, one fresh recorder per worker
+ * sub-build. Returns { chunks: Map<key, moduleIds[]>, assets: Map<fileName, type>, hashes: Map<fileName,
+ * sha256 of the final chunk code>, workers: number, config: { root, base, publicDir } }; worker chunks are
+ * keyed "worker<N>:<fileName>" so same-named outputs of different sub-builds never collide.
  */
 export async function buildGraph({ projectDir, outDir, vite }) {
-  const record = { chunks: new Map(), assets: new Map(), hashes: new Map(), config: null };
+  const record = { chunks: new Map(), assets: new Map(), hashes: new Map(), workers: 0, config: null };
   const recorder = (prefix) => ({
-    name: `npm-audit-allowlist:module-graph${prefix ? ":worker" : ""}`,
+    name: `npm-audit-allowlist:module-graph${prefix ? `:${prefix}` : ""}`,
     enforce: "post",
     configResolved(config) {
       if (!prefix) record.config = { root: config.root, base: config.base, publicDir: config.publicDir || null };
     },
     generateBundle(_options, bundle) {
       for (const [fileName, output] of Object.entries(bundle)) {
-        if (output.type === "chunk") record.chunks.set(`${prefix}${fileName}`, output.moduleIds ?? Object.keys(output.modules ?? {}));
-        else if (!prefix) record.assets.set(fileName, output.type);
+        const key = prefix ? `${prefix}:${fileName}` : fileName;
+        if (output.type === "chunk") {
+          if (record.chunks.has(key)) throw new GateError(`chunk ${key} was recorded twice; cannot judge an ambiguous graph`);
+          record.chunks.set(key, output.moduleIds ?? Object.keys(output.modules ?? {}));
+        } else if (!prefix) record.assets.set(fileName, output.type);
       }
     },
     writeBundle(_options, bundle) {
@@ -450,7 +625,12 @@ export async function buildGraph({ projectDir, outDir, vite }) {
       logLevel: "warn",
       build: { outDir, emptyOutDir: true, write: true, sourcemap: false, reportCompressedSize: false },
       plugins: [recorder("")],
-      worker: { plugins: () => [recorder(WORKER_PREFIX)] },
+      worker: {
+        plugins: () => {
+          record.workers += 1;
+          return [recorder(`${WORKER_PREFIX}${record.workers}`)];
+        },
+      },
     });
   } finally {
     process.chdir(previousCwd);
@@ -515,13 +695,8 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
     throw new GateError(`publicDir ${record.config.publicDir} lies outside the first-party root ${firstPartyRoot}; its files cannot be called repository-authored`);
   }
   const graph = evaluateGraph({ chunks: record.chunks, assets: record.assets, allow, firstPartyRoot, trustedVirtual: trust.virtual });
-
-  const judge = (dir, label) => {
-    const files = walkOutput(dir);
-    const { known, publicCopies } = checkScripts({ dir, files, chunkHashes: record.hashes, trust, publicDir: record.config.publicDir, packages: names, label });
-    const documents = checkDocuments({ dir, files, known, base: record.config.base, trust, packages: names, label });
-    return { files: files.length, scripts: known.size, publicCopies, ...documents };
-  };
+  const judge = (dir, label) =>
+    judgeOutput({ dir, chunkHashes: record.hashes, trust, publicDir: record.config.publicDir, base: record.config.base, packages: names, label });
   const built = judge(outDir, "");
   let shipped = null;
   if (args["verify-dist"]) {
@@ -531,15 +706,14 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
     if (shipped.scripts === 0) throw new GateError(`--verify-dist ${dist} contains no script; this is not the deployment build's output`);
   }
 
-  const mainChunks = record.hashes.size;
   const describe = (result) =>
-    `${result.scripts} script(s) (${result.publicCopies.length} pinned public cop${result.publicCopies.length === 1 ? "y" : "ies"}` +
+    `${result.files} file(s): ${result.scripts} script(s) (${result.publicCopies.length} pinned public cop${result.publicCopies.length === 1 ? "y" : "ies"}` +
     `${result.publicCopies.length ? `: ${result.publicCopies.join(", ")}` : ""}), ${result.documents} document(s) with ${result.inline} inline ` +
-    `script(s) (${result.pinnedBySha256} pinned by sha256, ${result.pinnedByPattern} by pattern)`;
+    `script(s) (${result.pinnedBySha256} pinned by sha256, ${result.pinnedByPattern} by pattern) and ${result.data} data block(s)`;
   log(
-    `npm-audit-allowlist-bundle-check: vite ${version} built project ${key} (${projectDir}) into ${outDir}: ${mainChunks} chunk(s) + ` +
-      `${record.chunks.size - mainChunks} inline worker chunk(s), ${graph.modules} resolved module(s) (${graph.firstParty} first-party under ` +
-      `${firstPartyRoot}, ${graph.virtual} virtual, ${graph.packages.size} npm package(s)); output: ${describe(built)}` +
+    `npm-audit-allowlist-bundle-check: vite ${version} built project ${key} (${projectDir}) into ${outDir}: ${record.hashes.size} chunk(s) + ` +
+      `${record.chunks.size - record.hashes.size} inline worker chunk(s) from ${record.workers} worker build(s), ${graph.modules} resolved module(s) ` +
+      `(${graph.firstParty} first-party under ${firstPartyRoot}, ${graph.virtual} virtual, ${graph.packages.size} npm package(s)); output: ${describe(built)}` +
       (shipped ? `; deployment build ${args["verify-dist"]}: ${describe(shipped)}, every script byte-identical to this build's chunks or pinned` : ""),
   );
   if (graph.violations.length > 0) {

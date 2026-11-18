@@ -354,7 +354,8 @@ test("the CLI runs end to end on report files, and fails on an expired entry or 
 test("real npm reports from each captured npm version parse, reconcile with their exit status, and resolve as expected", () => {
   const root = resolve(here, "fixtures", "npm-audit");
   const versions = readdirSync(root).sort();
-  assert.ok(versions.length >= 1, "no captured npm versions");
+  // The npm versions CI actually runs: Node 20 (frontend job) ships npm 10, Node 24 (docs job) ships npm 11.
+  for (const major of ["npm-10.", "npm-11."]) assert.ok(versions.some((version) => version.startsWith(major)), `no captured ${major}x reports`);
   for (const version of versions) {
     for (const project of ["frontend", "docs-site"]) {
       const where = `${version}/${project}`;

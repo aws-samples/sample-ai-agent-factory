@@ -4,7 +4,7 @@
 // test FAILURE, not a skip: the real-build cases are the point.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,10 +16,12 @@ import {
   WORKER_PREFIX,
   buildGraph,
   checkDocuments,
-  checkScripts,
   classifyModule,
+  decodeEntities,
   evaluateGraph,
   gitTracked,
+  inertKind,
+  judgeOutput,
   main,
   normalizeInline,
   parseArgs,
@@ -27,7 +29,7 @@ import {
   parseBundleTrust,
   projectKey,
   resolveVite,
-  scanScripts,
+  scanDocument,
   sha256,
   tripwire,
   walkOutput,
@@ -38,6 +40,7 @@ const REASON = "a".repeat(40);
 const ALLOW_ENTRY = { id: "GHSA-fc5q-39xc-vjpf", package: "picomatch", reason: REASON, added: "2026-11-18", expires: "2026-12-16T00:00:00Z" };
 const EMBED = "customElements.define('x-embed', class extends HTMLElement {});\n";
 const INLINE = "window.__t = 1";
+const REDIRECT = "^window\\.location\\.replace\\('/site/(?:[a-z-]+/)*' \\+ window\\.location\\.search\\);$";
 /** The allowlist document the mini projects are judged with: picomatch exempt, embed.js and the inline stub pinned for project ".". */
 const ALLOW_DOC = {
   allow: [ALLOW_ENTRY],
@@ -46,7 +49,7 @@ const ALLOW_DOC = {
     firstPartyScripts: [
       { project: ".", public: "embed.js", sha256: sha256(EMBED), reason: REASON },
       { project: ".", inline: "sha256", sha256: sha256(normalizeInline(INLINE)), reason: REASON },
-      { project: ".", inline: "pattern", pattern: "^window\\.location\\.replace\\('/site/[a-z/-]*' \\+ window\\.location\\.search\\);$", reason: REASON },
+      { project: ".", inline: "pattern", pattern: REDIRECT, reason: REASON },
       { project: "other", public: "other.js", sha256: "0".repeat(64), reason: REASON },
     ],
   },
@@ -54,71 +57,81 @@ const ALLOW_DOC = {
 const allow = parseAllowlist(ALLOW_DOC, NOW);
 const trust = parseBundleTrust(ALLOW_DOC, ".");
 const ROOT = "/work/app";
+/** package.json names of the synthetic installs below, by directory label; anything else has no named package.json. */
+const NAMES = { picomatch: "picomatch", react: "react", tinyglobby: "tinyglobby", "@scope/name": "@scope/name", matcher: "picomatch", "@aws-amplify/core": "@aws-amplify/core" };
+const stubName = (dir) => NAMES[dir.slice(dir.lastIndexOf("/node_modules/") + "/node_modules/".length)] ?? null;
 const throwsGate = (fn, pattern) => assert.throws(fn, (error) => error instanceof GateError && pattern.test(error.message));
 const rejectsGate = (promise, pattern) => assert.rejects(promise, (error) => error instanceof GateError && pattern.test(error.message));
 const silent = { log() {}, error() {} };
 const APP = [`${ROOT}/src/main.tsx`, `${ROOT}/src/App.tsx`, `${ROOT}/node_modules/react/index.js`, "\u0000vite/preload-helper.js"];
 const chunks = (entries) => new Map(entries);
 const graph = (chunkEntries, assets = [], over = {}) =>
-  evaluateGraph({ chunks: chunks(chunkEntries), assets: new Map(assets.map((name) => [name, "asset"])), allow, firstPartyRoot: ROOT, ...over });
+  evaluateGraph({ chunks: chunks(chunkEntries), assets: new Map(assets.map((name) => [name, "asset"])), allow, firstPartyRoot: ROOT, readName: stubName, ...over });
 
-test("module ids are attributed to their package after normalisation, or to first-party, virtual or unknown", () => {
-  const pkg = (id) => classifyModule(id, ROOT, trust.virtual);
-  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/@scope/name/dist/index.js`), { kind: "package", name: "@scope/name" });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/.pnpm/picomatch@4.0.7/node_modules/picomatch/index.js`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/vite/node_modules/picomatch/index.js`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/other/../picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/index.js?commonjs-exports`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`\u0000${ROOT}/node_modules/picomatch/index.js?commonjs-proxy`), { kind: "package", name: "picomatch" });
-  assert.deepEqual(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`), { kind: "package", name: "picomatch" });
+test("module ids are attributed to the package NAMED in their installed directory, or to first-party, virtual or unknown", () => {
+  const pkg = (id) => classifyModule(id, ROOT, { trustedVirtual: trust.virtual, readName: stubName });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch", dir: "picomatch" });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/@scope/name/dist/index.js`), { kind: "package", name: "@scope/name", dir: "@scope/name" });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/.pnpm/picomatch@4.0.7/node_modules/picomatch/index.js`).name, "picomatch");
+  assert.deepEqual(pkg(`${ROOT}/node_modules/vite/node_modules/picomatch/index.js`).name, "picomatch");
+  assert.deepEqual(pkg(`${ROOT}/node_modules/other/../picomatch/lib/picomatch.js`).name, "picomatch");
+  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/index.js?commonjs-exports`).name, "picomatch");
+  assert.deepEqual(pkg(`\u0000${ROOT}/node_modules/picomatch/index.js?commonjs-proxy`).name, "picomatch");
+  assert.deepEqual(pkg(`${ROOT}\\node_modules\\picomatch\\index.js`).name, "picomatch");
+  // An npm alias installs picomatch under another directory name: the package.json name wins.
+  assert.deepEqual(pkg(`${ROOT}/node_modules/matcher/index.js`), { kind: "package", name: "picomatch", dir: "matcher" });
+  // A library vendored inside another package's dist (no package.json of its own) belongs to that package.
+  assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/node_modules/tslib/tslib.es6.mjs`), { kind: "package", name: "@aws-amplify/core", dir: "@aws-amplify/core" });
+  assert.match(pkg(`${ROOT}/node_modules/broken/index.js`).why, /no named package\.json/);
   assert.deepEqual(pkg(`${ROOT}/src/main.tsx`), { kind: "first-party" });
   assert.deepEqual(pkg(`${ROOT}/src/../index.html`), { kind: "first-party" });
-  // Vite's own helpers, and the virtual module the fixture allowlist trusts explicitly.
+  // Vite's own helpers (exact names), and the virtual module the fixture allowlist trusts explicitly.
   assert.deepEqual(pkg("\u0000vite/preload-helper.js"), { kind: "virtual" });
   assert.deepEqual(pkg("\u0000vite/modulepreload-polyfill.js"), { kind: "virtual" });
   assert.deepEqual(pkg("\u0000commonjsHelpers.js"), { kind: "virtual" });
   assert.deepEqual(pkg("__vite-browser-external"), { kind: "virtual" });
   assert.deepEqual(pkg("\u0000__vite-browser-external:path"), { kind: "virtual" });
+  assert.deepEqual(pkg("\u0000__vite-browser-external:node:fs"), { kind: "virtual" });
   assert.deepEqual(pkg("\u0000virtual:fixture"), { kind: "virtual" });
-  // Any other virtual module is unknown, however it is spelled; the cache namespace is not a package.
-  assert.equal(pkg("\u0000virtual:matcher").kind, "unknown");
-  assert.equal(pkg("virtual:matcher").kind, "unknown");
-  assert.equal(pkg("\u0000plugin-helper.js").kind, "unknown");
-  assert.equal(classifyModule("\u0000virtual:fixture", ROOT).kind, "unknown");
-  assert.match(pkg(`${ROOT}/node_modules/.vite/deps/picomatch.js`).why, /not a package name/);
+  // Anything else virtual is unknown, however it is spelled; dot namespaces are not packages.
+  for (const id of ["\u0000virtual:matcher", "virtual:matcher", "\u0000plugin-helper.js", "\u0000__vite-browser-external-payload", "\u0000__vite-browser-external/payload", "__vite-browser-externalx", "\u0000vite/other.js"]) {
+    assert.equal(pkg(id).kind, "unknown", id);
+  }
+  assert.equal(classifyModule("\u0000virtual:fixture", ROOT, { readName: stubName }).kind, "unknown");
+  assert.match(pkg(`${ROOT}/node_modules/.vite/deps/picomatch.js`).why, /no named package\.json/);
   assert.equal(pkg(`${ROOT}/node_modules/@scope/.cache/x.js`).kind, "unknown");
-  assert.equal(pkg("/elsewhere/lib/thing.js").kind, "unknown");
-  assert.equal(pkg(`${ROOT}/../sibling/index.js`).kind, "unknown");
-  assert.equal(pkg(`${ROOT}/node_modules/`).kind, "unknown");
-  assert.equal(pkg(`${ROOT}/node_modules/@scope`).kind, "unknown");
-  assert.equal(pkg("").kind, "unknown");
-  assert.equal(pkg(undefined).kind, "unknown");
+  assert.equal(pkg(`${ROOT}/node_modules/@scope/name/.cache/x.js`).name, "@scope/name"); // the dot directory is inside a real package
+  for (const id of ["/elsewhere/lib/thing.js", `${ROOT}/../sibling/index.js`, `${ROOT}/node_modules/`, `${ROOT}/node_modules/@scope`, "", undefined]) {
+    assert.equal(pkg(id).kind, "unknown", String(id));
+  }
   // The first-party root is compared as a path, not a prefix string.
-  assert.equal(classifyModule("/work/application/src/x.js", ROOT).kind, "unknown");
-  assert.deepEqual(classifyModule(`${ROOT}/src/x.js`, `${ROOT}/`), { kind: "first-party" });
+  assert.equal(classifyModule("/work/application/src/x.js", ROOT, { readName: stubName }).kind, "unknown");
+  assert.deepEqual(classifyModule(`${ROOT}/src/x.js`, `${ROOT}/`, { readName: stubName }), { kind: "first-party" });
 });
 
-test("an allowlisted package in any chunk is a violation; unknown ownership and non-inert assets fail closed", () => {
-  const clean = graph([["assets/index.js", APP]], ["assets/index.css", "index.html", "assets/logo.svg", "assets/font.woff2"]);
+test("an allowlisted package in any chunk is a violation; unknown ownership and opaque assets fail closed", () => {
+  const clean = graph([["assets/index.js", APP]], ["assets/index.css", "index.html", "assets/logo.svg", "assets/font.woff2", "assets/notes.txt", "data.json"]);
   assert.deepEqual(clean.violations, []);
   assert.deepEqual([clean.modules, clean.firstParty, clean.virtual, [...clean.packages]], [4, 2, 1, ["react"]]);
   const shipped = graph([
     ["assets/index.js", APP],
-    [`${WORKER_PREFIX}assets/w.js`, [`${ROOT}/src/w.js`, `\u0000${ROOT}/node_modules/picomatch/index.js?commonjs-proxy`, `${ROOT}/node_modules/picomatch/lib/picomatch.js`]],
+    [`${WORKER_PREFIX}1:worker.js`, [`${ROOT}/src/w.js`, `\u0000${ROOT}/node_modules/picomatch/index.js?commonjs-proxy`, `${ROOT}/node_modules/matcher/lib/picomatch.js`]],
   ]);
   assert.equal(shipped.violations.length, 2);
-  assert.match(shipped.violations[0], /^picomatch is bundled into worker:assets\/w\.js: /);
+  assert.match(shipped.violations[0], /^picomatch is bundled into worker1:worker\.js: /);
+  assert.match(shipped.violations[1], /\(installed as matcher\)$/);
   throwsGate(() => graph([]), /emitted no JavaScript chunk/);
   throwsGate(() => graph([["a.js", []]]), /lists no modules/);
   throwsGate(() => graph([["a.js", [...APP, "/elsewhere/x.js"]]]), /ownership cannot be established: outside the first-party root/);
   throwsGate(() => graph([["a.js", [...APP, "\u0000virtual:matcher"]]]), /not listed in bundle\.trustedVirtualModules/);
-  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/.vite/deps/picomatch.js`]]]), /not a package name/);
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/.vite/deps/picomatch.js`]]]), /no named package\.json/);
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/broken/index.js`]]]), /no named package\.json/);
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
-  throwsGate(() => graph([["a.js", APP]], ["assets/matcher.txt"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
+  throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", [`${ROOT}/node_modules/react/index.js`]]]), /no first-party module/);
   throwsGate(() => graph([["a.js", [`${ROOT}/src/main.tsx`]]]), /no npm package/);
+  assert.deepEqual(["x.html", "x.svg", "x.css", "x.png", "x.wasm", "x"].map(inertKind), ["html", "svg", "text", "binary", null, null]);
 });
 
 test("the bundle-trust section is validated strictly and filtered by project", () => {
@@ -152,24 +165,54 @@ test("the bundle-trust section is validated strictly and filtered by project", (
   throwsGate(() => parseBundleTrust(pin({ project: "other", public: "a.js", sha256: "bad" }), "."), /64 lowercase hex/);
 });
 
-test("script tags are parsed quote-aware with exact attribute names; <base> is refused", () => {
-  const one = (html) => scanScripts(html, "doc");
-  assert.deepEqual(one('<script type="module" crossorigin src="/a.js"></script>')[0].attrs.get("src"), "/a.js");
-  assert.deepEqual(one("<SCRIPT SRC=a.js></SCRIPT>")[0].attrs.get("src"), "a.js");
-  assert.equal(one('<script data-src="/a.js">x</script>')[0].attrs.has("src"), false);
-  assert.equal(one('<script data-src="/a.js" src="https://cdn.example.invalid/x.js"></script>')[0].attrs.get("src"), "https://cdn.example.invalid/x.js");
-  assert.equal(one(`<script title="a > b" src='/a.js'></script>`)[0].attrs.get("src"), "/a.js");
-  assert.equal(one('<script type="text/plain">var s = "<script>"; </script>').length, 1);
-  assert.equal(one("<scripts></scripts><script>x</script>").length, 1);
-  assert.equal(one("<script>a</script><script>b</script>")[1].body, "b");
-  assert.equal(one("<script />x</script>")[0].attrs.size, 0);
-  throwsGate(() => one("<script/>"), /without <\/script>/); // a script element always needs its end tag
-  throwsGate(() => one('<script src="/a.js" src="/b.js"></script>'), /repeated/);
-  throwsGate(() => one('<script src="/a.js"'), /unterminated/);
-  throwsGate(() => one('<script src="/a.js">no end'), /without <\/script>/);
-  throwsGate(() => one("<script =x></script>"), /cannot parse attributes/);
+test("documents are tokenised conservatively: comments, declarations, contexts, attributes and schemes", () => {
+  const scan = (html, opts) => scanDocument(html, "doc", opts);
+  assert.equal(scan('<!doctype html><html><head><script type="module" crossorigin src="/a.js"></script></head></html>').scripts[0].attrs.get("src"), "/a.js");
+  assert.equal(scan("<SCRIPT SRC=a.js></SCRIPT>").scripts[0].attrs.get("src"), "a.js");
+  assert.equal(scan('<script data-src="/a.js">x</script>').scripts[0].attrs.has("src"), false);
+  assert.equal(scan('<script data-src="/a.js" src="https://cdn.example.invalid/x.js"></script>').scripts[0].attrs.get("src"), "https://cdn.example.invalid/x.js");
+  assert.equal(scan(`<script title="a > b" src='/a.js'></script>`).scripts[0].attrs.get("src"), "/a.js");
+  assert.equal(scan('<script type="text/plain">var s = "<script>"; </script>').scripts.length, 1);
+  assert.equal(scan("<scripts></scripts><script>x</script>").scripts.length, 1);
+  assert.equal(scan("<script>a</script><script>b</script>").scripts[1].body, "b");
+  assert.equal(scan("<style>a > b { color: red }</style><title>x &lt; y</title><p>a &lt; b</p>").scripts.length, 0);
+  assert.equal(scan("<!-- hash-shim --><br/><img src=x.png alt='a > b'>").scripts.length, 0);
+  assert.deepEqual(scan('<link rel="modulepreload" href="/a.js"><link rel="preload" as="script" href="b.js"><link rel="preload" as="style" href="c.css">').preloads, ["/a.js", "b.js"]);
+  assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=/site/x/" />').refreshes, ["/site/x/"]);
+  assert.deepEqual(scan('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>').scripts, []);
+  assert.equal(scan('<?xml version="1.0"?><svg><script>x</script></svg>', { svg: true }).scripts.length, 1);
+  throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
+  throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
+  throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
+  throwsGate(() => scan("<!ELEMENT br EMPTY>"), /unsupported declaration/);
+  throwsGate(() => scan("<![CDATA[ x ]]>"), /CDATA/);
+  throwsGate(() => scan('<?xml version="1.0"?><html></html>'), /processing instructions/);
+  throwsGate(() => scan("<p>a < b</p>"), /does not start a tag/);
+  throwsGate(() => scan("<script/>"), /self-closing/);
+  throwsGate(() => scan("<style/>"), /self-closing/);
+  throwsGate(() => scan('<script src="/a.js"'), /unterminated <script> tag/);
+  throwsGate(() => scan("<script>no end"), /without <\/script>/);
+  throwsGate(() => scan("<div"), /unterminated <div> tag/);
+  throwsGate(() => scan("<script =x></script>"), /cannot parse attributes/);
+  throwsGate(() => scan('<script src="/a.js" src="/b.js"></script>'), /repeated/);
   throwsGate(() => parseAttributes('a="1" a="2"', "t"), /repeated/);
   assert.deepEqual([...parseAttributes(` async defer src = "x.js" type='module' nomodule`, "t")], [["async", null], ["defer", null], ["src", "x.js"], ["type", "module"], ["nomodule", null]]);
+  for (const html of ['<iframe src="/x.html"></iframe>', '<iframe srcdoc="&lt;script&gt;x&lt;/script&gt;"></iframe>', "<object data='x.swf'></object>", "<embed src=x>", "<applet></applet>", '<base href="https://cdn.example.invalid/">', "<base/>", '<link rel="import" href="x.html">']) {
+    throwsGate(() => scan(html), /refused/, html);
+  }
+  for (const html of ['<div onclick="x()"></div>', "<svg onload=x></svg>", '<body ONLOAD="x"></body>', '<img src=x onerror="x">']) {
+    throwsGate(() => scan(html), /inline event handler/, html);
+  }
+  for (const href of ["javascript:alert(1)", "JAVASCRIPT:alert(1)", "&#106;avascript:alert(1)", "jav&#x09;ascript:alert(1)", "java\tscript:alert(1)", "&#x6A;&#x61;vascript&colon;alert(1)", "vbscript:x", "data:text/html;base64,PHNjcmlwdD4=", "data:application/javascript,alert(1)"]) {
+    throwsGate(() => scan(`<a href="${href}">x</a>`), /executable URL scheme|data: URL that is not an image/, href);
+  }
+  assert.equal(scan('<img src="data:image/svg+xml,%3Csvg%3E"><link rel="icon" href="data:image/png;base64,AAAA">').scripts.length, 0);
+  throwsGate(() => scan('<meta http-equiv="refresh" content="0">'), /without a url/);
+  throwsGate(() => scan("<svg><foreignObject><div>x</div></foreignObject></svg>", { svg: true }), /foreignObject/);
+  assert.equal(decodeEntities("&#106;ava&#x53;cript&colon;&amp;&lt;&quot;&unknown;"), 'javaScript:&<"&unknown;');
+});
+
+test("HTML documents: known sources, pinned inline scripts, inert data blocks, bounded refresh and preload targets", () => {
   const dir = mkdtempSync(join(tmpdir(), "bundle-check-doc-"));
   try {
     const known = new Set(["assets/index-abc.js", "embed.js"]);
@@ -177,20 +220,35 @@ test("script tags are parsed quote-aware with exact attribute names; <base> is r
       writeFileSync(join(dir, "index.html"), html);
       return checkDocuments({ dir, files: ["index.html"], known, base: "/site/", trust, packages: ["picomatch"], ...over });
     };
-    assert.deepEqual(judge(`<script>${INLINE}</script><script type="module" src="/site/assets/index-abc.js"></script><script src="/site/embed.js"></script>`), { documents: 1, inline: 1, pinnedBySha256: 1, pinnedByPattern: 0 });
-    assert.deepEqual(judge("<script>window.location.replace('/site/start/which-project/' + window.location.search);</script>"), { documents: 1, inline: 1, pinnedBySha256: 0, pinnedByPattern: 1 });
-    assert.deepEqual(judge(`<script>\n  ${INLINE}\n\n</script><script></script>`).inline, 1); // normalised body; empty inline ignored
+    const ok = { documents: 1, inline: 1, data: 0, pinnedBySha256: 1, pinnedByPattern: 0 };
+    assert.deepEqual(judge(`<script>${INLINE}</script><script type="module" src="/site/assets/index-abc.js"></script><script src="/site/embed.js"></script>`), ok);
+    assert.deepEqual(judge("<script>window.location.replace('/site/start/which-project/' + window.location.search);</script>"), { ...ok, pinnedBySha256: 0, pinnedByPattern: 1 });
+    assert.equal(judge(`<script>\n  ${INLINE}\n\n</script><script></script>`).inline, 1); // normalised body; empty inline ignored
+    assert.deepEqual(judge('<script type="application/ld+json">{"@context":"https://schema.org"}</script>'), { ...ok, inline: 0, pinnedBySha256: 0, data: 1 });
     throwsGate(() => judge("<script>window.__t = 2</script>"), /inline script 1 is not pinned .*\(sha256 of its normalised body: [0-9a-f]{64}\)/);
+    throwsGate(() => judge("<script>window.location.replace('/site/../other/' + window.location.search);</script>"), /not pinned/);
     throwsGate(() => judge("<script>window.location.replace('https://evil.example/' + window.location.search);</script>"), /not pinned/);
-    throwsGate(() => judge("<script>/* picomatch */</script>"), /mentions allowlisted package picomatch/);
+    throwsGate(() => judge("<script>/* picomatch */</script>"), /inline script 1 of index\.html mentions allowlisted package picomatch/);
+    throwsGate(() => judge('<script type="application/json">{"dep":"picomatch"}</script>'), /data block 1 of index\.html mentions allowlisted package picomatch/);
+    throwsGate(() => judge('<script type="importmap">{"imports":{}}</script>'), /import maps are refused/);
+    throwsGate(() => judge('<script type="text/plain" src="/site/embed.js"></script>'), /non-script type/);
+    throwsGate(() => judge('<script src="/site/embed.js">payload()</script>'), /must have an empty body/);
     throwsGate(() => judge('<script src="https://cdn.example.invalid/x.js"></script>'), /external script/);
     throwsGate(() => judge('<script src="//cdn.example.invalid/x.js"></script>'), /external script/);
     throwsGate(() => judge('<script data-src="/site/assets/index-abc.js" src="https://cdn.example.invalid/x.js"></script>'), /external script/);
+    throwsGate(() => judge('<!-- <script src="/site/assets/index-abc.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
     throwsGate(() => judge('<script src="/site/assets/missing.js"></script>'), /not a chunk of this build nor a pinned public copy/);
     throwsGate(() => judge('<script src=""></script>'), /empty src/);
     throwsGate(() => judge("<script src></script>"), /empty src/);
-    throwsGate(() => judge('<head><base href="https://cdn.example.invalid/"></head><script src="/site/embed.js"></script>'), /<base> element/);
-    throwsGate(() => judge("<base/>"), /<base> element/);
+    throwsGate(() => judge('<head><base href="https://cdn.example.invalid/"></head><script src="/site/embed.js"></script>'), /<base> is refused/);
+    throwsGate(() => judge('<link rel="modulepreload" href="https://cdn.example.invalid/x.js">'), /preloads an external script/);
+    throwsGate(() => judge('<link rel="modulepreload" href="/site/assets/other.js">'), /preloads .* not a chunk/);
+    assert.equal(judge('<link rel="modulepreload" href="/site/assets/index-abc.js"><script>' + INLINE + "</script>").inline, 1);
+    assert.equal(judge('<meta http-equiv="refresh" content="0; url=/site/start/which-project/" /><script>' + INLINE + "</script>").inline, 1);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/../other/">'), /not a dot-free path under/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/other/">'), /not a dot-free path under/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=https://evil.example/">'), /outside this site/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=&#106;avascript:x">'), /outside this site|executable URL scheme/);
     assert.equal(judge("<script src='./assets/index-abc.js?v=1'></script><script src=embed.js></script>", { base: "/" }).inline, 0);
     assert.equal(judge('<script src="/assets/index-abc.js"></script>', { base: "/" }).documents, 1);
   } finally {
@@ -198,50 +256,78 @@ test("script tags are parsed quote-aware with exact attribute names; <base> is r
   }
 });
 
-test("written scripts must be this build's chunks (same bytes) or pinned, tracked, byte-identical public copies", () => {
+test("every output file is a hash-checked chunk, a pinned tracked public script, a judged document or inert data", () => {
   const dir = mkdtempSync(join(tmpdir(), "bundle-check-out-"));
   try {
     const outDir = join(dir, "dist");
     const publicDir = join(dir, "public");
     mkdirSync(join(outDir, "assets"), { recursive: true });
     mkdirSync(publicDir);
-    writeFileSync(join(outDir, "assets", "index-abc.js"), "console.log(1)");
-    writeFileSync(join(outDir, "assets", "index-abc.css"), "body{}");
-    writeFileSync(join(outDir, "embed.js"), EMBED);
+    const put = (rel, content) => writeFileSync(join(outDir, rel), content);
+    put("assets/index-abc.js", "console.log(1)");
+    put("assets/index-abc.css", "body{}");
+    put("assets/data.bin", "binary chunk");
+    put("embed.js", EMBED);
     writeFileSync(join(publicDir, "embed.js"), EMBED);
-    const chunkHashes = new Map([["assets/index-abc.js", sha256("console.log(1)")]]);
-    assert.deepEqual(walkOutput(outDir), ["assets/index-abc.css", "assets/index-abc.js", "embed.js"]);
-    const check = (over = {}) => checkScripts({ dir: outDir, files: walkOutput(outDir), chunkHashes, trust, publicDir, packages: ["picomatch"], isTracked: () => true, ...over });
+    put("index.html", `<!doctype html><html><head><script>${INLINE}</script></head><body><script type="module" src="/site/assets/index-abc.js"></script><script src="/site/embed.js"></script></body></html>`);
+    put("logo.svg", '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>');
+    put("robots.txt", "User-agent: *\n");
+    put("favicon.ico", Buffer.from([0, 0, 1, 0]));
+    const chunkHashes = new Map([["assets/index-abc.js", sha256("console.log(1)")], ["assets/data.bin", sha256("binary chunk")]]);
+    const check = (over = {}) => judgeOutput({ dir: outDir, chunkHashes, trust, publicDir, base: "/site/", packages: ["picomatch"], isTracked: () => true, ...over });
     const ok = check();
-    assert.deepEqual([[...ok.known].sort(), ok.publicCopies], [["assets/index-abc.js", "embed.js"], ["embed.js"]]);
-    // A chunk rewritten after the build no longer matches the bytes Rollup wrote.
-    writeFileSync(join(outDir, "assets", "index-abc.js"), "console.log(1);/* appended */");
-    throwsGate(() => check(), /rewritten after the build/);
-    writeFileSync(join(outDir, "assets", "index-abc.js"), "console.log(1)");
-    // A public copy must match its pin, be byte-identical to the publicDir file, and be tracked.
-    writeFileSync(join(outDir, "embed.js"), `${EMBED}// changed\n`);
+    assert.deepEqual([ok.files, ok.scripts, ok.publicCopies, ok.documents, ok.inline, ok.pinnedBySha256], [8, 3, ["embed.js"], 1, 1, 1]);
+    // Chunks are reconciled by hash whatever their extension.
+    put("assets/index-abc.js", "console.log(1);/* appended */");
+    throwsGate(() => check(), /index-abc\.js differs from the chunk Rollup wrote/);
+    put("assets/index-abc.js", "console.log(1)");
+    put("assets/data.bin", "binary chunk altered");
+    throwsGate(() => check(), /data\.bin differs from the chunk Rollup wrote/);
+    put("assets/data.bin", "binary chunk");
+    // Public copies: pin, byte identity with publicDir, git tracking.
+    put("embed.js", `${EMBED}// changed\n`);
     writeFileSync(join(publicDir, "embed.js"), `${EMBED}// changed\n`);
     throwsGate(() => check(), /does not match its pin/);
-    writeFileSync(join(outDir, "embed.js"), EMBED);
+    put("embed.js", EMBED);
     throwsGate(() => check(), /not a byte-identical copy/);
     writeFileSync(join(publicDir, "embed.js"), EMBED);
     throwsGate(() => check({ publicDir: null }), /no publicDir/);
     throwsGate(() => check({ isTracked: () => false }), /git does not track/);
     assert.equal(gitTracked(join(publicDir, "embed.js")), false); // a temp dir is not a git repository
-    // Unpinned scripts fail whatever their extension, and the message carries the hash needed to pin them.
-    writeFileSync(join(outDir, "assets", "vendor.mjs"), "/* vendored */");
+    // Unexplained scripts and opaque payloads fail; the script message carries the hash needed to pin it.
+    put("assets/vendor.mjs", "/* vendored */");
     throwsGate(() => check(), /vendor\.mjs is a script that is not a chunk of this build and not pinned .* \(sha256 [0-9a-f]{64}\)/);
     rmSync(join(outDir, "assets", "vendor.mjs"));
-    // Tripwire: a pinned public copy that names the allowlisted package by word still fails.
+    put("assets/payload", "anything");
+    throwsGate(() => check(), /payload is neither a chunk of this build nor of a recognised inert type/);
+    rmSync(join(outDir, "assets", "payload"));
+    put("assets/module.wasm", "\0asm");
+    throwsGate(() => check(), /module\.wasm is neither a chunk/);
+    rmSync(join(outDir, "assets", "module.wasm"));
+    // Inert text and SVG documents are tripwire-scanned; SVG may carry no script or handler.
+    put("robots.txt", "# built with picomatch\n");
+    throwsGate(() => check(), /robots\.txt mentions allowlisted package picomatch/);
+    put("robots.txt", "User-agent: *\n");
+    put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    throwsGate(() => check(), /logo\.svg is an SVG document carrying a <script>/);
+    put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg" onload="x()"></svg>');
+    throwsGate(() => check(), /inline event handler/);
+    put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:x"></a></svg>');
+    throwsGate(() => check(), /executable URL scheme/);
+    put("logo.svg", '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>');
+    // Pinned public text that names the package by word still fails; non-word matches do not.
     const vendored = "// bundled copy of picomatch 4.0.7\n";
-    const trustVendored = parseBundleTrust({ allow: [], bundle: { firstPartyScripts: [{ project: ".", public: "embed.js", sha256: sha256(vendored), reason: REASON }] } }, ".");
-    writeFileSync(join(outDir, "embed.js"), vendored);
+    const trustVendored = parseBundleTrust({ allow: [], bundle: { firstPartyScripts: [{ project: ".", public: "embed.js", sha256: sha256(vendored), reason: REASON }, { project: ".", inline: "sha256", sha256: sha256(INLINE), reason: REASON }] } }, ".");
+    put("embed.js", vendored);
     writeFileSync(join(publicDir, "embed.js"), vendored);
     throwsGate(() => check({ trust: trustVendored }), /public copy embed\.js mentions allowlisted package picomatch/);
+    put("embed.js", EMBED);
+    writeFileSync(join(publicDir, "embed.js"), EMBED);
     assert.throws(() => tripwire("x", "import('@scope/name')", ["@scope/name"]), GateError);
-    tripwire("x", "scope/name @scope/named @scope/name.js mypicomatchlib", ["@scope/name", "picomatch"]); // only word matches count
+    tripwire("x", "scope/name @scope/named @scope/name.js mypicomatchlib", ["@scope/name", "picomatch"]);
     // Symlinks anywhere in the output fail closed.
     symlinkSync(join(outDir, "assets", "index-abc.js"), join(outDir, "assets", "link.js"));
+    throwsGate(() => check(), /symlink/);
     throwsGate(() => walkOutput(outDir), /symlink/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -282,14 +368,21 @@ function viteProject() {
 }
 
 /**
- * Write a minimal Vite project (its own git repository) whose entry imports the given bare specifiers. Its
- * node_modules is a symlink to the Vite project's, so Vite, react and picomatch resolve exactly as in a
- * real install (Rollup records their real paths, which is what the gate classifies).
+ * Write a minimal Vite project (its own git repository) whose entry imports the given bare specifiers.
+ * Its node_modules is a symlink to the Vite project's (or, with farm: true, a directory of symlinks to
+ * each installed package so extra packages can be added), so Vite, react and picomatch resolve exactly
+ * as in a real install (Rollup records their real paths, which is what the gate classifies).
  */
-function miniProject(dir, nodeModules, imports, { publicScript = true, inline = INLINE } = {}) {
+function miniProject(dir, nodeModules, imports, { publicScript = true, inline = INLINE, farm = false, config = null } = {}) {
   mkdirSync(join(dir, "src"), { recursive: true });
-  symlinkSync(nodeModules, join(dir, "node_modules"), "dir");
+  if (farm) {
+    mkdirSync(join(dir, "node_modules"));
+    for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
+      symlinkSync(join(nodeModules, entry.name), join(dir, "node_modules", entry.name), entry.isDirectory() ? "dir" : "file");
+    }
+  } else symlinkSync(nodeModules, join(dir, "node_modules"), "dir");
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "mini", private: true, type: "module" }));
+  if (config) writeFileSync(join(dir, "vite.config.js"), config);
   writeFileSync(
     join(dir, "index.html"),
     `<!doctype html><html><head><script>${inline}</script></head><body><div id="root"></div>` +
@@ -311,16 +404,22 @@ function miniProject(dir, nodeModules, imports, { publicScript = true, inline = 
   }
 }
 
-/** Add an inline (`?worker&inline`) or file (`?worker`) web worker whose code imports the given specifiers. */
-function addWorker(dir, imports, { inline }) {
-  const lines = imports.map((file, index) => `import * as w${index} from ${JSON.stringify(file)};`);
-  lines.push(`self.onmessage = () => self.postMessage([${imports.map((_, index) => `typeof w${index}`).join(", ")}].join(" "));`);
-  writeFileSync(join(dir, "src", "worker.js"), `${lines.join("\n")}\n`);
+/** Add web workers to a mini project: each { file, imports, inline } becomes an import of `${file}?worker[&inline]`. */
+function addWorkers(dir, workers) {
   const entry = join(dir, "src", "main.js");
-  writeFileSync(entry, `import W from "./worker.js?worker${inline ? "&inline" : ""}";\nnew W().postMessage(1);\n${readFileSync(entry, "utf8")}`);
+  const imports = [];
+  workers.forEach(({ file, imports: deps, inline }, index) => {
+    const lines = deps.map((dep, i) => `import * as w${i} from ${JSON.stringify(dep)};`);
+    lines.push(`self.onmessage = () => self.postMessage([${deps.map((_, i) => `typeof w${i}`).join(", ")}].join(" "));`);
+    mkdirSync(join(dir, "src", ...file.split("/").slice(0, -1)), { recursive: true });
+    writeFileSync(join(dir, "src", file), `${lines.join("\n")}\n`);
+    imports.push(`import W${index} from "./${file}?worker${inline ? "&inline" : ""}";\nnew W${index}().postMessage(1);`);
+  });
+  writeFileSync(entry, `${imports.join("\n")}\n${readFileSync(entry, "utf8")}`);
 }
 
 const run = (argv, lines) => main(argv, { log: (line) => lines.push(line), error: (line) => lines.push(line) });
+const argvFor = (dir, app, ...extra) => ["--out", join(dir, "out"), "--project", app, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z", ...extra];
 
 test("a real Vite build that bundles only unrelated packages passes, reporting the pinned public copy and inline script", async () => {
   const { entry, nodeModules } = viteProject();
@@ -330,12 +429,12 @@ test("a real Vite build that bundles only unrelated packages passes, reporting t
     miniProject(app, nodeModules, ["react"]);
     writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
     const lines = [];
-    await run(["--out", join(dir, "out"), "--project", app, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z"], lines);
+    await run(argvFor(dir, app), lines);
     const summary = lines.join("\n");
     assert.match(summary, /PASS; no shipped script resolves code from: picomatch/);
     assert.match(summary, /1 pinned public copy: embed\.js/);
-    assert.match(summary, /1 document\(s\) with 1 inline script\(s\) \(1 pinned by sha256, 0 by pattern\)/);
-    // The graph itself, through the same plugin: react is attributed, the entry is first-party, chunks are hashed.
+    assert.match(summary, /1 document\(s\) with 1 inline script\(s\) \(1 pinned by sha256, 0 by pattern\) and 0 data block\(s\)/);
+    assert.match(summary, /from 0 worker build\(s\)/);
     const vite = await import(pathToFileURL(entry).href);
     const record = await buildGraph({ projectDir: app, outDir: join(dir, "out2"), vite });
     const judged = evaluateGraph({ chunks: record.chunks, assets: record.assets, allow, firstPartyRoot: app, trustedVirtual: trust.virtual });
@@ -357,66 +456,106 @@ test("a real Vite build whose application source imports picomatch FAILS the gat
     miniProject(app, nodeModules, ["react", "picomatch"], { publicScript: false });
     writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
     const lines = [];
-    await rejectsGate(run(["--out", join(dir, "out"), "--project", app, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z"], lines), /allowlist premise/);
+    await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into /.test(line)), lines.join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("a real Vite build whose INLINE worker imports picomatch FAILS the gate; a file worker is an opaque executable", async () => {
+test("a real npm-alias install (picomatch under node_modules/matcher) is attributed to picomatch and FAILS the gate", async () => {
   const { nodeModules } = viteProject();
   const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
   try {
-    const inlineApp = join(dir, "inline");
-    miniProject(inlineApp, nodeModules, ["react"], { publicScript: false });
-    addWorker(inlineApp, ["picomatch"], { inline: true });
+    const app = join(dir, "app");
+    miniProject(app, nodeModules, ["react", "matcher"], { publicScript: false, farm: true });
+    cpSync(realpathSync(join(nodeModules, "picomatch")), join(app, "node_modules", "matcher"), { recursive: true });
+    assert.equal(JSON.parse(readFileSync(join(app, "node_modules", "matcher", "package.json"), "utf8")).name, "picomatch");
     writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
     const lines = [];
-    await rejectsGate(run(["--out", join(dir, "out"), "--project", inlineApp, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z"], lines), /allowlist premise/);
-    assert.ok(lines.some((line) => new RegExp(`VIOLATION picomatch is bundled into ${WORKER_PREFIX}`).test(line)), lines.join("\n"));
-    const fileApp = join(dir, "file");
-    miniProject(fileApp, nodeModules, ["react"], { publicScript: false });
-    addWorker(fileApp, ["react"], { inline: false });
-    await rejectsGate(run(["--out", join(dir, "out2"), "--project", fileApp, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z"], []), /opaque executable/);
+    await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
+    assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .* \(installed as matcher\)/.test(line)), lines.join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("the deployment build's output must equal this build's chunks and pins (--verify-dist), and public copies must stay tracked and unchanged", async () => {
+test("inline workers: one importing picomatch FAILS; two same-named worker builds are both judged; a file worker is opaque", async () => {
+  const { nodeModules } = viteProject();
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
+  try {
+    writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
+    const inlineApp = join(dir, "inline");
+    miniProject(inlineApp, nodeModules, ["react"], { publicScript: false });
+    addWorkers(inlineApp, [{ file: "worker.js", imports: ["picomatch"], inline: true }]);
+    const lines = [];
+    await rejectsGate(run(argvFor(dir, inlineApp), lines), /allowlist premise/);
+    assert.ok(lines.some((line) => new RegExp(`VIOLATION picomatch is bundled into ${WORKER_PREFIX}1:`).test(line)), lines.join("\n"));
+    // Two sub-builds emitting the same file name, in both import orders: neither record may hide the other.
+    const sameName = 'export default { worker: { rollupOptions: { output: { entryFileNames: "[name].js" } } } };\n';
+    for (const [first, second] of [[["picomatch"], ["react"]], [["react"], ["picomatch"]]]) {
+      const app = join(dir, `pair-${first[0]}`);
+      miniProject(app, nodeModules, ["react"], { publicScript: false, config: sameName });
+      addWorkers(app, [{ file: "a/worker.js", imports: first, inline: true }, { file: "b/worker.js", imports: second, inline: true }]);
+      const out = [];
+      await rejectsGate(run(argvFor(dir, app), out), /allowlist premise/);
+      assert.ok(out.some((line) => /VIOLATION picomatch is bundled into worker[12]:worker\.js/.test(line)), out.join("\n"));
+      assert.ok(out.some((line) => /from 2 worker build\(s\)/.test(line)), out.join("\n"));
+    }
+    const fileApp = join(dir, "file");
+    miniProject(fileApp, nodeModules, ["react"], { publicScript: false });
+    addWorkers(fileApp, [{ file: "worker.js", imports: ["react"], inline: false }]);
+    await rejectsGate(run(argvFor(dir, fileApp), []), /opaque executable/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the deployment build's output must equal this build's chunks and pins (--verify-dist); every mutation of it is refused", async () => {
   const { nodeModules } = viteProject();
   const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
   try {
     const app = join(dir, "app");
     miniProject(app, nodeModules, ["react"]);
     writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
-    const out = join(dir, "out");
     const dist = join(dir, "dist");
-    const argv = (...extra) => ["--out", out, "--project", app, "--allowlist", join(dir, "allow.json"), "--now", "2026-11-18T12:00:00Z", ...extra];
+    const argv = (...extra) => argvFor(dir, app, ...extra);
     await run(argv(), []);
-    cpSync(out, dist, { recursive: true }); // the deployment build: identical by construction here
+    cpSync(join(dir, "out"), dist, { recursive: true }); // the deployment build: identical by construction here
     const lines = [];
     await run(argv("--verify-dist", dist), lines);
     assert.match(lines.join("\n"), /deployment build .*: .* every script byte-identical to this build's chunks or pinned/);
     await rejectsGate(run(argv("--verify-dist", join(dir, "nope")), []), /does not exist/);
-    // A chunk altered in dist, an extra unpinned script, an unpinned inline script: each fails closed.
     const chunk = walkOutput(dist).find((rel) => /^assets\/.*\.js$/.test(rel));
-    const original = readFileSync(join(dist, chunk));
-    writeFileSync(join(dist, chunk), Buffer.concat([original, Buffer.from("\n/* appended */\n")]));
-    await rejectsGate(run(argv("--verify-dist", dist), []), /rewritten after the build/);
-    writeFileSync(join(dist, chunk), original);
-    writeFileSync(join(dist, "extra.js"), "console.log('extra')");
-    await rejectsGate(run(argv("--verify-dist", dist), []), /extra\.js is a script that is not a chunk of this build and not pinned/);
-    rmSync(join(dist, "extra.js"));
     const html = readFileSync(join(dist, "index.html"), "utf8");
-    writeFileSync(join(dist, "index.html"), html.replace("</body>", "<script>window.__late = 1</script></body>"));
-    await rejectsGate(run(argv("--verify-dist", dist), []), /inline script 2 is not pinned/);
-    writeFileSync(join(dist, "index.html"), html);
-    // Public copies: tampered after the build, or untracked in public/, are refused.
-    writeFileSync(join(dist, "embed.js"), "/* replaced after the build */\n");
-    await rejectsGate(run(argv("--verify-dist", dist), []), /embed\.js does not match its pin/);
-    writeFileSync(join(dist, "embed.js"), EMBED);
+    const originalChunk = readFileSync(join(dist, chunk));
+    /** Apply one mutation to dist, assert the gate refuses it with `pattern`, then undo it. */
+    const refused = async (apply, pattern) => {
+      apply();
+      await rejectsGate(run(argv("--verify-dist", dist), []), pattern);
+      writeFileSync(join(dist, chunk), originalChunk);
+      writeFileSync(join(dist, "index.html"), html);
+      writeFileSync(join(dist, "embed.js"), EMBED);
+      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg"]) rmSync(join(dist, extra), { force: true });
+    };
+    const inHtml = (snippet) => () => writeFileSync(join(dist, "index.html"), html.replace("</body>", `${snippet}</body>`));
+    await refused(() => writeFileSync(join(dist, chunk), Buffer.concat([originalChunk, Buffer.from("\n/* appended */\n")])), /rewritten after the build/);
+    await refused(() => writeFileSync(join(dist, "extra.js"), "console.log('extra')"), /extra\.js is a script that is not a chunk of this build and not pinned/);
+    await refused(() => writeFileSync(join(dist, "matcher.txt"), "picomatch compiled payload\n"), /matcher\.txt mentions allowlisted package picomatch/);
+    await refused(() => writeFileSync(join(dist, "payload"), "opaque"), /payload is neither a chunk of this build nor of a recognised inert type/);
+    await refused(() => writeFileSync(join(dist, "module.wasm"), "\0asm"), /module\.wasm is neither a chunk/);
+    await refused(() => writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"), /evil\.svg is an SVG document carrying a <script>/);
+    await refused(() => writeFileSync(join(dist, "embed.js"), "/* replaced after the build */\n"), /embed\.js does not match its pin/);
+    await refused(inHtml("<script>window.__late = 1</script>"), /inline script 2 is not pinned/);
+    await refused(inHtml('<!-- <script src="/assets/known.js"> --><script src="https://cdn.example.invalid/picomatch.js"></script>'), /comment contains markup/);
+    await refused(inHtml('<script src="https://cdn.example.invalid/x.js"></script>'), /external script/);
+    await refused(inHtml('<iframe srcdoc="&lt;script src=&quot;https://cdn.example.invalid/x.js&quot;&gt;&lt;/script&gt;"></iframe>'), /refused/);
+    await refused(inHtml('<div onclick="fetch(1)"></div>'), /inline event handler/);
+    await refused(inHtml('<a href="&#106;avascript:fetch(1)">x</a>'), /executable URL scheme/);
+    await refused(inHtml('<meta http-equiv="refresh" content="0; url=/../other/">'), /not a dot-free path/);
+    await refused(inHtml('<link rel="modulepreload" href="https://cdn.example.invalid/x.js">'), /preloads an external script/);
+    await refused(inHtml('<base href="https://cdn.example.invalid/">'), /<base> is refused/);
+    // An untracked file dropped into public/ reaches the judged build and is refused there too.
     writeFileSync(join(app, "public", "loose.js"), "console.log('loose')\n");
     await rejectsGate(run(argv(), []), /loose\.js is a script that is not a chunk of this build and not pinned/);
   } finally {

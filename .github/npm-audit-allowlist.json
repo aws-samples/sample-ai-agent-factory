@@ -38,8 +38,8 @@
       {
         "project": "docs-site",
         "inline": "pattern",
-        "pattern": "^window\\.location\\.replace\\('/sample-ai-agent-factory/[A-Za-z0-9._/-]*' \\+ window\\.location\\.search \\+ window\\.location\\.hash\\);$",
-        "reason": "The one-line redirect stub docs-site/scripts/prerender.mjs writes for every moved route (redirectStub); the target is a site-relative path under the GitHub Pages base, nothing else."
+        "pattern": "^window\\.location\\.replace\\('/sample-ai-agent-factory/(?:[A-Za-z0-9_-]+/)*' \\+ window\\.location\\.search \\+ window\\.location\\.hash\\);$",
+        "reason": "The one-line redirect stub docs-site/scripts/prerender.mjs writes for every moved route (redirectStub); the target is a path under the GitHub Pages base made of letter/digit/dash/underscore segments each ending in '/', so no dot segment can leave the base."
       }
     ]
   }
