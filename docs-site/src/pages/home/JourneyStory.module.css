@@ -1,0 +1,576 @@
+/* The homepage's scroll story. All colours resolve from the site's stage and semantic tokens. */
+.story {
+  --story-accent: var(--stage-scale-on-dark);
+  position: relative;
+  isolation: isolate;
+  background: var(--color-band);
+}
+
+.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 0;
+  height: 100svh;
+  pointer-events: none;
+  min-height: 640px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 73% 42%, color-mix(in srgb, var(--color-link) 12%, transparent), transparent 46%),
+    var(--color-band);
+}
+
+.sticky::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: .55;
+  background-image:
+    linear-gradient(var(--rail-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rail-color) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to right, transparent, var(--color-band) 40%);
+}
+
+.sticky::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--color-band) 72%, transparent), transparent 44%), linear-gradient(0deg, color-mix(in srgb, var(--color-band) 65%, transparent), transparent 18%);
+}
+
+.story[data-story-stage='build'] .sticky::after,
+.story[data-story-stage='scale'] .sticky::after {
+  background: linear-gradient(270deg, color-mix(in srgb, var(--color-band) 75%, transparent), transparent 44%), linear-gradient(0deg, color-mix(in srgb, var(--color-band) 65%, transparent), transparent 18%);
+}
+
+.chapters {
+  position: relative;
+  pointer-events: none;
+  z-index: 2;
+  margin-top: -100svh;
+}
+
+.chapter {
+  min-height: 125svh;
+  display: flex;
+  align-items: center;
+  padding: calc(var(--header-height) + var(--space-8)) var(--page-padding-x) 110px;
+  scroll-margin-top: var(--header-height);
+  pointer-events: none;
+}
+
+.intro {
+  min-height: 110svh;
+}
+
+.chapter[data-story-stage='govern'] {
+  min-height: 155svh;
+}
+
+.chapterContent {
+  width: min(38vw, 490px);
+  min-width: 0;
+  pointer-events: auto;
+  margin-inline: max(0px, calc((100vw - var(--max-width)) / 2));
+}
+
+.alignRight .chapterContent {
+  margin-right: max(0px, calc((100vw - var(--max-width)) / 2));
+  margin-left: auto;
+}
+
+.chapterContent > * {
+  position: relative;
+  z-index: 2;
+}
+
+.hero {
+  position: relative;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+.hero > :first-child {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.hero > :global(.container) {
+  width: 100%;
+  padding: 0;
+}
+
+.hero :global([data-copy]) {
+  max-width: none;
+}
+
+.titleAccent {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.08em;
+  color: var(--stage-scale-on-dark);
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  color: var(--story-accent);
+  font: 600 var(--text-xs)/1.4 var(--font-mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.eyebrow::before {
+  content: '';
+  width: 25px;
+  height: 1px;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.chapter h2 {
+  color: var(--color-text-inverse);
+  font-size: clamp(2.75rem, 4.6vw, 4.6rem);
+  font-weight: 680;
+  letter-spacing: -.052em;
+  line-height: 1.01;
+  text-wrap: balance;
+}
+
+.chapterBody {
+  max-width: 450px;
+  margin-top: var(--space-6);
+  color: var(--color-text-inverse-muted);
+  font-size: var(--text-lg);
+  line-height: 1.58;
+  text-wrap: pretty;
+}
+
+.chapterBody strong {
+  color: var(--color-text-inverse);
+  font-weight: 550;
+}
+
+.chapterActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.microNote {
+  color: var(--color-text-inverse-muted);
+  font: 500 var(--text-xs)/1.6 var(--font-mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+  color: var(--color-text-inverse-muted);
+  font: 500 var(--text-xs)/1.5 var(--font-mono);
+}
+
+.facts span {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.facts span::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: var(--story-accent);
+}
+
+.sceneWrap {
+  position: absolute;
+  z-index: 1;
+  top: 12vh;
+  bottom: 11vh;
+  left: 38%;
+  right: 3.5%;
+  transition: left .9s ease, right .9s ease;
+}
+
+.visualLeft {
+  left: 3.5%;
+  right: 41%;
+}
+
+.scenes,
+.sceneLayer,
+.scene {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.sceneLayer {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateY(24px) scale(.975);
+  transform-origin: center;
+  transition: opacity .65s ease, transform .85s ease;
+  pointer-events: none;
+}
+
+.sceneLayer[data-active='true'] {
+  opacity: 1;
+  transform: none;
+}
+
+.storyCaption {
+  position: absolute;
+  z-index: 4;
+  top: calc(var(--header-height) + var(--space-4));
+  right: var(--page-padding-x);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-inverse-muted);
+  font: 500 var(--text-xs)/1.4 var(--font-mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.storyCaption::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--story-accent);
+}
+
+.progress {
+  position: absolute;
+  z-index: 5;
+  bottom: 27px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: min(520px, 58vw);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-overlay-strong);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-band) 84%, transparent);
+  transform: translateX(-50%);
+}
+
+.progressStep {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: var(--target-min);
+  color: var(--color-text-inverse-muted);
+  font: 550 var(--text-xs)/1 var(--font-mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.progressStep:hover,
+.progressStep[data-active='true'] {
+  color: var(--story-accent);
+}
+
+.progressDot {
+  width: 6px;
+  height: 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+}
+
+.progressStep[data-active='true'] .progressDot {
+  background: currentColor;
+}
+
+.motionToggle {
+  pointer-events: auto;
+  position: absolute;
+  z-index: 5;
+  right: var(--page-padding-x);
+  bottom: 27px;
+  min-height: var(--target-min);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  color: var(--color-text-inverse-muted);
+  background: transparent;
+  cursor: pointer;
+  font: 500 var(--text-xs)/1.4 var(--font-mono);
+}
+
+.motionToggle:hover {
+  color: var(--color-text-inverse);
+}
+
+.storyEnd {
+  height: 1px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* SVG palette. Decorative nodes are intentionally lower contrast than HTML copy. */
+.sceneLabel {
+  fill: var(--color-text-inverse-muted);
+  font: 600 10px var(--font-mono);
+  letter-spacing: 1.3px;
+}
+
+.glass {
+  fill: var(--color-band-raised);
+  stroke: var(--color-text-inverse-muted);
+  stroke-opacity: .55;
+}
+
+.glassTitle {
+  fill: var(--color-text-inverse);
+  font: 500 25px var(--font-sans);
+}
+
+.accentFill { fill: var(--story-accent); }
+.accentStroke { stroke: var(--story-accent); }
+.coreAmbient { fill: var(--color-link); opacity: .12; }
+.core { fill: url(#story-core-gradient); }
+.coreStopLight { stop-color: var(--stage-scale-on-dark); }
+.coreStopMid { stop-color: var(--color-link); }
+.coreStopDark { stop-color: var(--color-midnight-light); }
+.coreMark { stroke: var(--color-text-inverse); }
+.coreLabel { fill: var(--stage-scale-on-dark); font: 600 10px var(--font-mono); letter-spacing: 1.5px; }
+.dormantLinks { stroke: var(--color-text-inverse-muted); stroke-opacity: .45; }
+.dormantNodes { fill: var(--color-band-raised); stroke: var(--color-text-inverse-muted); stroke-opacity: .5; }
+.dormantLabels { fill: var(--color-text-inverse-muted); font: 500 10px var(--font-mono); letter-spacing: .7px; }
+.shadowColor { flood-color: var(--color-band); }
+
+.infoPanel,
+.workflowPanel,
+.governPanel {
+  fill: var(--color-band-raised);
+  stroke: var(--story-accent);
+  stroke-opacity: .6;
+}
+
+.code {
+  fill: var(--color-text-inverse-muted);
+  font: 500 12px var(--font-mono);
+}
+
+.layerTop { fill: url(#story-layer-gradient); stroke: var(--story-accent); }
+.layerEdge { fill: var(--color-band-raised); stroke: var(--story-accent); stroke-opacity: .65; }
+.layerStopLight { stop-color: var(--color-band-raised); }
+.layerStopDark { stop-color: var(--color-band); }
+.layerTitle { fill: var(--color-text-inverse); font: 650 20px var(--font-sans); }
+.cardFill { fill: var(--color-band-raised); }
+.cardStroke { stroke: var(--color-text-inverse-muted); stroke-opacity: .6; }
+.cardKicker { fill: var(--color-text-inverse-muted); font: 500 10px var(--font-mono); letter-spacing: .7px; }
+.cardTitle { fill: var(--color-text-inverse); font: 650 17px var(--font-sans); }
+.cardDetail { fill: var(--color-text-inverse-muted); font: 500 10px var(--font-mono); }
+.card-green .cardStroke { stroke: var(--stage-build-on-dark); stroke-opacity: .75; }
+.card-violet .cardStroke { stroke: var(--stage-govern-on-dark); stroke-opacity: .75; }
+.greenFill { fill: var(--stage-build-on-dark); }
+.greenStroke { stroke: var(--stage-build-on-dark); }
+.greenStrokeMuted { stroke: var(--stage-build-on-dark); stroke-opacity: .65; }
+.violetFill { fill: var(--stage-govern-on-dark); }
+.violetStroke { stroke: var(--stage-govern-on-dark); }
+.violetStrokeMuted { stroke: var(--stage-govern-on-dark); stroke-opacity: .65; }
+.policyCard { fill: var(--color-band-raised); stroke: var(--stage-govern-on-dark); stroke-width: 1.5; }
+.codeMuted { fill: var(--color-text-inverse-muted); font: 500 12px var(--font-mono); }
+.evaluatingBadge { fill: var(--color-band-raised); stroke: var(--stage-govern-on-dark); stroke-opacity: .5; }
+.evaluatingText { fill: var(--stage-govern-on-dark); font: 600 10px var(--font-mono); letter-spacing: 1px; }
+.permitBadge { fill: var(--color-band-raised); stroke: var(--stage-build-on-dark); }
+.permitText { fill: var(--stage-build-on-dark); font: 600 10px var(--font-mono); letter-spacing: 1px; }
+.trace rect { fill: var(--color-band-raised); stroke: var(--stage-build-on-dark); stroke-opacity: .65; }
+.traceLabel { fill: var(--stage-build-on-dark); font: 600 10px var(--font-mono); letter-spacing: 1px; }
+.traceCode { fill: var(--color-text-inverse-muted); font: 500 12px var(--font-mono); }
+.accountPanel { fill: var(--color-band-raised); stroke: var(--stage-scale-on-dark); }
+.accountTitle { fill: var(--color-text-inverse); font: 650 18px var(--font-sans); }
+.accountLinks { stroke: var(--stage-scale-on-dark); stroke-opacity: .65; }
+.workstreamCard { fill: var(--color-band-raised); stroke: var(--stage-scale-on-dark); stroke-opacity: .65; }
+.workstreamTitle { fill: var(--color-text-inverse); font: 650 21px var(--font-sans); }
+.inherited { fill: var(--stage-build-on-dark); font: 500 10px var(--font-mono); }
+.contractPanel { fill: var(--color-band-raised); stroke: var(--stage-scale-on-dark); stroke-opacity: .65; }
+
+/* The existing constellation keeps its own pause control; only its geometry is adapted to the story viewport. */
+.heroBackdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.backgroundControl :global([data-motion]) button {
+  position: absolute;
+  z-index: 5;
+  right: var(--page-padding-x);
+  bottom: 76px;
+  pointer-events: auto;
+  pointer-events: auto;
+}
+@media (min-width: 1280px) {
+  .chapterContent {
+    width: min(35vw, 490px);
+  }
+}
+
+@media (max-width: 1100px) {
+  .chapterContent {
+    width: 39vw;
+  }
+
+  .sceneWrap {
+    left: 42%;
+    right: 1%;
+  }
+
+  .visualLeft {
+    left: 1%;
+    right: 43%;
+  }
+
+  .progress {
+    width: 54vw;
+  }
+}
+
+@media (max-width: 820px) {
+  .sticky {
+    min-height: 600px;
+  }
+
+  .sticky::before {
+    mask-image: none;
+    opacity: .4;
+  }
+
+  .sticky::after,
+  .story[data-story-stage='build'] .sticky::after,
+  .story[data-story-stage='scale'] .sticky::after {
+    background: linear-gradient(0deg, var(--color-band) 4%, color-mix(in srgb, var(--color-band) 94%, transparent) 28%, transparent 63%);
+  }
+
+  .sceneWrap,
+  .visualLeft {
+    top: 9vh;
+    bottom: auto;
+    left: 3%;
+    right: 3%;
+    height: 53vh;
+  }
+
+  .chapter,
+  .intro,
+  .chapter[data-story-stage='govern'] {
+    min-height: 115svh;
+    align-items: flex-end;
+    padding: 54vh var(--page-padding-x) 17vh;
+  }
+
+  .chapter[data-story-stage='govern'] {
+    min-height: 150svh;
+  }
+
+  .chapterContent,
+  .alignRight .chapterContent {
+    width: 100%;
+    max-width: 580px;
+    margin: 0 auto;
+  }
+
+  .chapter h2 {
+    font-size: clamp(2.5rem, 10vw, 3.6rem);
+  }
+
+  .chapterBody {
+    margin-top: var(--space-4);
+    font-size: var(--text-base);
+    line-height: 1.5;
+  }
+
+  .chapterActions {
+    margin-top: var(--space-4);
+  }
+
+  .microNote,
+  .facts {
+    display: none;
+  }
+
+  .storyCaption {
+    display: none;
+  }
+
+  .progress {
+    top: calc(var(--header-height) + var(--space-2));
+    bottom: auto;
+    width: calc(100% - var(--space-8));
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .progressStep {
+    font-size: 0;
+  }
+
+  .progressStep[data-active='true'] {
+    font-size: var(--text-xs);
+  }
+
+  .motionToggle {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .sceneWrap,
+  .visualLeft {
+    top: 10vh;
+    left: 0;
+    right: 0;
+    height: 43vh;
+  }
+
+  .chapter,
+  .intro,
+  .chapter[data-story-stage='govern'] {
+    padding-top: 48vh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sceneWrap,
+  .sceneLayer {
+    transition: none;
+  }
+}
+
+.story[data-story-motion='static'] .sceneWrap,
+.story[data-story-motion='static'] .sceneLayer {
+  transition: none;
+}

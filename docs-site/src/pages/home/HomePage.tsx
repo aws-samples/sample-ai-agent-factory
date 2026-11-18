@@ -5,11 +5,9 @@ import { Button } from '../../components/Button';
 import { Callout } from '../../components/Callout';
 import { Card } from '../../components/Card';
 import { ExternalLink } from '../../components/ExternalLink';
-import { PageHeader } from '../../components/PageHeader';
-import { PageMeta } from '../../components/PageMeta';
+
 import { SectionHeading } from '../../components/SectionHeading';
 import { StageBadge } from '../../components/StageBadge';
-import { StageJourney } from '../../components/StageJourney';
 import { FactStat } from '../../components/StatTile';
 import { personas, projects, type PersonaIcon } from '../../content/data';
 import { FACT_LABELS, getFacts } from '../../content/facts';
@@ -17,9 +15,8 @@ import { blob, REPO_URL } from '../../content/links';
 import { PATHS, projectPath } from '../../paths';
 import { STAGE_ICONS } from '../../stage';
 import { CapabilityStack } from './CapabilityStack';
+import { JourneyStory } from './JourneyStory';
 import styles from './HomePage.module.css';
-
-const BASE_URL = import.meta.env.BASE_URL || '/';
 
 const Constellation = lazy(() => import('../../components/Constellation'));
 
@@ -48,10 +45,6 @@ function HeroBackdrop() {
   );
 }
 
-/** Same wording as the atlas figure on the Architecture page; project names match the SVG labels. */
-const ATLAS_ALT =
-  'Agentic AI Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
-
 /** Role icons for the persona cards (always rendered aria-hidden beside the role name). */
 const PERSONA_ICONS: Record<PersonaIcon, LucideIcon> = {
   server: Server,
@@ -64,48 +57,7 @@ const PERSONA_ICONS: Record<PersonaIcon, LucideIcon> = {
 export function HomePage() {
   return (
     <div className={styles.page}>
-      <PageMeta
-        title="Agentic AI Factory: enterprise agentic AI samples on AWS"
-        description="Four complementary AWS samples for learning, building, governing and scaling agentic AI with Amazon Bedrock and Amazon Bedrock AgentCore, compared by stage, regions, deploy time and cost."
-        titleIsFull
-      />
-
-      <PageHeader
-        align="center"
-        className={styles.hero}
-        title={
-          <>
-            Agentic AI <span className={styles.titleAccent}>Factory</span>
-          </>
-        }
-        lead="Enterprise samples for building, governing, and operating agentic AI on AWS with Amazon Bedrock and Amazon Bedrock AgentCore."
-        backdrop={<HeroBackdrop />}
-        meta={<StageJourney label="Journey stages" />}
-        actions={
-          <>
-            <Button to={PATHS.whichProject} iconEnd={<ArrowRight size={18} />}>
-              Find your project
-            </Button>
-            <Button to={PATHS.start} variant="secondary">
-              Get started
-            </Button>
-          </>
-        }
-      />
-
-      {/* Atlas: desktop only; the hero journey strip covers narrower screens */}
-      <section className={`${styles.band} ${styles.bandDark} on-dark ${styles.atlas}`} aria-labelledby="atlas-heading">
-        <div className="container">
-          <SectionHeading id="atlas-heading" eyebrow="Atlas" title="One journey, four starting points" align="center" />
-          <img
-            className={styles.atlasImage}
-            src={`${BASE_URL}repository-atlas-journey.svg`}
-            alt={ATLAS_ALT}
-            width="1200"
-            height="700"
-          />
-        </div>
-      </section>
+      <JourneyStory backdrop={<HeroBackdrop />} />
 
       {/* Project tiles: the decision matrix */}
       <section className={styles.band} aria-labelledby="tiles-heading">
