@@ -62,9 +62,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GateError, parseAllowlist } from "./npm-audit-allowlist.mjs";
 
 export const SCRIPT_RE = /\.(?:m?js|cjs)$/i;
-const HTML_RE = /\.x?html?$/i;
+const HTML_RE = /\.html?$/i;
 // XML documents (SVG included) can carry XHTML/SVG script and are judged as documents, never as inert text.
-const XML_RE = /\.(?:svg|xml|xsl|xslt|rss|atom)$/i;
+const XML_RE = /\.(?:svg|xml|xsl|xslt|rss|atom|xhtml|xht)$/i;
 // Inert data a browser does not run: textual kinds are tripwire-scanned, binary kinds are accepted as is.
 const INERT_TEXT_RE = /\.(?:css|json|webmanifest|txt|map|ts|md|vtt|csv)$/i;
 const INERT_BINARY_RE = /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|pdf|mp4|webm|mp3|ogg|wav)$/i;
@@ -383,6 +383,14 @@ const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp", "noscri
 const REFUSED_TAGS = new Set(["iframe", "frame", "frameset", "object", "embed", "applet", "base", "portal", "fencedframe"]);
 // SVG animation can rewrite an attribute (an anchor's href) into something executable after the fact.
 const SVG_ANIMATION = new Set(["animate", "set", "animatemotion", "animatetransform", "animatecolor", "discard"]);
+// Start tags that make a browser leave foreign content (HTML Standard, "in foreign content": the svg
+// element is popped and the tag is parsed as HTML). <font> breaks out only with color/face/size; refused whole.
+const FOREIGN_BREAKOUT = new Set([
+  "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div", "dl", "dt", "em", "embed", "font", "h1", "h2", "h3", "h4", "h5", "h6",
+  "head", "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s", "small", "span", "strong", "strike", "sub",
+  "sup", "table", "tt", "u", "ul", "var",
+]);
+const UTF8_FATAL = new TextDecoder("utf-8", { fatal: true });
 // Every JavaScript MIME type essence a browser executes (HTML Standard), plus "module" and the empty type.
 const JS_MIME = new Set([
   "", "module", "application/ecmascript", "application/javascript", "application/x-ecmascript", "application/x-javascript", "text/ecmascript",
@@ -439,6 +447,30 @@ export function refuseAttributes(name, attrs, label) {
 }
 
 /**
+ * Decode a document's bytes the only way this gate can reason about them: valid UTF-8 with no C0 control
+ * character other than tab, LF, FF and CR. ESC (which ISO-2022-JP uses to re-shape ASCII into other
+ * characters) and a UTF-16 byte order mark both fail, so no encoding switch can make a browser read
+ * these bytes as different markup; scanDocument() additionally refuses any non-UTF-8 charset declaration.
+ */
+export function decodeDocument(bytes, label) {
+  let text;
+  try {
+    text = UTF8_FATAL.decode(bytes);
+  } catch {
+    throw new GateError(`${label}: not valid UTF-8; refused`);
+  }
+  const control = /[\u0000-\u0008\u000b\u000e-\u001f]/.exec(text);
+  if (control) throw new GateError(`${label}: contains the control character U+${control[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}; refused`);
+  return text;
+}
+
+/** The charset a <meta http-equiv="content-type"> content declares, lower-cased, or null when none. */
+const charsetOf = (content) => {
+  const match = /charset[ \t\n\f\r]*=[ \t\n\f\r]*["']?([^"'; \t\n\f\r]*)/i.exec(content);
+  return match ? match[1].toLowerCase() : null;
+};
+
+/**
  * Tokenise an HTML document (or, with xml: true, an XML document such as SVG) conservatively. Returns
  * { scripts: [{ attrs, body, foreign }], preloads: string[], refreshes: string[] }, where `foreign` marks
  * an SVG or XML script element (its type comes from `type` alone). Refuses: comments holding
@@ -483,13 +515,23 @@ export function scanDocument(text, label, { xml = false } = {}) {
       if (!xml || !lower.startsWith("<?xml", lt) || !asciiWs.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
       const end = text.indexOf("?>", lt);
       if (end === -1) throw new GateError(`${label}: unterminated XML prolog`);
+      // The bytes were read as UTF-8; the declaration may not claim another encoding.
+      const encoding = /encoding[ \t\n\f\r]*=[ \t\n\f\r]*(?:"([^"]*)"|'([^']*)')/i.exec(text.slice(lt, end));
+      if (encoding && !/^utf-?8$/i.test(encoding[1] ?? encoding[2] ?? "")) {
+        throw new GateError(`${label}: XML declaration encoding ${JSON.stringify(encoding[1] ?? encoding[2])}; only UTF-8 is accepted`);
+      }
       i = end + 2;
       continue;
     }
     if (text[lt + 1] === "/") {
       const endTag = /^<\/([a-zA-Z][a-zA-Z0-9:_-]*)[ \t\n\f\r]*>/.exec(text.slice(lt, lt + 80));
       if (!endTag) throw new GateError(`${label}: unsupported end tag at offset ${lt}`);
-      if (endTag[1].toLowerCase() === "svg" && svgDepth > 0) svgDepth -= 1;
+      const endName = endTag[1].toLowerCase();
+      // "</p>" and "</br>" are the two end tags that make a browser leave foreign content.
+      if (!xml && svgDepth > 0 && (endName === "p" || endName === "br")) {
+        throw new GateError(`${label}: </${endName}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
+      }
+      if (endName === "svg" && svgDepth > 0) svgDepth -= 1;
       i = lt + endTag[0].length;
       continue;
     }
@@ -524,6 +566,15 @@ export function scanDocument(text, label, { xml = false } = {}) {
     // In the "in select" insertion mode a browser ignores <style>, <title>, <xmp>, <noscript>, <noembed> and
     // <noframes> start tags but still runs <script>, so "<select><style><script>" is not raw text to it.
     if (name === "select") throw new GateError(`${label}: <select> is refused (a parsing context in which raw-text start tags are ignored)`);
+    // <template> content has its own insertion modes ("<template><col>" enters "in column group", where a
+    // <style> start tag is ignored) and "</template>" leaves them, so a script after it can run while this
+    // scanner still believes it is inside raw text. Not modelled; refused. No shipped page uses it.
+    if (name === "template") throw new GateError(`${label}: <template> is refused (its insertion modes are not modelled)`);
+    // Inside <svg> in HTML, these start tags make the browser pop the svg element and parse HTML again
+    // (foreign-content breakout), which this depth counter cannot follow; refused.
+    if (!xml && svgDepth > 0 && FOREIGN_BREAKOUT.has(name)) {
+      throw new GateError(`${label}: <${name}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
+    }
     if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
     if (name === "svg" && !selfClosing && !xml) svgDepth += 1;
     // Raw-text rules are an HTML-parser notion: not in XML, and not inside <svg>, where a <style> or a
@@ -541,6 +592,16 @@ export function scanDocument(text, label, { xml = false } = {}) {
         const href = attrs.get("href");
         if (!isNonEmptyString(href)) throw new GateError(`${label}: a script preload without href`);
         out.preloads.push(href);
+      }
+    }
+    if (name === "meta") {
+      // The bytes were read as UTF-8; a declaration of any other encoding would let a browser read them as
+      // different markup (ISO-2022-JP re-shapes ASCII after an ESC). Only UTF-8 may be declared.
+      const declared = attrs.has("charset")
+        ? semantic(attrs, "charset")
+        : semantic(attrs, "http-equiv") === "content-type" ? charsetOf(decodeEntities(attrs.get("content") ?? "")) : null;
+      if (declared !== null && declared !== "utf-8" && declared !== "utf8") {
+        throw new GateError(`${label}: <meta> declares the charset ${JSON.stringify(declared)}; only UTF-8 is accepted`);
       }
     }
     if (name === "meta" && semantic(attrs, "http-equiv") === "refresh") {
@@ -595,7 +656,7 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
   for (const rel of files) {
     if (!HTML_RE.test(rel)) continue;
     result.documents += 1;
-    const doc = scanDocument(readFileSync(join(dir, rel), "utf8"), tag(rel));
+    const doc = scanDocument(decodeDocument(readFileSync(join(dir, rel)), tag(rel)), tag(rel));
     for (const { attrs, body, foreign } of doc.scripts) {
       // The type the browser acts on (HTML Standard "prepare the script element"): `type` when present
       // (even empty); else `language` as text/<language> when it is non-empty; else JavaScript. An SVG
@@ -682,8 +743,8 @@ export function judgeOutput({ dir, chunkHashes, trust, publicDir, base, packages
     const kind = inertKind(rel);
     if (kind === "html") continue; // judged below, once every script is known
     if (kind === "xml") {
-      // SVG, sitemaps, feeds: an XML document a browser may render natively; it may carry no script at all.
-      const text = written().toString("utf8");
+      // SVG, XHTML, sitemaps, feeds: an XML document a browser may render natively; it may carry no script at all.
+      const text = decodeDocument(written(), `${label}${rel}`);
       const doc = scanDocument(text, `${label}${rel}`, { xml: true });
       if (doc.scripts.length > 0) throw new GateError(`${label}${rel} is an XML document carrying a <script>; refused`);
       tripwire(`${label}${rel}`, text, packages);

