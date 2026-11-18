@@ -120,6 +120,10 @@ test("module ids are attributed to the package NAMED in their installed director
   // never be rewritten and collapsed into the first-party root. Such ids (and control characters) are refused.
   assert.match(pkg(`${ROOT}/node_modules/picomatch/..\\..\\src\\payload.mjs`).why, /contains a backslash/);
   assert.match(pkg(`${ROOT}/node_modules/picomatch/lib\u0001/x.js`).why, /contains a control character/);
+  // "?" is a filename character too: a query is only a suffix that does not continue as a path, so a declared
+  // manifest under "vendor?/" can never be skipped by reading the id as "…/host/vendor" plus a query.
+  assert.match(pkg(`${ROOT}/node_modules/host/vendor?/picomatch/index.js`).why, /question mark that is part of a file or directory name/);
+  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/index.js?commonjs-exports`).name, "picomatch"); // a real query still reads as one
   assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/vendor/picomatch/index.js`).name, "@aws-amplify/core"); // embedded copy: the shipping package
   // No readable manifest name at any boundary establishes no identity: the label is never trusted (an alias
   // directory holding the allowlisted package must not pass as its label when its manifest is unreadable).
@@ -220,6 +224,7 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/picomatch/dist/node_modules/benign/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*benign\/index\.js \(declares itself benign\)$/);
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/react/vendor/picomatch/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*vendor\/picomatch\/index\.js \(a vendored copy declaring itself picomatch, shipped inside react\)$/);
   throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/picomatch/..\\..\\src\\payload.mjs`]]]), /contains a backslash/); // never rewritten into the first-party root
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/host/vendor?/picomatch/index.js`]]]), /question mark that is part of a file or directory name/);
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
@@ -972,6 +977,20 @@ test("a real recorded host package shipping a declared vendor copy (host/vendor/
     const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
     assert.ok(outcome instanceof GateError && /allowlist premise/.test(outcome.message), `the gate did not fail on the vendored copy:\n${lines.join("\n")}`);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*host\/vendor\/picomatch\/.* \(a vendored copy declaring itself picomatch, shipped inside host\)/.test(line)), lines.join("\n"));
+    // The same copy under a directory literally named "vendor?": whether Vite resolves the import or not, the build
+    // never passes the gate — a "?" that continues as a path is refused, never read as a query onto "host/vendor".
+    const appQ = join(dir, "appQ");
+    miniProject(appQ, nodeModules, ["react", "host"], { publicScript: false, farm: true });
+    const hostQ = join(appQ, "node_modules", "host");
+    mkdirSync(join(hostQ, "vendor?"), { recursive: true });
+    writeFileSync(join(hostQ, "package.json"), JSON.stringify({ name: "host", version: "1.0.0", type: "module", main: "index.js" }));
+    writeFileSync(join(hostQ, "index.js"), 'import pm from "./vendor?/picomatch/index.js";\npm("a*");\nexport default pm;\n');
+    cpSync(realpathSync(join(nodeModules, "picomatch")), join(hostQ, "vendor?", "picomatch"), { recursive: true });
+    writeFileSync(join(appQ, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/host": { version: "1.0.0" } } }));
+    const linesQ = [];
+    const outcomeQ = await run(argvFor(dir, appQ), linesQ).then(() => null, (error) => error);
+    assert.ok(outcomeQ instanceof Error, `the gate passed a build with a "vendor?" directory:\n${linesQ.join("\n")}`);
+    if (outcomeQ instanceof GateError) assert.match(outcomeQ.message, /question mark that is part of a file or directory name|allowlist premise/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

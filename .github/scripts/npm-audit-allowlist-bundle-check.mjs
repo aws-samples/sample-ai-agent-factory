@@ -185,7 +185,15 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
   if (sep !== "\\" && id.includes("\\")) return { kind: "unknown", why: `module id ${JSON.stringify(id)} contains a backslash, a filename character on this platform; refused` };
   if (/[\u0000-\u001f\u007f]/.test(nul ? id.slice(1) : id)) return { kind: "unknown", why: `module id ${JSON.stringify(id)} contains a control character; refused` };
   const bare = toPosix(nul ? id.slice(1) : id);
-  const path = posix.normalize(bare.split("?")[0]);
+  // "?" is a filename character on POSIX. A suffix is read as a Vite/Rollup query (…?commonjs-proxy) only when
+  // nothing after it continues as a path and no file with the literal name exists; a "?" inside a directory
+  // name (…/vendor?/picomatch/…) or a literally named file is refused rather than guessed at, so a declared
+  // manifest behind such a name can never go unread.
+  const query = bare.indexOf("?");
+  if (query !== -1 && (bare.slice(query + 1).includes("/") || existsSync(bare))) {
+    return { kind: "unknown", why: `module id ${JSON.stringify(id)} contains a question mark that is part of a file or directory name, not a query; refused` };
+  }
+  const path = posix.normalize(query === -1 ? bare : bare.slice(0, query));
   if (path.includes(NODE_MODULES)) {
     // npm's installation boundaries are what its lockfiles record, so the validated, reconciled lockfiles of
     // the install root (the directory above the first node_modules) decide. Walking the boundaries from the
