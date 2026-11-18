@@ -368,8 +368,10 @@ jobs:
         run: npm ci
       # Full `npm audit --audit-level=high` (runtime AND build/dev dependencies), with a narrow expiring
       # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json). The
-      # gates' own self-tests run first so a regression in a gate can never pass as a clean audit.
+      # gates' own self-tests run first so a regression in a gate can never pass as a clean audit; they
+      # run from the frontend because the bundle-check cases build real mini projects with its Vite.
       - name: Audit gate self-test
+        working-directory: Agentic-ai-self-service/frontend
         run: |
           node --test \
             "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs" \
@@ -379,14 +381,15 @@ jobs:
         run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
       # The allowlist's premise is that an exempted advisory lives only in build tooling. npm's dev/prod
       # classification cannot prove that (application source importing a dev-only transitive package is
-      # bundled all the same), so the emitted module graph is checked: a source-mapped build lists every
-      # bundled module by path, and none may come from an allowlisted package. Built into a scratch
-      # directory so the production bundle verified below is untouched.
+      # bundled all the same), so the real module graph is checked: the project's own Vite build runs into
+      # a scratch directory with a recording plugin, every chunk's resolved modules are attributed to their
+      # package, every written script must be a chunk or a verbatim public/ copy, and no allowlisted package
+      # may appear. Modules anywhere in this repository are first-party; anything else fails closed.
       - name: Allowlisted advisories must be absent from the shipped bundle
         working-directory: Agentic-ai-self-service/frontend
         run: |
-          ./node_modules/.bin/vite build --sourcemap --outDir "$RUNNER_TEMP/bundle-graph" --emptyOutDir
-          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" --dist "$RUNNER_TEMP/bundle-graph"
+          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" \
+            --out "$RUNNER_TEMP/bundle-graph" --first-party-root "$GITHUB_WORKSPACE"
       - name: Lint
         working-directory: Agentic-ai-self-service/frontend
         run: npx eslint .

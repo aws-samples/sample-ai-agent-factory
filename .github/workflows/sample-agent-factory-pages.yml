@@ -90,7 +90,8 @@ jobs:
 
       # Same gate as `npm run audit` (npm audit --audit-level=high) plus the repository's narrow expiring
       # allowlist for advisories with no patched release (.github/npm-audit-allowlist.json). The gates'
-      # own self-tests run first so a regression in a gate can never pass as a clean audit.
+      # own self-tests run first so a regression in a gate can never pass as a clean audit (the
+      # bundle-check cases build real mini projects with this site's Vite).
       - name: Audit gate self-test
         run: |
           node --test \
@@ -101,13 +102,15 @@ jobs:
         run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
 
       # The allowlist's premise is that an exempted advisory lives only in build tooling, which npm's
-      # dev/prod classification cannot prove. A source-mapped client build (the only bundle a browser
-      # loads; the SSR bundle runs at build time to prerender) lists every bundled module by path, and
-      # none may come from an allowlisted package. Built into a scratch directory, not dist/.
+      # dev/prod classification cannot prove. The site's own client build (the only bundle a browser loads;
+      # the SSR bundle runs at build time to prerender) is run into a scratch directory with a recording
+      # plugin: every chunk's resolved modules are attributed to their package, every written script must
+      # be a chunk or a verbatim copy from the public directory, and no allowlisted package may appear.
+      # Modules anywhere in this repository are first-party; anything else fails closed.
       - name: Allowlisted advisories must be absent from the shipped bundle
         run: |
-          ./node_modules/.bin/vite build --sourcemap --outDir "$RUNNER_TEMP/bundle-graph" --emptyOutDir
-          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" --dist "$RUNNER_TEMP/bundle-graph"
+          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" \
+            --out "$RUNNER_TEMP/bundle-graph" --first-party-root "$GITHUB_WORKSPACE"
 
       - name: TypeScript check
         run: npm run typecheck
