@@ -62,7 +62,7 @@ const allow = parseAllowlist(ALLOW_DOC, NOW);
 const trust = parseBundleTrust(ALLOW_DOC, ".");
 const ROOT = "/work/app";
 /** package.json names of the synthetic installs below, by directory label; anything else has no named package.json. */
-const NAMES = { picomatch: "picomatch", "picomatch/lib": "matcher-internal", react: "react", tinyglobby: "tinyglobby", "@scope/name": "@scope/name", matcher: "picomatch", "@aws-amplify/core": "@aws-amplify/core", mislabelled: "picomatch", benign: "benign", loose: "loose" };
+const NAMES = { picomatch: "picomatch", "picomatch/lib": "matcher-internal", react: "react", "react/vendor/picomatch": "picomatch", tinyglobby: "tinyglobby", "@scope/name": "@scope/name", matcher: "picomatch", "@aws-amplify/core": "@aws-amplify/core", mislabelled: "picomatch", benign: "benign", loose: "loose" };
 /** Directories whose package.json exists but carries no name (an npm installation never looks like this). */
 const NAMELESS = new Set(["aliasn", "strayn"]);
 const labelOf = (dir) => dir.slice(dir.lastIndexOf("/node_modules/") + "/node_modules/".length);
@@ -89,10 +89,10 @@ const graph = (chunkEntries, assets = [], over = {}) =>
 
 test("module ids are attributed to the package NAMED in their installed directory, or to first-party, virtual or unknown", () => {
   const pkg = (id) => classifyModule(id, ROOT, { trustedVirtual: trust.virtual, readManifest: stubManifest, readLock: stubLock });
-  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch", dir: "picomatch" });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch", dir: "picomatch", declares: ["matcher-internal"] }); // NAMES gives lib/ its own manifest
   // Ownership is npm's installation boundary: a nested manifest inside the installed package (NAMES says
   // picomatch/lib/package.json is named "matcher-internal") is never consulted and cannot re-attribute it.
-  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/scan.js`), { kind: "package", name: "picomatch", dir: "picomatch" });
+  assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/scan.js`), { kind: "package", name: "picomatch", dir: "picomatch", declares: ["matcher-internal"] }); // the inner name is carried, never the owner
   assert.deepEqual(pkg(`${ROOT}/node_modules/@scope/name/dist/index.js`), { kind: "package", name: "@scope/name", dir: "@scope/name" });
   assert.deepEqual(pkg(`${ROOT}/node_modules/.pnpm/picomatch@4.0.7/node_modules/picomatch/index.js`).name, "picomatch");
   assert.deepEqual(pkg(`${ROOT}/node_modules/vite/node_modules/picomatch/index.js`).name, "picomatch");
@@ -111,6 +111,8 @@ test("module ids are attributed to the package NAMED in their installed director
   // harmlessly named inner directory inside picomatch can displace the shipping package.
   assert.deepEqual(pkg(`${ROOT}/node_modules/react/dist/node_modules/matcher/index.js`), { kind: "package", name: "react", dir: "react", declares: ["picomatch"] });
   assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/dist/node_modules/benign/index.js`), { kind: "package", name: "picomatch", dir: "picomatch", declares: ["benign"] });
+  // A declared vendor copy anywhere inside the installation, not only under a node_modules segment, is carried too.
+  assert.deepEqual(pkg(`${ROOT}/node_modules/react/vendor/picomatch/index.js`), { kind: "package", name: "react", dir: "react", declares: ["picomatch"] });
   assert.match(pkg(`${ROOT}/node_modules/loose/index.js`).why, /loose declares itself loose but no lockfile records an installation containing it/);
   assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/vendor/picomatch/index.js`).name, "@aws-amplify/core"); // embedded copy: the shipping package
   // No readable manifest name at any boundary establishes no identity: the label is never trusted (an alias
@@ -210,6 +212,7 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   // package, and the allowlisted installation itself whatever its inner directory calls itself.
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/react/dist/node_modules/matcher/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*matcher\/index\.js \(a vendored copy declaring itself picomatch, shipped inside react\)$/);
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/picomatch/dist/node_modules/benign/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*benign\/index\.js \(declares itself benign\)$/);
+  assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/react/vendor/picomatch/index.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*vendor\/picomatch\/index\.js \(a vendored copy declaring itself picomatch, shipped inside react\)$/);
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
@@ -371,7 +374,11 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   throwsGate(() => scan('<svg xml:base="/other/"><rect/></svg>', { xml: true }), /xml:base/);
   // <use> clones referenced markup (handlers included) into the document: only a same-document fragment.
   throwsGate(() => scan('<svg><use href="/other-app/payload.svg#p"/></svg>'), /references another resource/);
-  throwsGate(() => scan('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="other.svg#p"/></svg>', { xml: true }), /references another resource/);
+  // In XML, attribute names are case-sensitive and XLink is a namespace, not the literal "xlink:" prefix: a
+  // lower-cased reading could validate a decoy HREF while the browser follows r:href. <use> is refused there.
+  throwsGate(() => scan('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="other.svg#p"/></svg>', { xml: true }), /<use> is refused in an XML document/);
+  throwsGate(() => scan('<svg xmlns="http://www.w3.org/2000/svg" xmlns:r="http://www.w3.org/1999/xlink"><use HREF="#safe" r:href="/other-app/payload.svg#p"/></svg>', { xml: true }), /<use> is refused in an XML document/);
+  throwsGate(() => scan('<svg xmlns="http://www.w3.org/2000/svg"><use href="#icon"/></svg>', { xml: true }), /<use> is refused in an XML document/);
   throwsGate(() => scan('<svg><use href="#a" xlink:href="#b"/></svg>'), /exactly one href/);
   throwsGate(() => scan("<svg><use/></svg>"), /exactly one href/);
   assert.equal(scan('<svg><use href="#icon"/><use xlink:href=" #icon2 "/></svg>').scripts.length, 0);
@@ -647,7 +654,9 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     put("logo.svg", '<?xml-stylesheet href="x.css"?><svg xmlns="http://www.w3.org/2000/svg"></svg>');
     throwsGate(() => check(), /processing instructions/);
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="other.svg#p"/></svg>');
-    throwsGate(() => check(), /references another resource/);
+    throwsGate(() => check(), /<use> is refused in an XML document/);
+    put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg" xmlns:r="http://www.w3.org/1999/xlink"><use HREF="#safe" r:href="/other-app/payload.svg#p"/></svg>');
+    throwsGate(() => check(), /<use> is refused in an XML document/);
     put("logo.svg", CLEAN_SVG);
     // Pinned public text that names the package by word still fails; non-word matches do not.
     const vendored = "// bundled copy of picomatch 4.0.7\n";
@@ -847,7 +856,7 @@ test("a real install whose nested package.json is named differently (picomatch/l
     await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
     // The deep CommonJS import is recorded through Vite's commonjs proxy ids (a NUL prefix and a ?commonjs-… query);
     // the directory label equals the package name here, so no "(installed as …)" suffix follows.
-    assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*node_modules\/picomatch\/lib\/scan\.js(?:\?[\w-]+)?$/.test(line)), lines.join("\n"));
+    assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*node_modules\/picomatch\/lib\/scan\.js(?:\?[\w-]+)? \(declares itself matcher-internal\)$/.test(line)), lines.join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -923,6 +932,31 @@ test("a real reverse-vendor layout (an allowlisted install shipping a harmlessly
     const lines = [];
     await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*dist\/node_modules\/benign\/.* \(declares itself benign\)/.test(line)), lines.join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a real recorded host package shipping a declared vendor copy (host/vendor/picomatch, no node_modules segment) FAILS the gate", async () => {
+  const { nodeModules } = viteProject();
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
+  try {
+    const app = join(dir, "app");
+    miniProject(app, nodeModules, ["react", "host"], { publicScript: false, farm: true });
+    // host is a recorded ESM package whose entry imports its own vendored copy of picomatch, which still declares
+    // itself picomatch in its package.json but sits under vendor/, not under a node_modules segment.
+    const host = join(app, "node_modules", "host");
+    mkdirSync(join(host, "vendor"), { recursive: true });
+    writeFileSync(join(host, "package.json"), JSON.stringify({ name: "host", version: "1.0.0", type: "module", main: "index.js" }));
+    // The call keeps the vendored code in the graph: a bare re-export of an unused namespace is tree-shaken away.
+    writeFileSync(join(host, "index.js"), 'import pm from "./vendor/picomatch/index.js";\npm("a*");\nexport default pm;\n');
+    cpSync(realpathSync(join(nodeModules, "picomatch")), join(host, "vendor", "picomatch"), { recursive: true });
+    writeFileSync(join(app, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/host": { version: "1.0.0" } } }));
+    writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
+    const lines = [];
+    const outcome = await run(argvFor(dir, app), lines).then(() => null, (error) => error);
+    assert.ok(outcome instanceof GateError && /allowlist premise/.test(outcome.message), `the gate did not fail on the vendored copy:\n${lines.join("\n")}`);
+    assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*host\/vendor\/picomatch\/.* \(a vendored copy declaring itself picomatch, shipped inside host\)/.test(line)), lines.join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

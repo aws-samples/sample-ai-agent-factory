@@ -225,6 +225,13 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
           if (named !== null && named !== identity) {
             return { kind: "unknown", why: `${dir} is recorded in the lockfile as ${identity} but its package.json is named ${named}` };
           }
+          // Named manifests in the directories between the module and this installation's root are vendored
+          // copies declaring themselves inside the installation (…/vendor/picomatch/package.json): further
+          // identities to check, while the installation stays the owner.
+          for (let ancestor = posix.dirname(path); ancestor.startsWith(`${dir}/`); ancestor = posix.dirname(ancestor)) {
+            const inner = readManifest(ancestor).name;
+            if (isNonEmptyString(inner) && !inner.startsWith(".") && inner !== identity && !declared.includes(inner)) declared.push(inner);
+          }
           return { kind: "package", name: identity, dir: label, ...(declared.length > 0 ? { declares: declared } : {}) };
         }
         if (named !== null) declared.push(named);
@@ -769,7 +776,11 @@ export function scanDocument(text, label, { xml = false } = {}) {
     if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
     if (name === "use") {
       // <use> clones the referenced markup, event handlers included, into this document: only a fragment of
-      // the document itself may be referenced, never another resource (judged or not).
+      // the document itself may be referenced, never another resource (judged or not). In XML, attribute
+      // names are case-sensitive and XLink is identified by namespace rather than by the literal "xlink:"
+      // prefix, so a lower-cased reading could validate a decoy while the browser follows another attribute;
+      // <use> is refused outright there (no shipped XML document carries one).
+      if (xml) throw new GateError(`${label}: <use> is refused in an XML document (its reference cannot be read without namespace resolution)`);
       const refs = ["href", "xlink:href"].filter((attr) => attrs.has(attr));
       if (refs.length !== 1) throw new GateError(`${label}: <use> must carry exactly one href or xlink:href; refused`);
       const ref = asciiTrim(decodeEntities(attrs.get(refs[0]) ?? ""));
