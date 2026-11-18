@@ -1189,11 +1189,12 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  // Every failure exits non-zero, GateError or not: rethrowing from a promise handler would make an ordinary
+  // build or filesystem error an unhandled rejection, which Node may report as a warning and exit 0 under
+  // --unhandled-rejections=warn|none; a gate that did not judge the artifact must never pass.
   main().catch((error) => {
-    if (error instanceof GateError) {
-      console.error(`npm-audit-allowlist-bundle-check: FAIL: ${error.message}`);
-      process.exit(1);
-    }
-    throw error;
+    if (error instanceof GateError) console.error(`npm-audit-allowlist-bundle-check: FAIL: ${error.message}`);
+    else console.error(`npm-audit-allowlist-bundle-check: ERROR: the check could not be completed\n${error?.stack ?? error}`);
+    process.exit(1);
   });
 }

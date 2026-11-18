@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { GateError, parseAllowlist } from "./npm-audit-allowlist.mjs";
 import {
@@ -1058,6 +1058,25 @@ test("external import edges are refused: a chunk may import only chunks of its o
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every failure of the CLI exits non-zero, GateError or not, whatever Node's unhandled-rejection mode", () => {
+  const script = resolve(fileURLToPath(new URL("./npm-audit-allowlist-bundle-check.mjs", import.meta.url)));
+  const scratch = mkdtempSync(join(tmpdir(), "bundle-check-cli-"));
+  try {
+    // A project directory that does not exist raises an ordinary error long before any GateError could; with
+    // --unhandled-rejections=warn or none a rethrow from the promise handler would have let Node exit 0.
+    for (const mode of ["warn", "none", "strict"]) {
+      const run = spawnSync(process.execPath, [script, "--out", join(scratch, "out"), "--project", join(scratch, "missing-project")], {
+        encoding: "utf8",
+        env: { ...process.env, NODE_OPTIONS: `--unhandled-rejections=${mode}` },
+      });
+      assert.equal(run.status, 1, `${mode}: ${run.stderr}`);
+      assert.match(run.stderr, /npm-audit-allowlist-bundle-check: (ERROR: the check could not be completed|FAIL:)/, mode);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

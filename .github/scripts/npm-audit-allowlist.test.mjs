@@ -2,14 +2,17 @@
 // Every case here is a way the gate could have passed something it must not (or failed something it must
 // pass); keep this file growing with the gate.
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  FULL_AUDIT_ARGS,
   GateError,
+  PROD_AUDIT_ARGS,
   checkNpmResult,
   evaluate,
   ghsaOf,
@@ -257,6 +260,7 @@ test("runNpmAudit: a failing, hanging or flooding npm is a failure, a clean one 
     fakeNpm,
     [
       "#!/bin/sh",
+      '[ -n "$FAKE_NPM_ARGV" ] && printf \'%s\\n\' "$@" > "$FAKE_NPM_ARGV"',
       'case "$FAKE_NPM_MODE" in',
       "  fail) echo boom >&2; exit 2 ;;",
       "  clean) printf '%s' \"$FAKE_NPM_STDOUT\"; exit 0 ;;",
@@ -268,7 +272,7 @@ test("runNpmAudit: a failing, hanging or flooding npm is a failure, a clean one 
     ].join("\n"),
   );
   chmodSync(fakeNpm, 0o755);
-  const saved = { PATH: process.env.PATH, FAKE_NPM_MODE: process.env.FAKE_NPM_MODE, FAKE_NPM_STDOUT: process.env.FAKE_NPM_STDOUT };
+  const saved = { PATH: process.env.PATH, FAKE_NPM_MODE: process.env.FAKE_NPM_MODE, FAKE_NPM_STDOUT: process.env.FAKE_NPM_STDOUT, FAKE_NPM_ARGV: process.env.FAKE_NPM_ARGV, npm_config_omit: process.env.npm_config_omit };
   process.env.PATH = `${dir}:${process.env.PATH}`;
   try {
     process.env.FAKE_NPM_MODE = "fail";
@@ -278,6 +282,17 @@ test("runNpmAudit: a failing, hanging or flooding npm is a failure, a clean one 
     const ok = runNpmAudit(["--omit=dev"]);
     assert.equal(ok.status, 0);
     assert.equal(parseReport(ok.stdout, 0).metadata.vulnerabilities.total, 0);
+    // The two real invocations spell out every dependency class and the exit-status rule, also when the
+    // environment carries an inherited omission (npm honours an explicit --include over any omit).
+    process.env.FAKE_NPM_ARGV = join(dir, "argv");
+    process.env.npm_config_omit = "dev";
+    runNpmAudit(FULL_AUDIT_ARGS);
+    assert.deepEqual(readFileSync(process.env.FAKE_NPM_ARGV, "utf8").trim().split("\n"), ["audit", "--json", ...FULL_AUDIT_ARGS]);
+    assert.ok(FULL_AUDIT_ARGS.includes("--include=dev") && FULL_AUDIT_ARGS.includes("--include=prod") && FULL_AUDIT_ARGS.includes("--audit-level=info"));
+    runNpmAudit(PROD_AUDIT_ARGS);
+    assert.deepEqual(readFileSync(process.env.FAKE_NPM_ARGV, "utf8").trim().split("\n"), ["audit", "--json", ...PROD_AUDIT_ARGS]);
+    assert.ok(PROD_AUDIT_ARGS.includes("--omit=dev") && !PROD_AUDIT_ARGS.includes("--include=dev") && PROD_AUDIT_ARGS.includes("--audit-level=info"));
+    delete process.env.FAKE_NPM_ARGV;
     process.env.FAKE_NPM_MODE = "hang";
     throwsGate(() => runNpmAudit([], { timeoutMs: 300 }), /ETIMEDOUT|terminated by signal/);
     process.env.FAKE_NPM_MODE = "flood";
@@ -289,6 +304,31 @@ test("runNpmAudit: a failing, hanging or flooding npm is a failure, a clean one 
     }
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("an inherited npm omission cannot narrow the full audit, and every failure of the CLI exits non-zero", { skip: process.platform === "win32" }, () => {
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), "npm-audit-allowlist.mjs");
+  // Live, from a real project (the CI jobs and the local chain run this test from the frontend and the docs
+  // site): with npm_config_omit=dev inherited from the environment, the explicit --include flags keep the
+  // full audit's dependency selection identical to the clean invocation.
+  if (existsSync("package.json") && existsSync("node_modules") && process.env.NPM_AUDIT_ALLOWLIST_LIVE !== "0") {
+    const saved = process.env.npm_config_omit;
+    try {
+      const first = runNpmAudit(FULL_AUDIT_ARGS);
+      const clean = parseReport(first.stdout, first.status).metadata.vulnerabilities;
+      process.env.npm_config_omit = "dev";
+      const second = runNpmAudit(FULL_AUDIT_ARGS);
+      const inherited = parseReport(second.stdout, second.status).metadata.vulnerabilities;
+      assert.deepEqual(inherited, clean);
+    } finally {
+      if (saved === undefined) delete process.env.npm_config_omit;
+      else process.env.npm_config_omit = saved;
+    }
+  }
+  // An ordinary error (here ENOENT on --input) is not a GateError; the CLI must still exit 1 and say so.
+  const run = spawnSync(process.execPath, [script, "--input", "/nonexistent/full.json", "--prod-input", "/nonexistent/prod.json"], { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: "--unhandled-rejections=warn" } });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /npm-audit-allowlist: ERROR: the check could not be completed/);
 });
 
 test("allowlist schema is strict and expiry is a UTC instant with a hard cutoff", () => {

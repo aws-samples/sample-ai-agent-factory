@@ -123,6 +123,16 @@ export function checkNpmResult(result, timeoutMs = NPM_TIMEOUT_MS) {
   return { stdout: result.stdout, status: result.status };
 }
 
+/**
+ * The two audits are invoked with every dependency class spelled out, so an `omit` inherited from .npmrc, from
+ * npm_config_omit or from NODE_ENV=production can never narrow the "full" audit (npm honours an explicit
+ * --include over any omit), and the production audit's selection is explicit too (runtime classes only).
+ * --audit-level=info pins npm's exit-status rule (1 whenever any vulnerability is reported) so an inherited
+ * audit-level cannot contradict the report/status reconciliation below.
+ */
+export const FULL_AUDIT_ARGS = ["--include=prod", "--include=dev", "--include=optional", "--include=peer", "--audit-level=info"];
+export const PROD_AUDIT_ARGS = ["--omit=dev", "--include=prod", "--include=optional", "--include=peer", "--audit-level=info"];
+
 /** Run `npm audit --json [extraArgs]` without a shell; the limits are parameters so the self-test can hit them. */
 export function runNpmAudit(extraArgs = [], { timeoutMs = NPM_TIMEOUT_MS, maxBuffer = NPM_MAX_BUFFER } = {}) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -331,9 +341,9 @@ export function main(argv = process.argv.slice(2)) {
     report = parseReport(readFileSync(args.input, "utf8"));
     prodReport = parseReport(readFileSync(args["prod-input"], "utf8"));
   } else {
-    const full = runNpmAudit();
+    const full = runNpmAudit(FULL_AUDIT_ARGS);
     report = parseReport(full.stdout, full.status);
-    const prod = runNpmAudit(["--omit=dev"]);
+    const prod = runNpmAudit(PROD_AUDIT_ARGS);
     prodReport = parseReport(prod.stdout, prod.status);
   }
 
@@ -360,13 +370,12 @@ export function main(argv = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  // Every failure exits non-zero, GateError or not: a gate that could not complete must never pass.
   try {
     main();
   } catch (error) {
-    if (error instanceof GateError) {
-      console.error(`npm-audit-allowlist: FAIL: ${error.message}`);
-      process.exit(1);
-    }
-    throw error;
+    if (error instanceof GateError) console.error(`npm-audit-allowlist: FAIL: ${error.message}`);
+    else console.error(`npm-audit-allowlist: ERROR: the check could not be completed\n${error?.stack ?? error}`);
+    process.exit(1);
   }
 }
