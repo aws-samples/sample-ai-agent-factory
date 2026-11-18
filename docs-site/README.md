@@ -7,6 +7,7 @@ Static, prerendered React + TypeScript + Vite site for the Agentic AI Factory re
 - Node.js 22.12 or newer locally (`.nvmrc` pins 24, which CI uses)
 - npm 10 or newer
 - The lockfile pins the audited build/test toolchain (Vite 7.3.7 and Vitest 4.1.12); CI audits development dependencies as well as production dependencies
+- `npm run audit` uses `scripts/audit.mjs` to fail on every high-severity advisory except the explicitly documented `GHSA-fc5q-39xc-vjpf` exception. That exception covers only the unpatched `picomatch` dependency used by the build toolchain and expires on 2027-01-31; remove it when a patched release is available. Any unrelated advisory fails the build.
 - Python 3 (for `npm run validate:static`)
 
 ## Setup
@@ -113,10 +114,20 @@ docs-site/
 
 The Home hero band carries an ambient constellation drawn on a `<canvas>`: drifting nodes in the four stage colours, edges that fade with distance, and an occasional pulse travelling along an edge. It is decorative only (`aria-hidden`), capped at 30 fps, makes no network requests and writes no storage.
 
-- **Loading.** `HomePage` passes `backdrop={<HeroBackdrop />}` to `PageHeader`. The backdrop lazily imports `src/components/Constellation.tsx` after first paint, so the prerendered HTML contains only an empty wrapper and the chunk never delays the largest contentful paint.
+- **Loading.** `HomePage` passes `backdrop={<HeroBackdrop />}` through `JourneyStory` to `PageHeader`. The backdrop lazily imports `src/components/Constellation.tsx` after first paint, so the prerendered HTML contains only an empty wrapper and the chunk never delays the largest contentful paint.
 - **Pause control.** A visible "Pause background" / "Play background" button (bottom-right of the band, `aria-pressed`) satisfies WCAG 2.2.2. The choice lasts for the page session (module scope, not storage). The animation also pauses while the hero is off-screen or the tab is hidden.
 - **Reduced motion.** With `prefers-reduced-motion: reduce` the component draws one static frame (`data-motion="static"`) and only animates if the visitor presses "Play background". The hero entrance animation in `PageHeader.module.css` likewise applies only under `prefers-reduced-motion: no-preference`.
 - **Disabling.** Remove the `backdrop` prop from the `PageHeader` call in `src/pages/home/HomePage.tsx`; nothing else depends on the component. The pure simulation lives in `src/components/constellation/` and is unit-tested with a seeded PRNG.
+
+### Homepage scroll story
+
+`src/pages/home/JourneyStory.tsx` adds the four-stage Learn → Build → Govern → Scale narrative before the existing project comparison. `StoryScenes.tsx` contains its decorative, token-coloured SVG illustrations. The existing source-backed project tiles, personas, capability stack, support notice and closing CTA remain below it.
+
+- **Native scrolling.** A sticky visual stage updates from each chapter's viewport position. There is no scroll-jacking, no fixed-time animation loop and no route change. Chapter links are normal in-page anchors; project CTAs use React Router links.
+- **SSR and no JavaScript.** The intro illustration and every chapter's semantic HTML prerender normally. JavaScript only switches the active illustration and scroll progress. Project content is never fetched.
+- **Reduced motion.** The operating-system preference disables scene transitions. A local "Pause story" control is also available on desktop; this is independent of the constellation's existing pause control.
+- **Mobile.** The illustration sits above the chapter copy, and the compact progress indicator stays under the site header rather than covering the CTA.
+- **Tests.** `tests/browser/journey-story.spec.ts` checks stage activation, anchor behavior, the project handoff, motion preferences and the motion toggle.
 
 ### Other motion
 

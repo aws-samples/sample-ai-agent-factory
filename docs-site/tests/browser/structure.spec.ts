@@ -55,7 +55,7 @@ test.describe('posture matrices keep icon and text alongside colour', () => {
   }
 });
 
-test.describe('home capability stack', () => {
+test.describe('home journey and capability stack', () => {
   test('exposes four posture dots per capability and a hidden sentence each', async ({ page }) => {
     await page.goto(href('/'));
     const stack = page.locator('[data-capability-stack]');
@@ -66,9 +66,9 @@ test.describe('home capability stack', () => {
     await expect(links).toHaveCount(10);
   });
 
-  test('the journey strip lists the four stages in order', async ({ page }) => {
+  test('the scroll story lists the four stages in order', async ({ page }) => {
     await page.goto(href('/'));
-    const items = page.locator('[data-stage-journey]').first().locator('li');
+    const items = page.locator('[data-stage-journey] [data-stage]');
     await expect(items).toHaveCount(4);
     expect(await items.evaluateAll((els) => els.map((el) => el.getAttribute('data-stage')))).toEqual([
       'learn',

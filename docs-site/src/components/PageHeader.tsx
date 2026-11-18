@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { JourneyStage } from '../content/data';
 import { STAGE_LABELS } from '../stage';
 import { HeaderGlow, type HeaderHue } from './HeaderGlow';
@@ -29,6 +30,8 @@ export interface PageHeaderProps {
    *  off. Only interactive descendants that opt back into pointer events (the pause control) are
    *  reachable. */
   backdrop?: ReactNode;
+  /** Optional viewport that owns the backdrop while the header supplies its content. */
+  backdropContainer?: HTMLElement | null;
   /** Hue of the default gradient backdrop when no `backdrop` is passed. Defaults to the stage, else blue. */
   hue?: HeaderHue;
   /** start: copy left-aligned (every hub page); center: copy centred (Home). */
@@ -60,6 +63,7 @@ export function PageHeader({
   actions,
   figure,
   backdrop,
+  backdropContainer,
   hue,
   align = 'start',
   variant = 'default',
@@ -76,7 +80,7 @@ export function PageHeader({
       data-variant={variant}
       data-stage={stage}
     >
-      <div className={styles.backdrop}>{backdrop !== undefined ? backdrop : <HeaderGlow hue={glowHue} />}</div>
+      <div className={styles.backdrop}>{backdrop !== undefined ? (backdropContainer ? createPortal(backdrop, backdropContainer) : backdrop) : <HeaderGlow hue={glowHue} />}</div>
       <div className={`container ${innerClass}`}>
         <div className={styles.copy} data-copy>
           {breadcrumbs && <div className={styles.breadcrumbs}>{breadcrumbs}</div>}
