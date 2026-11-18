@@ -387,11 +387,20 @@ const ENTITIES = {
 // of that set decodes to Latin-1 letters and symbols, which cannot change how a URL reads, and is left
 // literal here as unmodelled). Every other name needs its ";" to be a reference at all.
 const LEGACY_UNTERMINATED = new Set(["amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT", "nbsp"]);
+// HTML's numeric-reference remapping of the C1 range (the windows-1252 code points a browser substitutes).
+const C1_REMAP = {
+  0x80: "€", 0x82: "‚", 0x83: "ƒ", 0x84: "„", 0x85: "…", 0x86: "†", 0x87: "‡", 0x88: "ˆ", 0x89: "‰",
+  0x8a: "Š", 0x8b: "‹", 0x8c: "Œ", 0x8e: "Ž", 0x91: "‘", 0x92: "’", 0x93: "“", 0x94: "”", 0x95: "•",
+  0x96: "–", 0x97: "—", 0x98: "˜", 0x99: "™", 0x9a: "š", 0x9b: "›", 0x9c: "œ", 0x9e: "ž", 0x9f: "Ÿ",
+};
 export function decodeEntities(text) {
   return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*)(;?)/g, (match, entity, semicolon, offset) => {
     if (entity[0] === "#") {
+      // HTML's numeric character reference rules: zero, a surrogate, a value above U+10FFFF (or too large to
+      // represent) become U+FFFD; 0x80–0x9F map through the windows-1252 table; the rest decode as written.
       const code = entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
-      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
+      if (!Number.isFinite(code) || code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return "�";
+      return C1_REMAP[code] ?? String.fromCodePoint(code);
     }
     if (semicolon) {
       if (Object.hasOwn(ENTITIES, entity)) return ENTITIES[entity];
@@ -468,6 +477,10 @@ export function refreshUrl(content, label) {
  */
 export function resolveLocal(raw, rel, prefix, label) {
   const value = cleanUrl(raw, label);
+  // The deployment origin is not known here (the base below is a placeholder), so any URL that names a
+  // host or a scheme — absolute or protocol-relative — is external by construction; a local reference is
+  // a path, and the placeholder host can never be matched as if it were the site.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) || value.startsWith("//")) return { external: true };
   const base = new URL(`${DOCUMENT_ORIGIN}${prefix}${rel}`);
   let url;
   try {
@@ -701,6 +714,17 @@ export function scanDocument(text, label, { xml = false } = {}) {
         // that follows a nested "<script" does not end the script; the browser would run on past this point.
         if (body.includes("<!--")) throw new GateError(`${label}: a script data escape sequence ("<!--") inside <script> is refused`);
         out.scripts.push({ attrs, body, foreign: false });
+      }
+      if (name === "noscript") {
+        // With scripting enabled the body is raw text; with scripting disabled a browser parses it as markup
+        // and honours a <meta refresh> or a preload inside it. Judge the body under that model as well: its
+        // refreshes and preloads count, its attributes are checked, and its scripts cannot run either way.
+        const body = text.slice(i, close);
+        if (body.includes("<")) {
+          const inner = scanDocument(body, `${label} <noscript>`, { xml });
+          out.preloads.push(...inner.preloads);
+          out.refreshes.push(...inner.refreshes);
+        }
       }
       i = close; // the end tag is consumed on the next iteration
     }

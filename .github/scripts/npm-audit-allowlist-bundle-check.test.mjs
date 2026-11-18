@@ -193,7 +193,12 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.deepEqual(scan('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>').scripts, []);
   assert.equal(scan('<?xml version="1.0"?><svg><script>x</script></svg>', { xml: true }).scripts.length, 1);
   // Raw-text contexts and tag boundaries as the browser reads them: the executable script is the one found.
-  assert.deepEqual(scan('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  // <noscript> is raw text with scripting enabled, but a scripting-disabled browser parses its body as markup,
+  // so the body is judged under both models: its refreshes and preloads count and its attributes are checked.
+  throwsGate(() => scan('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /<noscript>: <script> without <\/script>/);
+  assert.deepEqual(scan('<noscript><meta http-equiv="refresh" content="0; url=https://attacker.example/p.html"></noscript>').refreshes, ["https://attacker.example/p.html"]);
+  throwsGate(() => scan('<noscript><img src=x onerror="x()"></noscript>'), /inline event handler/);
+  assert.equal(scan("<noscript><p>Enable JavaScript.</p></noscript><noscript>plain text</noscript>").scripts.length, 0);
   assert.deepEqual(scan('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
   assert.deepEqual(scan('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://cdn.example.invalid/p.js"></script></svg>').scripts[0].attrs.get("xlink:href"), "https://cdn.example.invalid/p.js");
   throwsGate(() => scan('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
@@ -338,6 +343,10 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.equal(decodeEntities("/site/&num/../../other-app/payload.html"), "/site/&num/../../other-app/payload.html"); // "&num" is literal to a browser
   assert.equal(decodeEntities("/site/&amp;num;/../../x"), "/site/&num;/../../x"); // one pass: "&amp;" becomes "&", nothing re-decodes
   assert.equal(decodeEntities("&#38;#35;"), "&#35;");
+  // Numeric references follow HTML's rules: zero, surrogates, values above U+10FFFF or too large to represent
+  // become U+FFFD (so "&#x110000;" cannot pose as a literal "#" fragment start); 0x80–0x9F remap to windows-1252.
+  assert.equal(decodeEntities("&#x110000;|&#0;|&#xD800;|&#99999999999999999999999;|&#x80;|&#65;|&#x26;"), "�|�|�|�|€|A|&");
+  assert.equal(decodeEntities("/site/&#x110000;/../../other-app/payload.html"), "/site/�/../../other-app/payload.html");
   // refreshUrl(): the browser's declarative refresh steps; a quoted URL ends at its matching quote.
   assert.equal(refreshUrl("0; url=/site/x/", "t"), "/site/x/");
   assert.equal(refreshUrl(" 0 ;URL = \"/site/x/\"  ", "t"), "/site/x/");
@@ -418,8 +427,17 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/&num/../../other-app/payload.html">'), /outside the base/);
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/&amp;num;/../../other-app/payload.html">'), /outside the base/);
     assert.equal(judge(`<meta http-equiv="refresh" content="0; url='/site/x/'">`).documents, 1);
+    // An out-of-range numeric reference is U+FFFD to a browser, not a literal "#": the traversal is seen and refused.
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/&#x110000;/../../other-app/payload.html">'), /outside the base/);
+    // A scripting-disabled browser parses <noscript> as markup and honours a refresh inside it.
+    throwsGate(() => judge('<noscript><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"></noscript>'), /outside this site/);
+    assert.equal(judge("<noscript><p>Enable JavaScript to use this site.</p></noscript>").documents, 1);
+    // The placeholder origin is not the site: any absolute or protocol-relative URL is external.
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=https://document.invalid/site/">'), /outside this site/);
+    throwsGate(() => judge('<script src="//document.invalid/site/embed.js"></script>'), /external script/);
+    throwsGate(() => judge('<link rel="modulepreload" href="https://document.invalid/site/embed.js">'), /preloads an external script/);
     // Tokenizer states and SVG sources.
-    throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /<noscript>: <script> without <\/script>/); // the body is judged as markup too
     throwsGate(() => judge('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
     throwsGate(() => judge('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
@@ -829,7 +847,10 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml('<base href="https://cdn.example.invalid/">'), /<base> is refused/);
     await refused(inHtml(`<script src=" https://attacker.example/../..${chunk.startsWith("/") ? "" : "/"}${chunk}"></script>`), /external script/);
     await refused(inHtml('<script type="mod&#x75;le">import "https://attacker.example/p.js";</script>'), /inline script 2 is not pinned/);
-    await refused(inHtml('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 2 is not pinned/);
+    await refused(inHtml('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /<noscript>: <script> without <\/script>/);
+    await refused(inHtml('<noscript><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"></noscript>'), /outside this site/);
+    await refused(inHtml('<meta http-equiv="refresh" content="0; url=https://document.invalid/">'), /outside this site/);
+    await refused(inHtml('<script src="//document.invalid/assets/x.js"></script>'), /external script/);
     await refused(inHtml('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
     await refused(inHtml('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://attacker.example/p.js"></script></svg>'), /external script/);
     await refused(() => writeFileSync(join(dist, "evil.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>'), /SVG animation element/);
