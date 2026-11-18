@@ -368,12 +368,25 @@ jobs:
         run: npm ci
       # Full `npm audit --audit-level=high` (runtime AND build/dev dependencies), with a narrow expiring
       # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json). The
-      # gate's own self-test runs first so a regression in the gate can never pass as a clean audit.
+      # gates' own self-tests run first so a regression in a gate can never pass as a clean audit.
       - name: Audit gate self-test
-        run: node --test "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs"
+        run: |
+          node --test \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs" \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.test.mjs"
       - name: Audit dependencies
         working-directory: Agentic-ai-self-service/frontend
         run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
+      # The allowlist's premise is that an exempted advisory lives only in build tooling. npm's dev/prod
+      # classification cannot prove that (application source importing a dev-only transitive package is
+      # bundled all the same), so the emitted module graph is checked: a source-mapped build lists every
+      # bundled module by path, and none may come from an allowlisted package. Built into a scratch
+      # directory so the production bundle verified below is untouched.
+      - name: Allowlisted advisories must be absent from the shipped bundle
+        working-directory: Agentic-ai-self-service/frontend
+        run: |
+          ./node_modules/.bin/vite build --sourcemap --outDir "$RUNNER_TEMP/bundle-graph" --emptyOutDir
+          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" --dist "$RUNNER_TEMP/bundle-graph"
       - name: Lint
         working-directory: Agentic-ai-self-service/frontend
         run: npx eslint .

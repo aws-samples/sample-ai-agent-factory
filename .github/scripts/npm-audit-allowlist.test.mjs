@@ -2,19 +2,29 @@
 // Every case here is a way the gate could have passed something it must not (or failed something it must
 // pass); keep this file growing with the gate.
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   GateError,
   checkNpmResult,
   evaluate,
   ghsaOf,
+  loadAllowlist,
+  main,
   parseAllowlist,
+  parseArgs,
   parseReport,
   resolveRoots,
+  runNpmAudit,
 } from "./npm-audit-allowlist.mjs";
 
+const here = dirname(fileURLToPath(import.meta.url));
 const GHSA = "GHSA-fc5q-39xc-vjpf";
+const FOREIGN = "GHSA-2222-3333-4444";
 const URL_OK = `https://github.com/advisories/${GHSA}`;
 const NOW = Date.parse("2026-11-18T12:00:00Z");
 
@@ -30,6 +40,8 @@ const advisory = (over = {}) => ({
   range: "<=4.0.7",
   ...over,
 });
+const foreign = (over = {}) => advisory({ name: "evil", url: `https://github.com/advisories/${FOREIGN}`, title: "evil", ...over });
+const MODERATE = advisory({ name: "minimatch", severity: "moderate", url: "https://github.com/advisories/GHSA-g3hv-75wg-m249" });
 const entry = (name, severity, via, over = {}) => ({
   name,
   severity,
@@ -69,6 +81,15 @@ const run = (full, prod = CLEAN, { level = "high", allowMap = allow } = {}) =>
     level,
   });
 const throwsGate = (fn, pattern) => assert.throws(fn, (error) => error instanceof GateError && pattern.test(error.message));
+const quiet = (fn) => {
+  const saved = { log: console.log, warn: console.warn, error: console.error };
+  console.log = console.warn = console.error = () => {};
+  try {
+    return fn();
+  } finally {
+    Object.assign(console, saved);
+  }
+};
 
 test("an allowlisted advisory exempts every package it explains, and nothing else is reported", () => {
   const { violations, exempt } = run(report(CHAIN));
@@ -94,10 +115,25 @@ test("diamonds and cycles that reach an advisory resolve; a rootless cycle fails
 });
 
 test("a foreign advisory at the gate level is a violation, even when hidden under a low-severity package", () => {
-  const foreign = advisory({ name: "evil", url: "https://github.com/advisories/GHSA-2222-3333-4444" });
-  const result = run(report([entry("evil", "low", [foreign])]));
+  const result = run(report([entry("evil", "low", [foreign()])]));
   assert.equal(result.violations.length, 1);
   assert.match(result.violations[0], /GHSA-2222-3333-4444/);
+});
+
+test("a second copy of a root at a lower severity never hides the copy at the gate level (either order)", () => {
+  // Same package and URL as the high foreign root, reported again as low: both copies are kept and judged.
+  for (const roots of [
+    [advisory(), foreign(), foreign({ severity: "low" })],
+    [foreign({ severity: "low" }), foreign(), advisory()],
+  ]) {
+    const result = run(report([entry("picomatch", "high", roots)]));
+    assert.equal(result.violations.length, 1, JSON.stringify(roots.map((r) => r.severity)));
+    assert.match(result.violations[0], /GHSA-2222-3333-4444/);
+  }
+  // A lower-severity duplicate of the allowlisted root changes nothing either.
+  const dup = run(report([entry("picomatch", "high", [advisory({ severity: "low" }), advisory()])]));
+  assert.deepEqual(dup.violations, []);
+  assert.ok(dup.exempt.get(GHSA).has("picomatch"));
 });
 
 test("npm's aggregate severity is never trusted: a lower aggregate over an exempt root passes, an unexplained higher one fails", () => {
@@ -108,15 +144,13 @@ test("npm's aggregate severity is never trusted: a lower aggregate over an exemp
   assert.deepEqual(ok.violations, []);
   assert.ok(ok.exempt.get(GHSA).has("@typescript-eslint/utils"));
   // A package npm calls "high" whose roots are all moderate is a finding nothing here can explain.
-  const moderate = advisory({ name: "minimatch", severity: "moderate", url: "https://github.com/advisories/GHSA-g3hv-75wg-m249" });
-  const unexplained = run(report([entry("minimatch", "high", [moderate])]));
+  const unexplained = run(report([entry("minimatch", "high", [MODERATE])]));
   assert.equal(unexplained.violations.length, 1);
   assert.match(unexplained.violations[0], /no root advisory at or above high explains it/);
 });
 
 test("root advisories below the gate level are not violations", () => {
-  const moderate = advisory({ name: "minimatch", severity: "moderate", url: "https://github.com/advisories/GHSA-g3hv-75wg-m249" });
-  assert.deepEqual(run(report([entry("minimatch", "moderate", [moderate])])).violations, []);
+  assert.deepEqual(run(report([entry("minimatch", "moderate", [MODERATE])])).violations, []);
 });
 
 test("severity values are matched as own string keys only", () => {
@@ -125,23 +159,34 @@ test("severity values are matched as own string keys only", () => {
   throwsGate(() => resolveRoots({ x: entry("x", "high", [advisory({ severity: undefined })]) }), /unknown severity/);
 });
 
-test("advisory identity requires the canonical GitHub advisory URL", () => {
+test("every advisory must carry the exact canonical GitHub advisory URL, whatever its severity", () => {
   assert.equal(ghsaOf(advisory()), GHSA);
   for (const url of [
     `https://example.invalid/advisories/${GHSA}`,
     `junk/advisories/${GHSA}`,
     `http://github.com/advisories/${GHSA}`,
-    `${URL_OK}?x=1`,
-    `${URL_OK}#frag`,
+    `https://github.com:444/advisories/${GHSA}`,
+    `https://user:pw@github.com/advisories/${GHSA}`,
+    `https://GitHub.com/advisories/${GHSA}`,
+    `https://github.com/x/../advisories/${GHSA}`,
+    `https://github.com/advisories/./${GHSA}`,
+    `https://github.com/advisories/${GHSA}/`,
+    `https://github.com/advisories/${GHSA}?x=1`,
+    `https://github.com/advisories/${GHSA}#frag`,
     `https://github.com/advisories/${GHSA}/extra`,
+    `https://github.com/advisories/${GHSA.toUpperCase()}`,
+    ` ${URL_OK}`,
+    `${URL_OK}\n`,
   ]) {
     assert.equal(ghsaOf(advisory({ url })), null, url);
-    const result = run(report([entry("picomatch", "high", [advisory({ url })])]));
-    assert.ok(result.violations.some((v) => /cannot be allowlisted/.test(v)), url);
+    // At the gate level, below it, and in the production report: the report is unusable, not "clean".
+    throwsGate(() => run(report([entry("picomatch", "high", [advisory({ url })])])), /canonical GitHub advisory URL/);
+    throwsGate(() => run(report([entry("picomatch", "low", [advisory({ url, severity: "low" })])])), /canonical GitHub advisory URL/);
+    throwsGate(() => run(CLEAN, report([entry("picomatch", "low", [advisory({ url, severity: "low" })])])), /canonical GitHub advisory URL/);
   }
-  // No URL at all is not even a well-formed advisory: the report is rejected outright.
   assert.equal(ghsaOf(advisory({ url: undefined })), null);
   throwsGate(() => run(report([entry("picomatch", "high", [advisory({ url: undefined })])])), /has no url/);
+  throwsGate(() => run(report([entry("picomatch", "high", [advisory({ url: 7 })])])), /has no url/);
 });
 
 test("the allowlist binds an advisory to one package", () => {
@@ -155,6 +200,20 @@ test("the allowlist never applies to production dependencies", () => {
   const result = run(report(CHAIN), report([entry("picomatch", "high", [advisory()])]));
   assert.equal(result.violations.length, 1);
   assert.match(result.violations[0], /PRODUCTION/);
+});
+
+test("a production package reported at the gate level fails even when its roots are all below it", () => {
+  for (const severity of ["high", "critical"]) {
+    const result = run(report(CHAIN), report([entry("minimatch", severity, [MODERATE])]));
+    assert.equal(result.violations.length, 1, severity);
+    assert.match(result.violations[0], /in PRODUCTION dependencies but no root advisory at or above high explains it/);
+  }
+  // Below the gate on both counts: nothing to report.
+  assert.deepEqual(run(report(CHAIN), report([entry("minimatch", "moderate", [MODERATE])])).violations, []);
+  // Aggregate below the gate over a qualifying root: still a production violation.
+  const hidden = run(report(CHAIN), report([entry("picomatch", "low", [advisory()])]));
+  assert.equal(hidden.violations.length, 1);
+  assert.match(hidden.violations[0], /reachable from PRODUCTION/);
 });
 
 test("incomplete, inconsistent or errored reports fail closed", () => {
@@ -191,6 +250,47 @@ test("npm process failures never read as a clean audit", () => {
   assert.deepEqual(checkNpmResult({ status: 1, stdout: "{}" }), { stdout: "{}", status: 1 });
 });
 
+test("runNpmAudit: a failing, hanging or flooding npm is a failure, a clean one is read back", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "fake-npm-"));
+  const fakeNpm = join(dir, "npm");
+  writeFileSync(
+    fakeNpm,
+    [
+      "#!/bin/sh",
+      'case "$FAKE_NPM_MODE" in',
+      "  fail) echo boom >&2; exit 2 ;;",
+      "  clean) printf '%s' \"$FAKE_NPM_STDOUT\"; exit 0 ;;",
+      "  hang) sleep 5; exit 0 ;;",
+      "  flood) i=0; while [ $i -lt 400 ]; do printf '%0512d' 0; i=$((i+1)); done; exit 0 ;;",
+      "esac",
+      "exit 3",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(fakeNpm, 0o755);
+  const saved = { PATH: process.env.PATH, FAKE_NPM_MODE: process.env.FAKE_NPM_MODE, FAKE_NPM_STDOUT: process.env.FAKE_NPM_STDOUT };
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+  try {
+    process.env.FAKE_NPM_MODE = "fail";
+    throwsGate(() => runNpmAudit(), /exited 2: boom/);
+    process.env.FAKE_NPM_MODE = "clean";
+    process.env.FAKE_NPM_STDOUT = JSON.stringify(CLEAN);
+    const ok = runNpmAudit(["--omit=dev"]);
+    assert.equal(ok.status, 0);
+    assert.equal(parseReport(ok.stdout, 0).metadata.vulnerabilities.total, 0);
+    process.env.FAKE_NPM_MODE = "hang";
+    throwsGate(() => runNpmAudit([], { timeoutMs: 300 }), /ETIMEDOUT|terminated by signal/);
+    process.env.FAKE_NPM_MODE = "flood";
+    throwsGate(() => runNpmAudit([], { maxBuffer: 4096 }), /ENOBUFS/);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("allowlist schema is strict and expiry is a UTC instant with a hard cutoff", () => {
   const base = ALLOW_DOC.allow[0];
   const doc = (over) => ({ allow: [{ ...base, ...over }] });
@@ -208,4 +308,66 @@ test("allowlist schema is strict and expiry is a UTC instant with a hard cutoff"
   throwsGate(() => parseAllowlist(doc({}), Date.parse("2026-12-16T00:00:00Z")), /expired at/);
   throwsGate(() => parseAllowlist(doc({}), Date.parse("2027-01-01T00:00:00Z")), /expired at/);
   assert.equal(parseAllowlist(doc({}), Date.parse("2026-12-15T23:59:59Z")).size, 1);
+});
+
+test("the committed allowlist is valid for the gate as of its 'added' date", () => {
+  const entries = loadAllowlist(resolve(here, "..", "npm-audit-allowlist.json"), NOW);
+  assert.ok(entries.size >= 1);
+  for (const item of entries.values()) assert.equal(typeof item.cutoff, "number");
+});
+
+test("CLI arguments are validated", () => {
+  assert.deepEqual(parseArgs([]), { level: "high", allowlist: null, input: null, "prod-input": null, now: null });
+  assert.equal(parseArgs(["--level", "critical"]).level, "critical");
+  throwsGate(() => parseArgs(["--level"]), /bad argument/);
+  throwsGate(() => parseArgs(["--bogus", "1"]), /bad argument/);
+  throwsGate(() => parseArgs(["--level=high"]), /bad argument/);
+  throwsGate(() => parseArgs(["high"]), /bad argument/);
+  throwsGate(() => parseArgs(["--__proto__", "x"]), /bad argument/);
+  throwsGate(() => parseArgs(["--level", "severe"]), /unknown --level/);
+  throwsGate(() => parseArgs(["--input", "a.json"]), /must be given together/);
+  throwsGate(() => parseArgs(["--prod-input", "b.json"]), /must be given together/);
+});
+
+test("the CLI runs end to end on report files, and fails on an expired entry or a production finding", () => {
+  const dir = mkdtempSync(join(tmpdir(), "npm-audit-allowlist-"));
+  try {
+    const allowPath = join(dir, "allow.json");
+    const fullPath = join(dir, "full.json");
+    const prodPath = join(dir, "prod.json");
+    writeFileSync(allowPath, JSON.stringify(ALLOW_DOC));
+    writeFileSync(fullPath, JSON.stringify(report(CHAIN)));
+    writeFileSync(prodPath, JSON.stringify(CLEAN));
+    const argv = ["--allowlist", allowPath, "--input", fullPath, "--prod-input", prodPath];
+    quiet(() => main([...argv, "--now", "2026-11-18T12:00:00Z"]));
+    throwsGate(() => quiet(() => main([...argv, "--now", "2026-12-16T00:00:00Z"])), /expired at/);
+    throwsGate(() => quiet(() => main([...argv, "--now", "not-a-date"])), /is not a date/);
+    writeFileSync(prodPath, JSON.stringify(report([entry("picomatch", "high", [advisory()])])));
+    throwsGate(() => quiet(() => main([...argv, "--now", "2026-11-18T12:00:00Z"])), /not allowlisted/);
+    writeFileSync(prodPath, "{");
+    throwsGate(() => quiet(() => main([...argv, "--now", "2026-11-18T12:00:00Z"])), /not JSON/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real npm reports from each captured npm version parse, reconcile with their exit status, and resolve as expected", () => {
+  const root = resolve(here, "fixtures", "npm-audit");
+  const versions = readdirSync(root).sort();
+  assert.ok(versions.length >= 1, "no captured npm versions");
+  for (const version of versions) {
+    for (const project of ["frontend", "docs-site"]) {
+      const where = `${version}/${project}`;
+      const full = readFileSync(join(root, version, `${project}-full.json`), "utf8");
+      const prod = readFileSync(join(root, version, `${project}-prod.json`), "utf8");
+      // npm exits 1 for the full report (findings) and 0 for the production report (none).
+      const result = evaluate({ report: parseReport(full, 1), prodReport: parseReport(prod, 0), allow, level: "high" });
+      assert.deepEqual(result.violations, [], where);
+      assert.ok(result.exempt.get(GHSA).has("picomatch"), where);
+      // Without the allowlist the same reports fail: the exemption is doing real work, not masking a no-op.
+      const bare = evaluate({ report: parseReport(full, 1), prodReport: parseReport(prod, 0), allow: new Map(), level: "high" });
+      assert.ok(bare.violations.length > 0, `${where} without allowlist`);
+      assert.ok(bare.violations.every((v) => v.includes(GHSA)), `${where}: only the picomatch advisory is present`);
+    }
+  }
 });

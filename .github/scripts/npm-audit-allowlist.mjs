@@ -114,24 +114,25 @@ export function loadAllowlist(path, nowMillis) {
 }
 
 /** Interpret a spawnSync result for `npm audit --json`; returns {stdout, status} or throws GateError. */
-export function checkNpmResult(result) {
+export function checkNpmResult(result, timeoutMs = NPM_TIMEOUT_MS) {
   if (result.error) throw new GateError(`could not run npm audit: ${result.error.message}`);
-  if (result.signal) throw new GateError(`npm audit was terminated by signal ${result.signal} (timeout ${NPM_TIMEOUT_MS} ms?)`);
+  if (result.signal) throw new GateError(`npm audit was terminated by signal ${result.signal} (timeout ${timeoutMs} ms?)`);
   // npm exits 1 when vulnerabilities exist: expected. Anything else is a real error.
   if (result.status !== 0 && result.status !== 1) throw new GateError(`npm audit exited ${result.status}: ${result.stderr}`);
   if (typeof result.stdout !== "string") throw new GateError("npm audit produced no output");
   return { stdout: result.stdout, status: result.status };
 }
 
-export function runNpmAudit(extraArgs = []) {
+/** Run `npm audit --json [extraArgs]` without a shell; the limits are parameters so the self-test can hit them. */
+export function runNpmAudit(extraArgs = [], { timeoutMs = NPM_TIMEOUT_MS, maxBuffer = NPM_MAX_BUFFER } = {}) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const result = spawnSync(npm, ["audit", "--json", ...extraArgs], {
     encoding: "utf8",
-    timeout: NPM_TIMEOUT_MS,
-    maxBuffer: NPM_MAX_BUFFER,
+    timeout: timeoutMs,
+    maxBuffer,
     env: { ...process.env, NO_COLOR: "1" },
   });
-  return checkNpmResult(result);
+  return checkNpmResult(result, timeoutMs);
 }
 
 /**
@@ -178,24 +179,22 @@ export function parseReport(text, exitStatus = null) {
   return report;
 }
 
+// The one URL shape an advisory may carry: the exact canonical string, no port, credentials, query,
+// fragment, dot-segments or trailing slash (compared as text, not through URL normalisation).
+const CANONICAL_ADVISORY_URL_RE = new RegExp(`^https://github\\.com/advisories/(${GHSA_RE.source.slice(1, -1)})$`);
+
 /** The GHSA id of an advisory's canonical GitHub advisory URL, or null for anything else. */
 export function ghsaOf(advisory) {
-  let url;
-  try {
-    url = new URL(String(advisory.url));
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.search || url.hash) return null;
-  const match = /^\/advisories\/(GHSA-[^/]+)$/.exec(url.pathname);
-  return match && GHSA_RE.test(match[1]) ? match[1] : null;
+  const match = typeof advisory.url === "string" ? CANONICAL_ADVISORY_URL_RE.exec(advisory.url) : null;
+  return match ? match[1] : null;
 }
 
 /**
  * Map<packageName, advisory[]>: every advisory object reachable from each vulnerable package through its
  * `via` chains (strings name other vulnerable packages, objects are advisories). Diamonds and cycles that
  * reach an advisory are fine; a package that reaches no advisory, or a via that names an unknown package,
- * is a GateError. Every advisory object is validated.
+ * is a GateError. Every advisory object is validated here, whatever its severity: it must name a package,
+ * carry a known severity and carry the canonical GitHub advisory URL (that is its identity).
  */
 export function resolveRoots(vulnerabilities) {
   const roots = new Map();
@@ -216,7 +215,15 @@ export function resolveRoots(vulnerabilities) {
           if (!isNonEmptyString(via.name)) throw new GateError(`an advisory under "${name}" has no package name`);
           rankOf(via.severity, `advisory ${via.url || via.source} under "${name}"`);
           if (!isNonEmptyString(via.url)) throw new GateError(`advisory for ${via.name} under "${name}" has no url`);
-          found.set(`${via.name}\u0000${via.url}`, via);
+          if (ghsaOf(via) === null) {
+            throw new GateError(
+              `advisory for ${via.name} under "${name}" does not carry the canonical GitHub advisory URL ` +
+                `(got ${JSON.stringify(via.url)}); it cannot be identified, so it cannot be judged`,
+            );
+          }
+          // Keyed by severity too: a second copy of the same advisory reported at a lower severity must
+          // never replace the one at the gate level. Each copy is judged on its own.
+          found.set(`${via.name}\u0000${via.url}\u0000${via.severity}`, via);
         } else {
           throw new GateError(`"${name}" has an unrecognised via entry ${JSON.stringify(via)}`);
         }
@@ -226,6 +233,19 @@ export function resolveRoots(vulnerabilities) {
     roots.set(start, [...found.values()]);
   }
   return roots;
+}
+
+/**
+ * npm's per-package severity is not the maximum over its chain (observed: a package reported "moderate"
+ * whose only via is a "high" package), so it is never trusted to skip roots. The one thing it must not do
+ * is exceed every root at the gate: that is a finding plain `npm audit` reports that nothing here can
+ * explain or exempt, so it fails closed. Returns the violation text, or null.
+ */
+function unexplainedPackage(name, entry, roots, threshold, level, where) {
+  const packageRank = rankOf(entry.severity, `vulnerability entry "${name}"`);
+  const maxRootRank = Math.max(...roots.map((advisory) => rankOf(advisory.severity, `advisory under "${name}"`)));
+  if (packageRank < threshold || maxRootRank >= threshold) return null;
+  return `${name}: reported ${entry.severity}${where} but no root advisory at or above ${level} explains it (roots reach ${SEVERITIES[maxRootRank]})`;
 }
 
 /**
@@ -240,26 +260,13 @@ export function evaluate({ report, prodReport, allow, level }) {
   const rootsByPackage = resolveRoots(report.vulnerabilities);
   for (const [name, entry] of Object.entries(report.vulnerabilities)) {
     const roots = rootsByPackage.get(name);
-    const packageRank = rankOf(entry.severity, `vulnerability entry "${name}"`);
-    const maxRootRank = Math.max(...roots.map((advisory) => rankOf(advisory.severity, `advisory under "${name}"`)));
-    // npm's per-package severity is not the maximum over its chain (observed: a package reported
-    // "moderate" whose only via is a "high" package), so it is never trusted to skip roots. The one
-    // thing it must not do is exceed every root at the gate: that would be a finding plain `npm audit`
-    // reports that nothing here can explain or exempt, so it fails closed.
-    if (packageRank >= threshold && maxRootRank < threshold) {
-      violations.push(
-        `${name}: reported ${entry.severity} but no root advisory at or above ${level} explains it (roots reach ${SEVERITIES[maxRootRank]})`,
-      );
-    }
+    const unexplained = unexplainedPackage(name, entry, roots, threshold, level, "");
+    if (unexplained) violations.push(unexplained);
     // Every root at or above the gate is judged, whatever the package's own severity says.
     for (const advisory of roots) {
       if (rankOf(advisory.severity, `advisory under "${name}"`) < threshold) continue;
-      const ghsa = ghsaOf(advisory);
-      const label = `${advisory.name}@${advisory.range ?? "*"} ${advisory.severity} ${ghsa || advisory.url}`;
-      if (!ghsa) {
-        violations.push(`${name}: root advisory without a canonical GitHub advisory URL cannot be allowlisted: ${label}`);
-        continue;
-      }
+      const ghsa = ghsaOf(advisory); // never null: resolveRoots rejected anything else
+      const label = `${advisory.name}@${advisory.range ?? "*"} ${advisory.severity} ${ghsa}`;
       const allowed = allow.get(ghsa);
       if (!allowed) {
         violations.push(`${name}: ${label} - ${advisory.title ?? "(no title)"}`);
@@ -275,12 +282,17 @@ export function evaluate({ report, prodReport, allow, level }) {
   }
 
   // Production dependencies: no exemptions. An allowlisted advisory is tolerated only in build tooling.
+  // The same unexplained-package check applies here: a production package npm reports at the gate
+  // level is a finding whether or not its roots are.
   const prodRoots = resolveRoots(prodReport.vulnerabilities);
-  for (const [name, roots] of prodRoots) {
+  for (const [name, entry] of Object.entries(prodReport.vulnerabilities)) {
+    const roots = prodRoots.get(name);
+    const unexplained = unexplainedPackage(name, entry, roots, threshold, level, " in PRODUCTION dependencies");
+    if (unexplained) violations.push(unexplained);
     for (const advisory of roots) {
       if (rankOf(advisory.severity, `production advisory under "${name}"`) < threshold) continue;
       violations.push(
-        `${name}: ${advisory.name} ${advisory.severity} ${ghsaOf(advisory) || advisory.url} is reachable from PRODUCTION ` +
+        `${name}: ${advisory.name} ${advisory.severity} ${ghsaOf(advisory)} is reachable from PRODUCTION ` +
           "dependencies; the allowlist never applies there",
       );
     }
@@ -288,7 +300,7 @@ export function evaluate({ report, prodReport, allow, level }) {
   return { violations, exempt };
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = { level: "high", allowlist: null, input: null, "prod-input": null, now: null };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
