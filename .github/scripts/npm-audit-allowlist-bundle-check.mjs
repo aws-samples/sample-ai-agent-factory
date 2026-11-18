@@ -96,20 +96,32 @@ export function inertKind(fileName) {
   return null;
 }
 
-const installedNames = new Map();
-/** The `name` in an installed package directory's package.json, or null; cached. */
-export function readInstalledName(dir) {
-  if (installedNames.has(dir)) return installedNames.get(dir);
-  let name = null;
-  try {
-    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-    if (isNonEmptyString(pkg.name)) name = pkg.name;
-  } catch {
-    name = null;
+const installedManifests = new Map();
+/**
+ * The state of a directory's package.json: { present, name } — present false when there is no such file
+ * (a vendored segment), present true with name null when it exists but is unreadable or nameless (which an
+ * npm installation never is). Cached per directory.
+ */
+export function readInstalledManifest(dir) {
+  if (installedManifests.has(dir)) return installedManifests.get(dir);
+  const path = join(dir, "package.json");
+  let state;
+  if (!existsSync(path)) state = { present: false, name: null };
+  else {
+    let name = null;
+    try {
+      const pkg = JSON.parse(readFileSync(path, "utf8"));
+      if (pkg !== null && typeof pkg === "object" && isNonEmptyString(pkg.name)) name = pkg.name;
+    } catch {
+      name = null;
+    }
+    state = { present: true, name };
   }
-  installedNames.set(dir, name);
-  return name;
+  installedManifests.set(dir, state);
+  return state;
 }
+/** The `name` in an installed package directory's package.json, or null. */
+export const readInstalledName = (dir) => readInstalledManifest(dir).name;
 
 const installedLocks = new Map();
 /**
@@ -119,18 +131,31 @@ const installedLocks = new Map();
  */
 export function readInstalledLock(installRoot) {
   if (installedLocks.has(installRoot)) return installedLocks.get(installRoot);
-  let packages = null;
+  const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  // Every candidate is validated (a v2/v3 lockfile whose `packages` is a plain object of plain objects) and
+  // the valid ones are reconciled into one map: a boundary recorded by either counts, and a boundary the two
+  // record under different names is marked as a conflict (no identity). A malformed or incomplete hidden
+  // lockfile can therefore neither hide an installation the regular lockfile records nor pass as complete.
+  const merged = {};
+  let sources = 0;
   for (const candidate of [join(installRoot, "node_modules", ".package-lock.json"), join(installRoot, "package-lock.json")]) {
+    let lock;
     try {
-      const lock = JSON.parse(readFileSync(candidate, "utf8"));
-      if (lock !== null && typeof lock === "object" && lock.packages !== null && typeof lock.packages === "object") {
-        packages = lock.packages;
-        break;
-      }
+      lock = JSON.parse(readFileSync(candidate, "utf8"));
     } catch {
-      // not there or not readable: try the next candidate
+      continue; // not there or not readable
+    }
+    if (!isPlainObject(lock) || ![2, 3].includes(lock.lockfileVersion) || !isPlainObject(lock.packages)) continue;
+    if (!Object.values(lock.packages).every(isPlainObject)) continue;
+    sources += 1;
+    for (const [key, entry] of Object.entries(lock.packages)) {
+      const name = isNonEmptyString(entry.name) ? entry.name : null;
+      const seen = merged[key];
+      if (seen === undefined) merged[key] = { name };
+      else if (seen.name !== name) merged[key] = { conflict: [seen.name, name] };
     }
   }
+  const packages = sources === 0 ? null : merged;
   if (packages !== null) installedLocks.set(installRoot, packages); // a missing lockfile is re-checked, never remembered
   return packages;
 }
@@ -149,24 +174,26 @@ export function readInstalledLock(installRoot) {
  * own helpers or listed in `trustedVirtual`. Ids under the first-party root (compared as paths) are
  * first-party. Else unknown.
  */
-export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readName = readInstalledName, readLock = readInstalledLock } = {}) {
+export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readManifest = readInstalledManifest, readLock = readInstalledLock } = {}) {
   if (typeof id !== "string" || id.length === 0) return { kind: "unknown", why: "empty module id" };
   const nul = id.startsWith("\u0000");
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
   if (path.includes(NODE_MODULES)) {
-    // npm's installation boundaries are what its lockfile records, so the lockfile of the install root (the
-    // directory above the first node_modules) decides. Walking the boundaries from the innermost outward:
-    // a boundary the lockfile records is an installed package whose identity is the lockfile's `name` (an
-    // alias) or its directory, cross-checked against a readable package.json name; a boundary the lockfile
-    // does not record but whose package.json has a name is a vendored copy declaring itself and is attributed
-    // by that name; a boundary with neither is skipped, so a nameless vendored segment (…/dist/esm/node_modules/
-    // tslib/) belongs to the package that ships it. No lockfile, or no identity at any boundary, fails closed:
-    // a directory label is never a name, so an alias cannot pass under its label when its manifest is unreadable.
+    // npm's installation boundaries are what its lockfiles record, so the validated, reconciled lockfiles of
+    // the install root (the directory above the first node_modules) decide. Walking the boundaries from the
+    // innermost outward: a recorded boundary is an installed package whose identity is the lockfile's `name`
+    // (an alias) or its directory, cross-checked against a readable package.json name (a lockfile conflict or a
+    // contradicting manifest is no identity); an unrecorded boundary whose package.json has a name is a
+    // vendored copy declaring itself and is attributed by that name; an unrecorded boundary whose package.json
+    // exists but is unreadable or nameless fails closed, because npm never installs such a package and never
+    // leaves an installation unrecorded; an unrecorded boundary with no package.json at all is a vendored
+    // segment (…/dist/esm/node_modules/tslib/) and belongs to the package that ships it. No lockfile, or no
+    // identity at any boundary, fails closed; a directory label is never a name.
     const first = path.indexOf(NODE_MODULES);
     const installRoot = path.slice(0, first);
     const lock = readLock(installRoot);
-    if (lock === null) return { kind: "unknown", why: `no lockfile (node_modules/.package-lock.json or package-lock.json) under ${installRoot} records the installation that ${path} belongs to` };
+    if (lock === null) return { kind: "unknown", why: `no valid lockfile (node_modules/.package-lock.json or package-lock.json, v2/v3) under ${installRoot} records the installation that ${path} belongs to` };
     let innermost = null;
     let searchEnd = path.length;
     for (;;) {
@@ -181,10 +208,13 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
       if (valid) {
         innermost ??= label;
         const dir = path.slice(0, start) + label;
-        const manifestName = readName(dir);
-        const named = isNonEmptyString(manifestName) && !manifestName.startsWith(".") ? manifestName : null;
+        const manifest = readManifest(dir);
+        const named = isNonEmptyString(manifest.name) && !manifest.name.startsWith(".") ? manifest.name : null;
         const entry = lock[path.slice(first + 1, start + label.length)];
-        if (entry !== null && typeof entry === "object") {
+        if (entry !== undefined && entry !== null && typeof entry === "object") {
+          if (Array.isArray(entry.conflict)) {
+            return { kind: "unknown", why: `${dir} is recorded under different names by the hidden and the regular lockfile (${entry.conflict.map((n) => n ?? label).join(" vs ")})` };
+          }
           const identity = isNonEmptyString(entry.name) ? entry.name : label;
           if (named !== null && named !== identity) {
             return { kind: "unknown", why: `${dir} is recorded in the lockfile as ${identity} but its package.json is named ${named}` };
@@ -192,11 +222,14 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
           return { kind: "package", name: identity, dir: label };
         }
         if (named !== null) return { kind: "package", name: named, dir: label };
+        if (manifest.present) {
+          return { kind: "unknown", why: `${dir} is not recorded in a lockfile and its package.json has no readable name; npm records every package it installs, so this is no installation this gate can name (${path})` };
+        }
       }
       searchEnd = at;
     }
     if (innermost === null) return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
-    return { kind: "unknown", why: `the installed directory ${innermost} is not recorded in the lockfile and has no readable package.json name (${path})` };
+    return { kind: "unknown", why: `the directory ${innermost} is not recorded in a lockfile and has no package.json (${path})` };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
     if (BUILTIN_VIRTUAL.has(path) || BROWSER_EXTERNAL_RE.test(path)) return { kind: "virtual" };
@@ -211,7 +244,7 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
  * Judge the resolved graph. `chunks` is Map<key, moduleIds[]> (worker sub-build chunks keyed "workerN:…"),
  * `assets` Map<fileName, type>. Returns { violations, modules, firstParty, virtual, packages: Set }.
  */
-export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set(), readName = readInstalledName, readLock = readInstalledLock }) {
+export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set(), readManifest = readInstalledManifest, readLock = readInstalledLock }) {
   const allowlisted = new Set([...allow.values()].map((entry) => entry.package));
   if (chunks.size === 0) throw new GateError("the build emitted no JavaScript chunk; this is not a browser build");
   const violations = [];
@@ -223,7 +256,7 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
     if (!Array.isArray(ids) || ids.length === 0) throw new GateError(`chunk ${fileName} lists no modules; the module graph is incomplete`);
     for (const id of ids) {
       modules += 1;
-      const owner = classifyModule(id, firstPartyRoot, { trustedVirtual, readName, readLock });
+      const owner = classifyModule(id, firstPartyRoot, { trustedVirtual, readManifest, readLock });
       if (owner.kind === "unknown") {
         throw new GateError(`chunk ${fileName} contains module ${JSON.stringify(id)} whose ownership cannot be established: ${owner.why}`);
       }

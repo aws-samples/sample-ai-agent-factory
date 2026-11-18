@@ -30,6 +30,7 @@ import {
   parseBundleTrust,
   parseStartTag,
   projectKey,
+  readInstalledLock,
   refreshUrl,
   resolveVite,
   scanDocument,
@@ -62,7 +63,14 @@ const trust = parseBundleTrust(ALLOW_DOC, ".");
 const ROOT = "/work/app";
 /** package.json names of the synthetic installs below, by directory label; anything else has no named package.json. */
 const NAMES = { picomatch: "picomatch", "picomatch/lib": "matcher-internal", react: "react", tinyglobby: "tinyglobby", "@scope/name": "@scope/name", matcher: "picomatch", "@aws-amplify/core": "@aws-amplify/core", mislabelled: "picomatch" };
-const stubName = (dir) => NAMES[dir.slice(dir.lastIndexOf("/node_modules/") + "/node_modules/".length)] ?? null;
+/** Directories whose package.json exists but carries no name (an npm installation never looks like this). */
+const NAMELESS = new Set(["aliasn", "strayn"]);
+const labelOf = (dir) => dir.slice(dir.lastIndexOf("/node_modules/") + "/node_modules/".length);
+const stubManifest = (dir) => {
+  const label = labelOf(dir);
+  if (Object.hasOwn(NAMES, label)) return { present: true, name: NAMES[label] };
+  return { present: NAMELESS.has(label), name: null };
+};
 /** The lockfile `packages` npm recorded for the synthetic install root ROOT (aliases carry `name`); other roots have no lockfile. */
 const LOCK = {
   "node_modules/picomatch": {}, "node_modules/react": {}, "node_modules/tinyglobby": {}, "node_modules/@scope/name": {}, "node_modules/@aws-amplify/core": {},
@@ -77,10 +85,10 @@ const silent = { log() {}, error() {} };
 const APP = [`${ROOT}/src/main.tsx`, `${ROOT}/src/App.tsx`, `${ROOT}/node_modules/react/index.js`, "\u0000vite/preload-helper.js"];
 const chunks = (entries) => new Map(entries);
 const graph = (chunkEntries, assets = [], over = {}) =>
-  evaluateGraph({ chunks: chunks(chunkEntries), assets: new Map(assets.map((name) => [name, "asset"])), allow, firstPartyRoot: ROOT, readName: stubName, readLock: stubLock, ...over });
+  evaluateGraph({ chunks: chunks(chunkEntries), assets: new Map(assets.map((name) => [name, "asset"])), allow, firstPartyRoot: ROOT, readManifest: stubManifest, readLock: stubLock, ...over });
 
 test("module ids are attributed to the package NAMED in their installed directory, or to first-party, virtual or unknown", () => {
-  const pkg = (id) => classifyModule(id, ROOT, { trustedVirtual: trust.virtual, readName: stubName, readLock: stubLock });
+  const pkg = (id) => classifyModule(id, ROOT, { trustedVirtual: trust.virtual, readManifest: stubManifest, readLock: stubLock });
   assert.deepEqual(pkg(`${ROOT}/node_modules/picomatch/lib/picomatch.js`), { kind: "package", name: "picomatch", dir: "picomatch" });
   // Ownership is npm's installation boundary: a nested manifest inside the installed package (NAMES says
   // picomatch/lib/package.json is named "matcher-internal") is never consulted and cannot re-attribute it.
@@ -102,14 +110,17 @@ test("module ids are attributed to the package NAMED in their installed director
   assert.deepEqual(pkg(`${ROOT}/node_modules/@aws-amplify/core/dist/esm/vendor/picomatch/index.js`).name, "@aws-amplify/core"); // embedded copy: the shipping package
   // No readable manifest name at any boundary establishes no identity: the label is never trusted (an alias
   // directory holding the allowlisted package must not pass as its label when its manifest is unreadable).
-  assert.match(pkg(`${ROOT}/node_modules/broken/index.js`).why, /the installed directory broken is not recorded in the lockfile and has no readable package\.json name/);
-  assert.match(pkg(`${ROOT}/node_modules/aliasx/lib/picomatch.js`).why, /not recorded in the lockfile/);
+  assert.match(pkg(`${ROOT}/node_modules/broken/index.js`).why, /the directory broken is not recorded in a lockfile and has no package\.json/);
+  assert.match(pkg(`${ROOT}/node_modules/aliasx/lib/picomatch.js`).why, /not recorded in a lockfile/);
+  // An unrecorded directory whose package.json exists but has no name is no installation this gate can name:
+  // npm records every package it installs and never installs a nameless one. Fail closed, never the parent.
+  assert.match(pkg(`${ROOT}/node_modules/devtool/node_modules/strayn/lib/picomatch.js`).why, /strayn is not recorded in a lockfile and its package\.json has no readable name/);
   // The lockfile records installations, nested ones included: a nested alias is the package the lockfile names,
   // even when its own manifest is nameless; a manifest contradicting the lockfile is no identity at all.
   assert.deepEqual(pkg(`${ROOT}/node_modules/devtool/node_modules/matcher/index.js`), { kind: "package", name: "picomatch", dir: "matcher" });
   assert.deepEqual(pkg(`${ROOT}/node_modules/devtool/node_modules/aliasn/lib/picomatch.js`), { kind: "package", name: "picomatch", dir: "aliasn" });
   assert.match(pkg(`${ROOT}/node_modules/mislabelled/index.js`).why, /recorded in the lockfile as left-pad but its package\.json is named picomatch/);
-  assert.match(classifyModule("/elsewhere/node_modules/picomatch/index.js", ROOT, { readName: stubName, readLock: stubLock }).why, /no lockfile/);
+  assert.match(classifyModule("/elsewhere/node_modules/picomatch/index.js", ROOT, { readManifest: stubManifest, readLock: stubLock }).why, /no valid lockfile/);
   assert.deepEqual(pkg(`${ROOT}/src/main.tsx`), { kind: "first-party" });
   assert.deepEqual(pkg(`${ROOT}/src/../index.html`), { kind: "first-party" });
   // Vite's own helpers (exact names), and the virtual module the fixture allowlist trusts explicitly.
@@ -124,7 +135,7 @@ test("module ids are attributed to the package NAMED in their installed director
   for (const id of ["\u0000virtual:matcher", "virtual:matcher", "\u0000plugin-helper.js", "\u0000__vite-browser-external-payload", "\u0000__vite-browser-external/payload", "__vite-browser-externalx", "\u0000vite/other.js"]) {
     assert.equal(pkg(id).kind, "unknown", id);
   }
-  assert.equal(classifyModule("\u0000virtual:fixture", ROOT, { readName: stubName, readLock: stubLock }).kind, "unknown");
+  assert.equal(classifyModule("\u0000virtual:fixture", ROOT, { readManifest: stubManifest, readLock: stubLock }).kind, "unknown");
   assert.match(pkg(`${ROOT}/node_modules/.vite/deps/picomatch.js`).why, /no installed package directory/);
   assert.equal(pkg(`${ROOT}/node_modules/@scope/.cache/x.js`).kind, "unknown");
   assert.equal(pkg(`${ROOT}/node_modules/@scope/name/.cache/x.js`).name, "@scope/name"); // the dot directory is inside a real package
@@ -132,8 +143,43 @@ test("module ids are attributed to the package NAMED in their installed director
     assert.equal(pkg(id).kind, "unknown", String(id));
   }
   // The first-party root is compared as a path, not a prefix string.
-  assert.equal(classifyModule("/work/application/src/x.js", ROOT, { readName: stubName, readLock: stubLock }).kind, "unknown");
-  assert.deepEqual(classifyModule(`${ROOT}/src/x.js`, `${ROOT}/`, { readName: stubName, readLock: stubLock }), { kind: "first-party" });
+  assert.equal(classifyModule("/work/application/src/x.js", ROOT, { readManifest: stubManifest, readLock: stubLock }).kind, "unknown");
+  assert.deepEqual(classifyModule(`${ROOT}/src/x.js`, `${ROOT}/`, { readManifest: stubManifest, readLock: stubLock }), { kind: "first-party" });
+});
+
+test("lockfiles are validated and reconciled: malformed or incomplete hidden metadata cannot hide an installation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-lock-"));
+  try {
+    let n = 0;
+    /** A fresh install root with the given hidden and regular lockfiles (objects are serialised, strings written as is). */
+    const root = (hiddenLock, regularLock) => {
+      const r = join(dir, `case-${n++}`);
+      mkdirSync(join(r, "node_modules"), { recursive: true });
+      if (hiddenLock !== undefined) writeFileSync(join(r, "node_modules", ".package-lock.json"), typeof hiddenLock === "string" ? hiddenLock : JSON.stringify(hiddenLock));
+      if (regularLock !== undefined) writeFileSync(join(r, "package-lock.json"), typeof regularLock === "string" ? regularLock : JSON.stringify(regularLock));
+      return r;
+    };
+    const alias = { "node_modules/devtool": {}, "node_modules/devtool/node_modules/matcher": { name: "picomatch" } };
+    const nameless = () => ({ present: true, name: null });
+    assert.equal(readInstalledLock(root()), null);
+    assert.equal(readInstalledLock(root({ lockfileVersion: 3, packages: [] }, { lockfileVersion: 1, dependencies: {} })), null); // an array map and a v1 lockfile are both invalid
+    assert.equal(readInstalledLock(root("{ not json", { lockfileVersion: 3, packages: { "node_modules/x": "bad" } })), null); // entries must be objects
+    // A malformed hidden lockfile does not suppress the regular one, and an incomplete one is completed by it.
+    assert.deepEqual(readInstalledLock(root({ lockfileVersion: 3, packages: [] }, { lockfileVersion: 3, packages: alias }))["node_modules/devtool/node_modules/matcher"], { name: "picomatch" });
+    assert.deepEqual(readInstalledLock(root({ lockfileVersion: 3, packages: { "node_modules/devtool": {} } }, { lockfileVersion: 2, packages: alias }))["node_modules/devtool/node_modules/matcher"], { name: "picomatch" });
+    // Disagreement between the two is a conflict, which classification treats as no identity.
+    const conflicting = root({ lockfileVersion: 3, packages: { "node_modules/matcher": { name: "left-pad" } } }, { lockfileVersion: 3, packages: { "node_modules/matcher": { name: "picomatch" } } });
+    assert.deepEqual(readInstalledLock(conflicting)["node_modules/matcher"], { conflict: ["left-pad", "picomatch"] });
+    assert.match(classifyModule(`${conflicting}/node_modules/matcher/index.js`, dir, { readManifest: () => ({ present: true, name: "picomatch" }) }).why, /recorded under different names/);
+    // Through the real reader: a nameless nested alias is named by the lockfile that records it, and is no
+    // identity at all when neither lockfile records it.
+    const recorded = root({ lockfileVersion: 3, packages: alias });
+    assert.deepEqual(classifyModule(`${recorded}/node_modules/devtool/node_modules/matcher/lib/picomatch.js`, dir, { readManifest: nameless }), { kind: "package", name: "picomatch", dir: "matcher" });
+    const omitted = root({ lockfileVersion: 3, packages: { "node_modules/devtool": {} } });
+    assert.match(classifyModule(`${omitted}/node_modules/devtool/node_modules/matcher/lib/picomatch.js`, dir, { readManifest: nameless }).why, /package\.json has no readable name/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("an allowlisted package in any chunk is a violation; unknown ownership and opaque assets fail closed", () => {
@@ -152,7 +198,8 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   throwsGate(() => graph([["a.js", [...APP, "/elsewhere/x.js"]]]), /ownership cannot be established: outside the first-party root/);
   throwsGate(() => graph([["a.js", [...APP, "\u0000virtual:matcher"]]]), /not listed in bundle\.trustedVirtualModules/);
   throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/.vite/deps/picomatch.js`]]]), /no installed package directory/);
-  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/broken/index.js`]]]), /not recorded in the lockfile/); // no identity: fail closed
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/broken/index.js`]]]), /not recorded in a lockfile/); // no identity: fail closed
+  throwsGate(() => graph([["a.js", [...APP, `${ROOT}/node_modules/devtool/node_modules/strayn/lib/picomatch.js`]]]), /package\.json has no readable name/); // never the parent
   assert.match(graph([["a.js", [...APP, `${ROOT}/node_modules/devtool/node_modules/aliasn/lib/picomatch.js`]]]).violations[0], /^picomatch is bundled into a\.js: .*aliasn\/lib\/picomatch\.js \(installed as aliasn\)$/); // the lockfile names the nested alias
   throwsGate(() => graph([["a.js", APP]], ["assets/worker-abc.js"]), /opaque executable/);
   throwsGate(() => graph([["a.js", APP]], ["assets/payload"]), /no recognised inert type/);
@@ -765,7 +812,7 @@ test("a real npm-alias install (picomatch under node_modules/matcher) is attribu
     miniProject(app2, nodeModules, ["react", "matcher"], { publicScript: false, farm: true });
     cpSync(realpathSync(join(nodeModules, "picomatch")), join(app2, "node_modules", "matcher"), { recursive: true });
     writeFileSync(join(app2, "node_modules", "matcher", "package.json"), JSON.stringify({ main: "index.js", private: true }));
-    await rejectsGate(run(argvFor(dir, app2), []), /no lockfile .* records the installation/);
+    await rejectsGate(run(argvFor(dir, app2), []), /no valid lockfile .* records the installation/);
     writeFileSync(join(app2, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/matcher": { name: "picomatch", version: "4.0.7" } } }));
     const lines2 = [];
     await rejectsGate(run(argvFor(dir, app2), lines2), /allowlist premise/);
@@ -819,6 +866,30 @@ test("a real nested install (devtool/node_modules/matcher holding a nameless pic
     const lines = [];
     await rejectsGate(run(argvFor(dir, app), lines), /allowlist premise/);
     assert.ok(lines.some((line) => /VIOLATION picomatch is bundled into .*devtool\/node_modules\/matcher\/.* \(installed as matcher\)/.test(line)), lines.join("\n"));
+    /** The same nested install in another project directory (lockfiles and manifests are cached per directory). */
+    const nested = (target) => {
+      miniProject(target, nodeModules, ["react", "devtool"], { publicScript: false, farm: true });
+      const dt = join(target, "node_modules", "devtool");
+      mkdirSync(join(dt, "node_modules"), { recursive: true });
+      writeFileSync(join(dt, "package.json"), JSON.stringify({ name: "devtool", version: "1.0.0", type: "module", main: "index.js" }));
+      writeFileSync(join(dt, "index.js"), 'import * as m from "matcher";\nexport default m;\n');
+      cpSync(realpathSync(join(nodeModules, "picomatch")), join(dt, "node_modules", "matcher"), { recursive: true });
+      writeFileSync(join(dt, "node_modules", "matcher", "package.json"), JSON.stringify({ main: "index.js", private: true }));
+    };
+    // A malformed hidden lockfile (array `packages`) cannot hide the alias the regular lockfile records.
+    const appB = join(dir, "appB");
+    nested(appB);
+    writeFileSync(join(appB, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: [] }));
+    writeFileSync(join(appB, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/devtool": { version: "1.0.0" }, "node_modules/devtool/node_modules/matcher": { name: "picomatch", version: "4.0.7" } } }));
+    const linesB = [];
+    await rejectsGate(run(argvFor(dir, appB), linesB), /allowlist premise/);
+    assert.ok(linesB.some((line) => /VIOLATION picomatch is bundled into .* \(installed as matcher\)/.test(line)), linesB.join("\n"));
+    // A hidden lockfile that omits the nested alias, and no regular lockfile: the nameless manifest is no
+    // identity, so the gate fails closed instead of attributing the code to devtool.
+    const appC = join(dir, "appC");
+    nested(appC);
+    writeFileSync(join(appC, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/devtool": { version: "1.0.0" } } }));
+    await rejectsGate(run(argvFor(dir, appC), []), /package\.json has no readable name/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
