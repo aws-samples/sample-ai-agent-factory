@@ -383,15 +383,24 @@ const ENTITIES = {
  * knows more than two thousand names ("&bsol;" is a backslash) and would read something this scanner did
  * not see. An unterminated unknown name ("&display=swap" in a query string) is literal to a browser too.
  */
+// The modelled names a browser also decodes WITHOUT a semicolon (the HTML Standard's legacy set; the rest
+// of that set decodes to Latin-1 letters and symbols, which cannot change how a URL reads, and is left
+// literal here as unmodelled). Every other name needs its ";" to be a reference at all.
+const LEGACY_UNTERMINATED = new Set(["amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT", "nbsp"]);
 export function decodeEntities(text) {
-  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*)(;?)/g, (match, entity, semicolon) => {
+  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*)(;?)/g, (match, entity, semicolon, offset) => {
     if (entity[0] === "#") {
       const code = entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
       return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match;
     }
-    if (Object.hasOwn(ENTITIES, entity)) return ENTITIES[entity];
-    if (semicolon) throw new GateError(`unsupported character reference ${match} in an attribute value; refused`);
-    return match;
+    if (semicolon) {
+      if (Object.hasOwn(ENTITIES, entity)) return ENTITIES[entity];
+      throw new GateError(`unsupported character reference ${match} in an attribute value; refused`);
+    }
+    // Unterminated: only a legacy name decodes, and inside an attribute value not when "=" or an ASCII
+    // alphanumeric follows it ("&amp=x", "&ampx" and "&num" stay literal, as in a browser).
+    if (!LEGACY_UNTERMINATED.has(entity)) return match;
+    return /[=A-Za-z0-9]/.test(text[offset + match.length] ?? "") ? match : ENTITIES[entity];
   });
 }
 const normaliseUrl = (value) => decodeEntities(value).replace(/[\u0000- \u007f]+/g, "").toLowerCase();
@@ -422,13 +431,33 @@ const DOCUMENT_ORIGIN = "https://document.invalid";
 const semantic = (attrs, name) => asciiTrim(decodeEntities(attrs.get(name) ?? "")).toLowerCase();
 
 /**
- * A browser's first pass over a URL attribute: entity-decode, drop tabs and newlines, trim leading and
- * trailing controls and spaces. Anything odd left over (inner whitespace, controls, a backslash) fails.
+ * A browser's first pass over an (already entity-decoded, exactly once) URL value: drop tabs and newlines,
+ * trim leading and trailing controls and spaces. Anything odd left over (inner whitespace, controls, a
+ * backslash) fails. Callers decode the attribute value once, as the tokenizer does; nothing decodes twice.
  */
 export function cleanUrl(raw, label) {
-  const value = decodeEntities(raw).replace(/[\t\n\r]/g, "").replace(/^[\u0000- \u007f]+|[\u0000- \u007f]+$/g, "");
+  const value = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000- \u007f]+|[\u0000- \u007f]+$/g, "");
   if (/[\u0000- \u007f\\]/.test(value)) throw new GateError(`${label}: URL ${JSON.stringify(raw)} contains whitespace, control characters or a backslash; refused`);
   return value;
+}
+
+/**
+ * The URL of a <meta http-equiv="refresh"> content (already entity-decoded once), read as the HTML Standard's
+ * declarative refresh steps read it: "<seconds>; url=<url>", where a URL that opens with a quote ends at the
+ * matching quote ("url='https://attacker.example'@document.invalid/" refreshes to attacker.example). Forms
+ * the browser also accepts but this gate does not model (no "url=", a comma, a fraction, an unterminated
+ * quote, text after the closing quote) are refused.
+ */
+export function refreshUrl(content, label) {
+  const match = /^[ \t\n\f\r]*[0-9]+[ \t\n\f\r]*;[ \t\n\f\r]*url[ \t\n\f\r]*=[ \t\n\f\r]*([\s\S]*)$/i.exec(content);
+  if (!match) throw new GateError(`${label}: <meta http-equiv="refresh"> without a "<seconds>; url=…" content is refused`);
+  const rest = match[1];
+  const quote = rest[0] === '"' || rest[0] === "'" ? rest[0] : null;
+  if (quote === null) return rest;
+  const end = rest.indexOf(quote, 1);
+  if (end === -1) throw new GateError(`${label}: <meta http-equiv="refresh"> url with an unterminated quote; refused`);
+  if (!/^[ \t\n\f\r]*$/.test(rest.slice(end + 1))) throw new GateError(`${label}: <meta http-equiv="refresh"> url followed by text after its closing quote; refused`);
+  return rest.slice(1, end);
 }
 
 /**
@@ -626,7 +655,7 @@ export function scanDocument(text, label, { xml = false } = {}) {
       if (rel.includes("modulepreload") || (rel.includes("preload") && semantic(attrs, "as") === "script")) {
         const href = attrs.get("href");
         if (!isNonEmptyString(href)) throw new GateError(`${label}: a script preload without href`);
-        out.preloads.push(href);
+        out.preloads.push(decodeEntities(href)); // decoded exactly once, as the tokenizer's attribute value
       }
     }
     if (name === "meta") {
@@ -640,9 +669,9 @@ export function scanDocument(text, label, { xml = false } = {}) {
       }
     }
     if (name === "meta" && semantic(attrs, "http-equiv") === "refresh") {
-      const match = /^\s*\d+\s*;\s*url\s*=\s*(.+?)\s*$/i.exec(decodeEntities(attrs.get("content") ?? ""));
-      if (!match) throw new GateError(`${label}: <meta http-equiv="refresh"> without a url`);
-      out.refreshes.push(match[1].replace(/^['"]|['"]$/g, ""));
+      // The content is decoded exactly once (the tokenizer's attribute value), then read as the browser's
+      // declarative refresh steps read it; resolveLocal() never decodes again.
+      out.refreshes.push(refreshUrl(decodeEntities(attrs.get("content") ?? ""), label));
     }
     i = j + 1;
     if (name === "script" && !rawTextHere) {
@@ -709,7 +738,7 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
         if (body.trim() !== "") throw new GateError(`${tag(rel)}: a <script ${sources[0]}> must have an empty body`);
         const url = attrs.get(sources[0]);
         if (!isNonEmptyString(url)) throw new GateError(`${tag(rel)}: <script> with an empty ${sources[0]}`);
-        const resolved = resolveLocal(url, rel, prefix, tag(rel));
+        const resolved = resolveLocal(decodeEntities(url), rel, prefix, tag(rel)); // decoded exactly once
         if (resolved.external) throw new GateError(`${tag(rel)} loads an external script ${url}; it is outside the module graph`);
         if (!known.has(resolved.target)) throw new GateError(`${tag(rel)} loads ${url}, which is not a chunk of this build nor a pinned public copy`);
         continue;
@@ -784,6 +813,9 @@ export function judgeOutput({ dir, chunkHashes, trust, publicDir, base, packages
       const text = decodeDocument(written(), `${label}${rel}`);
       const doc = scanDocument(text, `${label}${rel}`, { xml: true });
       if (doc.scripts.length > 0) throw new GateError(`${label}${rel} is an XML document carrying a <script>; refused`);
+      // An XHTML document can also navigate or preload on its own; nothing in this output has a reason to.
+      if (doc.refreshes.length > 0) throw new GateError(`${label}${rel} is an XML document with a <meta http-equiv="refresh">; refused`);
+      if (doc.preloads.length > 0) throw new GateError(`${label}${rel} is an XML document with a script preload; refused`);
       tripwire(`${label}${rel}`, text, packages);
       continue;
     }

@@ -30,6 +30,7 @@ import {
   parseBundleTrust,
   parseStartTag,
   projectKey,
+  refreshUrl,
   resolveVite,
   scanDocument,
   sha256,
@@ -279,6 +280,10 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   // Character references in attributes: "&bsol;" is a backslash to a browser (so "&bsol;&bsol;host" is a
   // network URL); a terminated name the gate does not model is refused; unterminated query parameters pass.
   assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=&bsol;&bsol;attacker.example/x">').refreshes, ["\\\\attacker.example/x"]); // decoded as a browser would; refused when resolved
+  // A quoted refresh URL ends at its matching quote (the browser would go to attacker.example); trailing text is refused.
+  throwsGate(() => scan(`<meta http-equiv="refresh" content="0; url='https://attacker.example'@document.invalid/site/">`), /text after its closing quote/);
+  assert.deepEqual(scan(`<meta http-equiv="refresh" content="0; url='/site/x/'">`).refreshes, ["/site/x/"]);
+  assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=/site/&amp;num;/../../other-app/">').refreshes, ["/site/&num;/../../other-app/"]); // decoded once
   throwsGate(() => scan('<a href="&Backslash;&Backslash;attacker.example/">x</a>'), /unsupported character reference &Backslash;/);
   throwsGate(() => scan('<p title="&copy; 2026">x</p>'), /unsupported character reference &copy;/);
   assert.equal(scan('<link rel="stylesheet" href="https://fonts.example/css2?family=Inter&display=swap"><img alt="a &amp; b &lt; c" src="x.png">').scripts.length, 0);
@@ -314,7 +319,7 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
     throwsGate(() => scan(`<a href="${href}">x</a>`), /executable URL scheme|data: URL that is not an image/, href);
   }
   assert.equal(scan('<img src="data:image/svg+xml,%3Csvg%3E"><link rel="icon" href="data:image/png;base64,AAAA">').scripts.length, 0);
-  throwsGate(() => scan('<meta http-equiv="refresh" content="0">'), /without a url/);
+  throwsGate(() => scan('<meta http-equiv="refresh" content="0">'), /without a "<seconds>; url=…" content/);
   throwsGate(() => scan("<svg><foreignObject><div>x</div></foreignObject></svg>", { xml: true }), /foreignObject/);
   // decodeDocument: valid UTF-8 only, no C0 control other than tab/LF/FF/CR (ESC drives ISO-2022-JP; FF FE is a UTF-16 BOM).
   assert.equal(decodeDocument(Buffer.from([0xef, 0xbb, 0xbf, 0x3c, 0x70, 0x3e, 0x09, 0x0a]), "t"), "<p>\t\n");
@@ -328,6 +333,20 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   throwsGate(() => decodeEntities("&unknown;"), /unsupported character reference &unknown;/);
   throwsGate(() => decodeEntities("&copy;"), /unsupported character reference &copy;/);
   throwsGate(() => decodeEntities("&TAB;"), /unsupported character reference &TAB;/); // not a name: only &Tab; is
+  // Unterminated: only legacy names decode, and not before "=" or an alphanumeric; a value decodes exactly once.
+  assert.equal(decodeEntities("a &amp b &ampx &amp=1 &lt&gt &nbsp;"), "a & b &ampx &amp=1 <>  ");
+  assert.equal(decodeEntities("/site/&num/../../other-app/payload.html"), "/site/&num/../../other-app/payload.html"); // "&num" is literal to a browser
+  assert.equal(decodeEntities("/site/&amp;num;/../../x"), "/site/&num;/../../x"); // one pass: "&amp;" becomes "&", nothing re-decodes
+  assert.equal(decodeEntities("&#38;#35;"), "&#35;");
+  // refreshUrl(): the browser's declarative refresh steps; a quoted URL ends at its matching quote.
+  assert.equal(refreshUrl("0; url=/site/x/", "t"), "/site/x/");
+  assert.equal(refreshUrl(" 0 ;URL = \"/site/x/\"  ", "t"), "/site/x/");
+  assert.equal(refreshUrl("0;url='https://attacker.example'", "t"), "https://attacker.example");
+  throwsGate(() => refreshUrl("0; url='https://attacker.example'@document.invalid/site/", "t"), /text after its closing quote/);
+  throwsGate(() => refreshUrl("0; url='/a", "t"), /unterminated quote/);
+  throwsGate(() => refreshUrl("0; https://attacker.example/", "t"), /without a "<seconds>; url=…" content/); // the browser would navigate; not modelled, refused
+  throwsGate(() => refreshUrl("0,url=/x", "t"), /without a "<seconds>; url=…" content/);
+  throwsGate(() => refreshUrl("0.5;url=/x", "t"), /without a "<seconds>; url=…" content/);
 });
 
 test("HTML documents: known sources, pinned inline scripts, inert data blocks, bounded refresh and preload targets", () => {
@@ -392,6 +411,13 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<script type="speculationrules">{"prerender":[{"source":"list","urls":["/other-app/payload.html"]}]}</script>'), /speculation rules are refused/);
     // "&bsol;" decodes to a backslash, so this refresh is a network URL to a browser; the decoded target is refused.
     throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=&bsol;&bsol;attacker.example/payload.html">'), /contains whitespace, control characters or a backslash/);
+    // Refresh targets: a quoted URL is cut at its quote (then trailing text is refused); "&num" stays literal and
+    // "&amp;num;" decodes once to "&num;", so both traversals resolve outside the base, as in a browser.
+    throwsGate(() => judge(`<meta http-equiv="refresh" content="0; url='https://attacker.example'@document.invalid/site/">`), /text after its closing quote/);
+    throwsGate(() => judge(`<meta http-equiv="refresh" content="0; url='https://attacker.example'">`), /outside this site/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/&num/../../other-app/payload.html">'), /outside the base/);
+    throwsGate(() => judge('<meta http-equiv="refresh" content="0; url=/site/&amp;num;/../../other-app/payload.html">'), /outside the base/);
+    assert.equal(judge(`<meta http-equiv="refresh" content="0; url='/site/x/'">`).documents, 1);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -480,6 +506,11 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     // XHTML is XML: an XML parser does not hide child markup inside <style>, so the script would run.
     put("payload.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><body><style><script src="https://attacker.example/matcher.js"></script></style></body></html>');
     throwsGate(() => check(), /payload\.xhtml is an XML document carrying a <script>/);
+    // An XHTML document may not navigate or preload on its own either.
+    put("payload.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"/></head><body/></html>');
+    throwsGate(() => check(), /payload\.xhtml is an XML document with a <meta http-equiv="refresh">/);
+    put("payload.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="modulepreload" href="/site/assets/index-abc.js"/></head><body/></html>');
+    throwsGate(() => check(), /payload\.xhtml is an XML document with a script preload/);
     rmSync(join(outDir, "payload.xhtml"));
     // Documents are read as UTF-8 and may declare nothing else; ESC bytes (ISO-2022-JP shifts) and UTF-16 fail.
     put("jp.html", "<!doctype html><meta charset=iso-2022-jp><style></style>");
@@ -778,6 +809,10 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(inHtml('<script type="speculationrules">{"prerender":[{"source":"list","urls":["/other-app/payload.html"]}]}</script>'), /speculation rules are refused/);
     await refused(inHtml('<meta http-equiv="refresh" content="0; url=&bsol;&bsol;attacker.example/payload.html">'), /URL .* contains whitespace, control characters or a backslash/);
     await refused(inHtml('<meta http-equiv="refresh" content="0; url=&Backslash;&Backslash;attacker.example/payload.html">'), /unsupported character reference &Backslash;/);
+    await refused(inHtml(`<meta http-equiv="refresh" content="0; url='https://attacker.example'@document.invalid/">`), /text after its closing quote/);
+    await refused(inHtml(`<meta http-equiv="refresh" content="0; url='https://attacker.example'">`), /outside this site/);
+    await refused(() => writeFileSync(join(dist, "payload.xhtml"), '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"/></head><body/></html>'), /payload\.xhtml is an XML document with a <meta http-equiv="refresh">/);
+    await refused(() => writeFileSync(join(dist, "feed.xml"), '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="refresh" content="0; url=https://attacker.example/payload.html"/></head><body/></html>'), /feed\.xml is an XML document with a <meta http-equiv="refresh">/);
     await refused(() => writeFileSync(join(dist, "payload.pdf"), "%PDF-1.4\n1 0 obj << /OpenAction << /S /JavaScript /JS (app.alert(1)) >> >> endobj\n"), /payload\.pdf is neither a chunk of this build nor of a recognised inert type/);
     // A refresh to an XML target is judged through the target itself, which may carry no script.
     await refused(() => { writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"); inHtml('<meta http-equiv="refresh" content="0; url=evil.svg">')(); }, /evil\.svg is an XML document carrying a <script>/);
