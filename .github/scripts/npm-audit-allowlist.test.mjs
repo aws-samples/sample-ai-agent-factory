@@ -3,11 +3,11 @@
 // pass); keep this file growing with the gate.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   FULL_AUDIT_ARGS,
@@ -16,6 +16,7 @@ import {
   checkNpmResult,
   evaluate,
   ghsaOf,
+  isEntryScript,
   loadAllowlist,
   main,
   parseAllowlist,
@@ -331,6 +332,55 @@ test("an inherited npm omission cannot narrow the full audit, and every failure 
   assert.match(run.stderr, /npm-audit-allowlist: ERROR: the check could not be completed/);
 });
 
+test("the CLI judges when reached through a symlinked file or directory, and an empty allowlist still gates both audits", { skip: process.platform === "win32" }, () => {
+  const script = resolve(here, "npm-audit-allowlist.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "npm-audit-allowlist-"));
+  try {
+    // Node canonicalises the entry script's path while process.argv[1] keeps the path as typed; a guard that
+    // compared the two textually never ran main() for a checkout reached through a symlink, and Node exited 0.
+    symlinkSync(script, join(dir, "link.mjs"));
+    symlinkSync(here, join(dir, "scripts-link"), "dir");
+    assert.equal(isEntryScript(join(dir, "link.mjs"), pathToFileURL(script).href), true);
+    assert.equal(isEntryScript(join(dir, "scripts-link", "npm-audit-allowlist.mjs"), pathToFileURL(script).href), true);
+    assert.equal(isEntryScript(script, pathToFileURL(join(dir, "other.mjs")).href), false);
+    assert.equal(isEntryScript(undefined, pathToFileURL(script).href), false);
+    assert.equal(isEntryScript("", pathToFileURL(script).href), false);
+
+    const emptyAllow = join(dir, "empty.json");
+    const staleAllow = join(dir, "stale.json");
+    const fullPath = join(dir, "full.json");
+    const prodPath = join(dir, "prod.json");
+    writeFileSync(emptyAllow, JSON.stringify({ allow: [] }));
+    writeFileSync(staleAllow, JSON.stringify(ALLOW_DOC));
+    const cli = (cliPath, allowPath) =>
+      spawnSync(process.execPath, [cliPath, "--allowlist", allowPath, "--input", fullPath, "--prod-input", prodPath, "--now", "2026-11-18T12:00:00Z"], { encoding: "utf8" });
+    for (const cliPath of [join(dir, "link.mjs"), join(dir, "scripts-link", "npm-audit-allowlist.mjs")]) {
+      // Clean audits pass with nothing exempted; the PASS line proves main() ran through the link.
+      writeFileSync(fullPath, JSON.stringify(CLEAN));
+      writeFileSync(prodPath, JSON.stringify(CLEAN));
+      const clean = cli(cliPath, emptyAllow);
+      assert.equal(clean.status, 0, clean.stderr);
+      assert.match(clean.stdout, /npm-audit-allowlist: PASS/);
+      // A stale entry (its advisory no longer reported) only warns.
+      const stale = cli(cliPath, staleAllow);
+      assert.equal(stale.status, 0, stale.stderr);
+      assert.match(stale.stderr, /WARNING: allowlisted GHSA-fc5q-39xc-vjpf is no longer reported; remove the entry/);
+      // With no exemption, a qualifying finding in the full audit fails, and so does one in the production audit.
+      writeFileSync(fullPath, JSON.stringify(report(CHAIN)));
+      const high = cli(cliPath, emptyAllow);
+      assert.equal(high.status, 1, high.stdout);
+      assert.match(high.stderr, /npm-audit-allowlist: FAIL: .*not allowlisted/);
+      writeFileSync(fullPath, JSON.stringify(CLEAN));
+      writeFileSync(prodPath, JSON.stringify(report([entry("picomatch", "high", [advisory()])])));
+      const production = cli(cliPath, emptyAllow);
+      assert.equal(production.status, 1, production.stdout);
+      assert.match(production.stderr, /npm-audit-allowlist: FAIL: .*not allowlisted/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("allowlist schema is strict and expiry is a UTC instant with a hard cutoff", () => {
   const base = ALLOW_DOC.allow[0];
   const doc = (over) => ({ allow: [{ ...base, ...over }] });
@@ -350,9 +400,10 @@ test("allowlist schema is strict and expiry is a UTC instant with a hard cutoff"
   assert.equal(parseAllowlist(doc({}), Date.parse("2026-12-15T23:59:59Z")).size, 1);
 });
 
-test("the committed allowlist is valid for the gate as of its 'added' date", () => {
+test("the committed allowlist is valid for the gate, with or without entries", () => {
+  // An empty "allow" array is the normal state (no advisory is exempted); whatever entries exist must be
+  // well-formed and unexpired. Requiring an entry here would block the removal of a withdrawn advisory.
   const entries = loadAllowlist(resolve(here, "..", "npm-audit-allowlist.json"), NOW);
-  assert.ok(entries.size >= 1);
   for (const item of entries.values()) assert.equal(typeof item.cutoff, "number");
 });
 

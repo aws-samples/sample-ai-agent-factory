@@ -31,7 +31,7 @@
  * Self-test: node --test npm-audit-allowlist.test.mjs (same directory).
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -369,10 +369,29 @@ export function main(argv = process.argv.slice(2)) {
   console.log("npm-audit-allowlist: PASS");
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  // Every failure exits non-zero, GateError or not: a gate that could not complete must never pass.
+/**
+ * True when this module is the process's entry script, however that script was reached. Node canonicalises
+ * the entry's path (import.meta.url has every symlink resolved) while process.argv[1] keeps the path as it
+ * was typed, so a checkout reached through a symlinked file or directory would compare unequal and the gate
+ * would silently never run: both sides are canonicalised. Should either side fail to canonicalise, the
+ * textual comparison decides, which is never weaker than the canonical one.
+ */
+export function isEntryScript(argv1 = process.argv[1], moduleUrl = import.meta.url) {
+  if (typeof argv1 !== "string" || argv1.length === 0) return false;
+  try {
+    return realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return pathToFileURL(resolve(argv1)).href === moduleUrl;
+  }
+}
+
+if (isEntryScript()) {
+  // Every failure exits non-zero, GateError or not, and so does a run that never reaches a verdict: the exit
+  // code is 1 from the start and becomes 0 only once main() has returned.
+  process.exitCode = 1;
   try {
     main();
+    process.exitCode = 0;
   } catch (error) {
     if (error instanceof GateError) console.error(`npm-audit-allowlist: FAIL: ${error.message}`);
     else console.error(`npm-audit-allowlist: ERROR: the check could not be completed\n${error?.stack ?? error}`);

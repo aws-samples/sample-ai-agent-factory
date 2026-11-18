@@ -1080,6 +1080,71 @@ test("every failure of the CLI exits non-zero, GateError or not, whatever Node's
   }
 });
 
+test("the CLI judges when reached through a symlinked file or directory, and a never-settling Vite import cannot exit 0", { skip: process.platform === "win32" }, () => {
+  const script = resolve(fileURLToPath(new URL("./npm-audit-allowlist-bundle-check.mjs", import.meta.url)));
+  const scripts = resolve(script, "..");
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-cli-"));
+  try {
+    const app = join(dir, "app");
+    mkdirSync(app);
+    writeFileSync(join(app, "package.json"), "{}");
+    writeFileSync(join(dir, "allow.json"), JSON.stringify(ALLOW_DOC));
+    // Node canonicalises the entry script's path while process.argv[1] keeps the path as typed; a guard that
+    // compared the two textually never ran main() for a checkout reached through a symlink, and Node exited 0.
+    // A poisoned argument (--out inside the project) must be refused through either link, proving main() ran.
+    symlinkSync(script, join(dir, "link.mjs"));
+    symlinkSync(scripts, join(dir, "scripts-link"), "dir");
+    for (const cliPath of [join(dir, "link.mjs"), join(dir, "scripts-link", "npm-audit-allowlist-bundle-check.mjs")]) {
+      const run = spawnSync(process.execPath, [cliPath, "--out", join(app, "dist"), "--project", app, "--allowlist", join(dir, "allow.json")], { encoding: "utf8" });
+      assert.equal(run.status, 1, `${cliPath}: ${run.stdout}${run.stderr}`);
+      assert.match(run.stderr, /npm-audit-allowlist-bundle-check: FAIL: .*must be outside the project/);
+    }
+    // A project whose Vite entry never finishes evaluating: main() stays suspended at `await import(...)`, no
+    // handle keeps the loop alive, and Node exits on its own. The exit code must already be 1, with no verdict.
+    const hang = join(dir, "hang");
+    mkdirSync(join(hang, "node_modules", "vite"), { recursive: true });
+    writeFileSync(join(hang, "package.json"), JSON.stringify({ name: "hang", private: true, type: "module" }));
+    writeFileSync(join(hang, "node_modules", "vite", "package.json"), JSON.stringify({ name: "vite", version: "0.0.0-hang", type: "module", exports: { ".": { import: "./index.js" }, "./package.json": "./package.json" } }));
+    writeFileSync(join(hang, "node_modules", "vite", "index.js"), "await new Promise(() => {});\nexport const build = () => {};\n");
+    assert.equal(spawnSync("git", ["init", "-q"], { cwd: hang }).status, 0);
+    const pending = spawnSync(process.execPath, [script, "--out", join(dir, "out"), "--project", hang, "--allowlist", join(dir, "allow.json")], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(pending.signal, null, "the process must exit by itself, not be killed by the test's timeout");
+    assert.equal(pending.status, 1, `stdout: ${pending.stdout}\nstderr: ${pending.stderr}`);
+    assert.doesNotMatch(pending.stdout, /PASS/);
+    assert.doesNotMatch(pending.stderr, /FAIL:|ERROR:/); // no verdict was reached; the pre-set exit code alone fails the run
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an empty allowlist still judges the artifact: nothing is exempt, and external or unexplained scripts stay refused", async () => {
+  const { nodeModules } = viteProject();
+  const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));
+  try {
+    const app = join(dir, "app");
+    miniProject(app, nodeModules, ["react"]);
+    writeFileSync(join(dir, "allow.json"), JSON.stringify({ ...ALLOW_DOC, allow: [] }));
+    const argv = (...extra) => argvFor(dir, app, ...extra);
+    const lines = [];
+    await run(argv(), lines);
+    assert.ok(lines.some((line) => line.includes("PASS; no shipped script resolves code from: (allowlist is empty)")), lines.join("\n"));
+    const dist = join(dir, "dist");
+    cpSync(join(dir, "out"), dist, { recursive: true });
+    await run(argv("--verify-dist", dist), []);
+    const html = readFileSync(join(dist, "index.html"), "utf8");
+    writeFileSync(join(dist, "index.html"), html.replace("</body>", '<script src="https://cdn.example.invalid/x.js"></script></body>'));
+    await rejectsGate(run(argv("--verify-dist", dist), []), /external script/);
+    writeFileSync(join(dist, "index.html"), html);
+    writeFileSync(join(dist, "payload"), "opaque");
+    await rejectsGate(run(argv("--verify-dist", dist), []), /neither a chunk of this build nor of a recognised inert type/);
+    rmSync(join(dist, "payload"));
+    writeFileSync(join(dist, "extra.js"), "console.log('extra')");
+    await rejectsGate(run(argv("--verify-dist", dist), []), /extra\.js is a script that is not a chunk of this build and not pinned/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("inline workers: one importing picomatch FAILS; two same-named worker builds are both judged; a file worker is opaque", async () => {
   const { nodeModules } = viteProject();
   const dir = mkdtempSync(join(tmpdir(), "bundle-check-real-"));

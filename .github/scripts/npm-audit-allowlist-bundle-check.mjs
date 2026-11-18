@@ -64,7 +64,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GateError, parseAllowlist } from "./npm-audit-allowlist.mjs";
+import { GateError, isEntryScript, parseAllowlist } from "./npm-audit-allowlist.mjs";
 
 export const SCRIPT_RE = /\.(?:m?js|cjs)$/i;
 const HTML_RE = /\.html?$/i;
@@ -1188,13 +1188,21 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
   log(`npm-audit-allowlist-bundle-check: PASS; no shipped script resolves code from: ${names.join(", ") || "(allowlist is empty)"}`);
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  // Every failure exits non-zero, GateError or not: rethrowing from a promise handler would make an ordinary
-  // build or filesystem error an unhandled rejection, which Node may report as a warning and exit 0 under
-  // --unhandled-rejections=warn|none; a gate that did not judge the artifact must never pass.
-  main().catch((error) => {
-    if (error instanceof GateError) console.error(`npm-audit-allowlist-bundle-check: FAIL: ${error.message}`);
-    else console.error(`npm-audit-allowlist-bundle-check: ERROR: the check could not be completed\n${error?.stack ?? error}`);
-    process.exit(1);
-  });
+if (isEntryScript(process.argv[1], import.meta.url)) {
+  // Every failure exits non-zero, GateError or not, and so does a run that never reaches a verdict. The exit
+  // code is 1 from the start and becomes 0 only once main() has fulfilled: a pending import (a Vite entry
+  // whose top-level await never settles) keeps no handle alive, so Node would otherwise drain the event loop
+  // and exit 0 without having judged anything. Rejections are reported and exit 1 explicitly, so Node's
+  // --unhandled-rejections mode plays no part either.
+  process.exitCode = 1;
+  main().then(
+    () => {
+      process.exitCode = 0;
+    },
+    (error) => {
+      if (error instanceof GateError) console.error(`npm-audit-allowlist-bundle-check: FAIL: ${error.message}`);
+      else console.error(`npm-audit-allowlist-bundle-check: ERROR: the check could not be completed\n${error?.stack ?? error}`);
+      process.exit(1);
+    },
+  );
 }
