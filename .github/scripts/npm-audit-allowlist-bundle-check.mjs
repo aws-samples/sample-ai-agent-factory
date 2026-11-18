@@ -111,6 +111,30 @@ export function readInstalledName(dir) {
   return name;
 }
 
+const installedLocks = new Map();
+/**
+ * The `packages` map of the lockfile that records an install root's node_modules tree: npm's hidden
+ * node_modules/.package-lock.json (the installed tree exactly as npm wrote it), else package-lock.json.
+ * null when neither exists, parses, or carries a v2/v3 `packages` map. Cached per install root.
+ */
+export function readInstalledLock(installRoot) {
+  if (installedLocks.has(installRoot)) return installedLocks.get(installRoot);
+  let packages = null;
+  for (const candidate of [join(installRoot, "node_modules", ".package-lock.json"), join(installRoot, "package-lock.json")]) {
+    try {
+      const lock = JSON.parse(readFileSync(candidate, "utf8"));
+      if (lock !== null && typeof lock === "object" && lock.packages !== null && typeof lock.packages === "object") {
+        packages = lock.packages;
+        break;
+      }
+    } catch {
+      // not there or not readable: try the next candidate
+    }
+  }
+  if (packages !== null) installedLocks.set(installRoot, packages); // a missing lockfile is re-checked, never remembered
+  return packages;
+}
+
 /**
  * Classify one Rollup module id: { kind: "package", name, dir } | { kind: "first-party" } | { kind: "virtual" }
  * | { kind: "unknown", why }. Query strings are stripped and the path normalised; a module under
@@ -125,17 +149,24 @@ export function readInstalledName(dir) {
  * own helpers or listed in `trustedVirtual`. Ids under the first-party root (compared as paths) are
  * first-party. Else unknown.
  */
-export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readName = readInstalledName } = {}) {
+export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(), readName = readInstalledName, readLock = readInstalledLock } = {}) {
   if (typeof id !== "string" || id.length === 0) return { kind: "unknown", why: "empty module id" };
   const nul = id.startsWith("\u0000");
   const bare = toPosix(nul ? id.slice(1) : id);
   const path = posix.normalize(bare.split("?")[0]);
   if (path.includes(NODE_MODULES)) {
-    // Walk the node_modules boundaries from the innermost outward: the innermost boundary whose package.json
-    // has a readable name owns the module. A vendored segment without a manifest (…/dist/esm/node_modules/
-    // tslib/) therefore belongs to the package that ships it, while a directory whose manifest is missing,
-    // unreadable or nameless establishes no identity at all and fails closed: an alias (node_modules/matcher
-    // holding picomatch) must never pass under its directory label when its manifest cannot be read.
+    // npm's installation boundaries are what its lockfile records, so the lockfile of the install root (the
+    // directory above the first node_modules) decides. Walking the boundaries from the innermost outward:
+    // a boundary the lockfile records is an installed package whose identity is the lockfile's `name` (an
+    // alias) or its directory, cross-checked against a readable package.json name; a boundary the lockfile
+    // does not record but whose package.json has a name is a vendored copy declaring itself and is attributed
+    // by that name; a boundary with neither is skipped, so a nameless vendored segment (…/dist/esm/node_modules/
+    // tslib/) belongs to the package that ships it. No lockfile, or no identity at any boundary, fails closed:
+    // a directory label is never a name, so an alias cannot pass under its label when its manifest is unreadable.
+    const first = path.indexOf(NODE_MODULES);
+    const installRoot = path.slice(0, first);
+    const lock = readLock(installRoot);
+    if (lock === null) return { kind: "unknown", why: `no lockfile (node_modules/.package-lock.json or package-lock.json) under ${installRoot} records the installation that ${path} belongs to` };
     let innermost = null;
     let searchEnd = path.length;
     for (;;) {
@@ -149,13 +180,23 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
       const valid = label !== "" && !label.startsWith(".") && !label.includes("/.") && segments.length > labelSegments && !(scoped && !isNonEmptyString(segments[1]));
       if (valid) {
         innermost ??= label;
-        const manifestName = readName(path.slice(0, start) + label);
-        if (isNonEmptyString(manifestName) && !manifestName.startsWith(".")) return { kind: "package", name: manifestName, dir: label };
+        const dir = path.slice(0, start) + label;
+        const manifestName = readName(dir);
+        const named = isNonEmptyString(manifestName) && !manifestName.startsWith(".") ? manifestName : null;
+        const entry = lock[path.slice(first + 1, start + label.length)];
+        if (entry !== null && typeof entry === "object") {
+          const identity = isNonEmptyString(entry.name) ? entry.name : label;
+          if (named !== null && named !== identity) {
+            return { kind: "unknown", why: `${dir} is recorded in the lockfile as ${identity} but its package.json is named ${named}` };
+          }
+          return { kind: "package", name: identity, dir: label };
+        }
+        if (named !== null) return { kind: "package", name: named, dir: label };
       }
       searchEnd = at;
     }
     if (innermost === null) return { kind: "unknown", why: `no installed package directory after the node_modules in ${path}` };
-    return { kind: "unknown", why: `the installed directory ${innermost} has no readable package.json name (${path})` };
+    return { kind: "unknown", why: `the installed directory ${innermost} is not recorded in the lockfile and has no readable package.json name (${path})` };
   }
   if (nul || path.startsWith("vite/") || path.startsWith("__vite-") || path.startsWith("virtual:")) {
     if (BUILTIN_VIRTUAL.has(path) || BROWSER_EXTERNAL_RE.test(path)) return { kind: "virtual" };
@@ -170,7 +211,7 @@ export function classifyModule(id, firstPartyRoot, { trustedVirtual = new Set(),
  * Judge the resolved graph. `chunks` is Map<key, moduleIds[]> (worker sub-build chunks keyed "workerN:…"),
  * `assets` Map<fileName, type>. Returns { violations, modules, firstParty, virtual, packages: Set }.
  */
-export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set(), readName = readInstalledName }) {
+export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVirtual = new Set(), readName = readInstalledName, readLock = readInstalledLock }) {
   const allowlisted = new Set([...allow.values()].map((entry) => entry.package));
   if (chunks.size === 0) throw new GateError("the build emitted no JavaScript chunk; this is not a browser build");
   const violations = [];
@@ -182,7 +223,7 @@ export function evaluateGraph({ chunks, assets, allow, firstPartyRoot, trustedVi
     if (!Array.isArray(ids) || ids.length === 0) throw new GateError(`chunk ${fileName} lists no modules; the module graph is incomplete`);
     for (const id of ids) {
       modules += 1;
-      const owner = classifyModule(id, firstPartyRoot, { trustedVirtual, readName });
+      const owner = classifyModule(id, firstPartyRoot, { trustedVirtual, readName, readLock });
       if (owner.kind === "unknown") {
         throw new GateError(`chunk ${fileName} contains module ${JSON.stringify(id)} whose ownership cannot be established: ${owner.why}`);
       }
@@ -466,11 +507,12 @@ const semantic = (attrs, name) => asciiTrim(decodeEntities(attrs.get(name) ?? ""
 
 /**
  * A browser's first pass over an (already entity-decoded, exactly once) URL value: drop tabs and newlines,
- * trim leading and trailing controls and spaces. Anything odd left over (inner whitespace, controls, a
- * backslash) fails. Callers decode the attribute value once, as the tokenizer does; nothing decodes twice.
+ * trim leading and trailing C0 controls and spaces (DEL is not trimmed: a browser keeps and percent-encodes
+ * it). Anything odd left over (inner whitespace, controls, DEL, a backslash) fails. Callers decode the
+ * attribute value once, as the tokenizer does; nothing decodes twice.
  */
 export function cleanUrl(raw, label) {
-  const value = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000- \u007f]+|[\u0000- \u007f]+$/g, "");
+  const value = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000- ]+|[\u0000- ]+$/g, "");
   if (/[\u0000- \u007f\\]/.test(value)) throw new GateError(`${label}: URL ${JSON.stringify(raw)} contains whitespace, control characters or a backslash; refused`);
   return value;
 }
@@ -679,6 +721,14 @@ export function scanDocument(text, label, { xml = false } = {}) {
       throw new GateError(`${label}: <${name}> inside <svg> makes a browser leave the SVG context (foreign-content breakout); refused`);
     }
     if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
+    if (name === "use") {
+      // <use> clones the referenced markup, event handlers included, into this document: only a fragment of
+      // the document itself may be referenced, never another resource (judged or not).
+      const refs = ["href", "xlink:href"].filter((attr) => attrs.has(attr));
+      if (refs.length !== 1) throw new GateError(`${label}: <use> must carry exactly one href or xlink:href; refused`);
+      const ref = asciiTrim(decodeEntities(attrs.get(refs[0]) ?? ""));
+      if (!/^#[^#\s]+$/.test(ref)) throw new GateError(`${label}: <use ${refs[0]}=${JSON.stringify(ref)}> references another resource; only a same-document fragment is allowed`);
+    }
     // Raw-text rules are an HTML-parser notion: not in XML, and not inside <svg>, where a <style> or a
     // <script> is an SVG element whose children are tags. There, nothing is raw and every tag is seen.
     const rawTextHere = RAW_TEXT.has(name) && !xml && foreign.length === 0;
