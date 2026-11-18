@@ -4,7 +4,7 @@
     {
       "id": "GHSA-fc5q-39xc-vjpf",
       "package": "picomatch",
-      "reason": "ReDoS in picomatch's extglob parser (CVE-2026-112366). Every published version is affected (range <= 4.0.7, and 4.0.7 is the latest release); the upstream fix is picomatch PR #194, still unmerged, so no patched version can be installed and npm's only 'fix' is a major downgrade of vite/vitest. picomatch is reached ONLY through build/lint/test tooling (vite -> tinyglobby -> fdir/picomatch, vitest, typescript-eslint -> typescript-estree -> tinyglobby, @rollup/pluginutils); Two kinds of evidence, both re-checked on every CI run: (1) dependency-tree evidence, `npm audit --omit=dev` reports 0, so picomatch is not a production dependency; (2) artifact evidence, npm-audit-allowlist-bundle-check.mjs re-runs each project's own Vite build with a recording plugin and no chunk's resolved module graph contains a module from picomatch, while every shipped script is a chunk of that build or a verbatim copy from the public directory; so it is not shipped even if a dev-only package were imported by application source. Exposure is limited to CI/build availability from attacker-controlled glob patterns, on isolated unprivileged runners.",
+      "reason": "ReDoS in picomatch's extglob parser (CVE-2026-112366). Every published version is affected (range <= 4.0.7, and 4.0.7 is the latest release); the upstream fix is picomatch PR #194, still unmerged, so no patched version can be installed and npm's only 'fix' is a major downgrade of vite/vitest. picomatch is reached ONLY through build/lint/test tooling (vite -> tinyglobby -> fdir/picomatch, vitest, typescript-eslint -> typescript-estree -> tinyglobby, @rollup/pluginutils); Two kinds of evidence, both re-checked on every CI run: (1) dependency-tree evidence, `npm audit --omit=dev` reports 0, so picomatch is not a production dependency; (2) artifact evidence, npm-audit-allowlist-bundle-check.mjs re-runs each project's own Vite build with a recording plugin: no chunk's resolved module graph (main build or inline workers) contains a module from picomatch, the deployment build's output consists only of those chunks (same bytes), the pinned repository-authored scripts below and documents whose inline scripts are pinned below; so no shipped script resolves code from picomatch, even if a dev-only package were imported by application source. Exposure is limited to CI/build availability from attacker-controlled glob patterns, on isolated unprivileged runners.",
       "references": [
         "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
         "https://github.com/micromatch/picomatch/pull/194"
@@ -12,5 +12,35 @@
       "added": "2026-11-18",
       "expires": "2026-12-16T00:00:00Z"
     }
-  ]
+  ],
+  "bundle": {
+    "_comment": "Read by .github/scripts/npm-audit-allowlist-bundle-check.mjs. Everything a browser can run must be explained: a chunk of the project's own Vite build (judged from Rollup's resolved module graph), one of Vite's own helper modules, a virtual module listed here, or a repository-authored script pinned here. 'project' is the path from the repository root. An inline pin is the sha256 of the script body with each line trimmed and empty lines dropped; a 'pattern' pin is an anchored regular expression for generated stubs. The check prints the sha256 of any unpinned inline script so a reviewed change can be re-pinned deliberately.",
+    "trustedVirtualModules": [
+      {
+        "id": "\u0000virtual:repo-index",
+        "project": "docs-site",
+        "reason": "Generated at build time by docs-site/src/vite-plugins/repo-index.ts from files in this repository (notebook list, Cedar policy text, documentation titles); it contains data, not code from any npm package."
+      }
+    ],
+    "firstPartyScripts": [
+      {
+        "project": "Agentic-ai-self-service/frontend",
+        "public": "agentcore-chat-v1.js",
+        "sha256": "58216cc2657db10b9b9d5f25791497687a50c8f0f1c4010625133588bf50a5bb",
+        "reason": "Hand-written embeddable chat web component (frontend/public/agentcore-chat-v1.js), served verbatim from public/ for customers to drop into their own pages; plain DOM code with no dependencies."
+      },
+      {
+        "project": "docs-site",
+        "inline": "sha256",
+        "sha256": "c3f5b1ce2768e5a436ac8faa1ae8053d05f0bef8b6d72cf108602902d61fa211",
+        "reason": "The legacy hash-router redirect shim in docs-site/index.html (the <!-- hash-shim --> block that maps '/#/security' style URLs to their new paths); plain DOM code with no dependencies."
+      },
+      {
+        "project": "docs-site",
+        "inline": "pattern",
+        "pattern": "^window\\.location\\.replace\\('/sample-ai-agent-factory/[A-Za-z0-9._/-]*' \\+ window\\.location\\.search \\+ window\\.location\\.hash\\);$",
+        "reason": "The one-line redirect stub docs-site/scripts/prerender.mjs writes for every moved route (redirectStub); the target is a site-relative path under the GitHub Pages base, nothing else."
+      }
+    ]
+  }
 }
