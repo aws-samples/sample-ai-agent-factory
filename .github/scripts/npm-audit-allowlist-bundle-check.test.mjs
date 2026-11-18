@@ -131,7 +131,7 @@ test("an allowlisted package in any chunk is a violation; unknown ownership and 
   throwsGate(() => graph([["a.js", APP]], ["assets/module.wasm"]), /no recognised inert type/);
   throwsGate(() => graph([["a.js", [`${ROOT}/node_modules/react/index.js`]]]), /no first-party module/);
   throwsGate(() => graph([["a.js", [`${ROOT}/src/main.tsx`]]]), /no npm package/);
-  assert.deepEqual(["x.html", "x.svg", "x.css", "x.png", "x.wasm", "x"].map(inertKind), ["html", "svg", "text", "binary", null, null]);
+  assert.deepEqual(["x.html", "x.xhtml", "x.svg", "sitemap.xml", "x.css", "x.png", "x.wasm", "x"].map(inertKind), ["html", "html", "xml", "xml", "text", "binary", null, null]);
 });
 
 test("the bundle-trust section is validated strictly and filtered by project", () => {
@@ -180,18 +180,50 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   assert.deepEqual(scan('<link rel="modulepreload" href="/a.js"><link rel="preload" as="script" href="b.js"><link rel="preload" as="style" href="c.css">').preloads, ["/a.js", "b.js"]);
   assert.deepEqual(scan('<meta http-equiv="refresh" content="0; url=/site/x/" />').refreshes, ["/site/x/"]);
   assert.deepEqual(scan('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>').scripts, []);
-  assert.equal(scan('<?xml version="1.0"?><svg><script>x</script></svg>', { svg: true }).scripts.length, 1);
+  assert.equal(scan('<?xml version="1.0"?><svg><script>x</script></svg>', { xml: true }).scripts.length, 1);
   // Raw-text contexts and tag boundaries as the browser reads them: the executable script is the one found.
   assert.deepEqual(scan('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
   assert.deepEqual(scan('<style></stylex><script type="application/json"></style><script>globalThis.pwned=1</script>').scripts.map((s) => s.body), ["globalThis.pwned=1"]);
   assert.deepEqual(scan('<svg xmlns:xlink="http://www.w3.org/1999/xlink"><script xlink:href="https://cdn.example.invalid/p.js"></script></svg>').scripts[0].attrs.get("xlink:href"), "https://cdn.example.invalid/p.js");
   throwsGate(() => scan('<script! type="application/json"><script>globalThis.pwned=1</script>'), /unsupported tag name/);
-  throwsGate(() => scan('<svg xmlns:s="http://www.w3.org/2000/svg"><s:script>globalThis.pwned=1</s:script></svg>', { svg: true }), /qualified element name/);
-  throwsGate(() => scan('<?xml-stylesheet href="x.css"?><svg></svg>', { svg: true }), /processing instructions/);
-  throwsGate(() => scan('<?xmlversion="1.0"?><svg></svg>', { svg: true }), /processing instructions/);
+  throwsGate(() => scan('<svg xmlns:s="http://www.w3.org/2000/svg"><s:script>globalThis.pwned=1</s:script></svg>', { xml: true }), /qualified element name/);
+  throwsGate(() => scan('<?xml-stylesheet href="x.css"?><svg></svg>', { xml: true }), /processing instructions/);
+  throwsGate(() => scan('<?xmlversion="1.0"?><svg></svg>', { xml: true }), /processing instructions/);
   for (const html of ['<svg><a href="https://example.invalid/"><animate attributeName="href" values="https://example.invalid/;javascript:alert(1)" dur="1s" fill="freeze"/></a></svg>', "<svg><set attributeName=href to=x /></svg>", "<svg><animateTransform/></svg>"]) {
     throwsGate(() => scan(html), /SVG animation element/, html);
   }
+  // Doctypes: only the plain HTML one; a quoted identifier could hide ">" and markup. None at all in XML.
+  assert.equal(scan("<!DOCTYPE html>\n<html></html>").scripts.length, 0);
+  throwsGate(() => scan('<!doctype html SYSTEM "><style>"><script src="https://attacker.example/p.js"></script></style>'), /unsupported declaration/);
+  throwsGate(() => scan('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0//EN"><html></html>'), /unsupported declaration/);
+  throwsGate(() => scan('<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd"><svg></svg>', { xml: true }), /unsupported declaration/);
+  // Only ASCII whitespace delimits a tag name; U+00A0 makes "<style >" an unknown element to a browser.
+  throwsGate(() => scan('<style ><script src="https://attacker.example/p.js"></script></style>'), /unsupported tag name/);
+  throwsGate(() => scan('<script src="x.js"></script>'), /unsupported tag name/);
+  assert.equal(scan("<style></style ><script src='https://attacker.example/p.js'></script></style>").scripts.length, 0); // still inside <style>, as in a browser
+  throwsGate(() => scan("<style>a</style >"), /without <\/style>/);
+  assert.equal(scan("<script\t>a</script\n>").scripts[0].body, "a");
+  // Inside <svg> nothing is raw text: <style> and <textarea> are foreign elements whose children are tags, so a
+  // script "hidden" in them is found. <title>/<desc> are HTML integration points and are refused; so is MathML.
+  throwsGate(() => scan('<svg><title><script src="https://attacker.example/p.js"></script></title></svg>'), /inside <svg> is an HTML integration point/);
+  throwsGate(() => scan("<svg><desc>x</desc></svg>"), /inside <svg> is an HTML integration point/);
+  assert.equal(scan("<svg><style>.a{}</style><textarea></textarea></svg>").scripts.length, 0);
+  assert.deepEqual(scan("<svg><style><script>globalThis.pwned=1</script></style></svg>").scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  assert.deepEqual(scan("<svg><textarea><script>globalThis.pwned=1</script></textarea></svg>").scripts.map((s) => s.body), ["globalThis.pwned=1"]);
+  throwsGate(() => scan("<math><mi>x</mi></math>"), /<math> is refused/);
+  assert.equal(scan("<svg><g><path d='M0 0'/></g></svg><title>ok</title>").scripts.length, 0); // depth returns to 0 after </svg>
+  assert.equal(scan('<svg><script>svgCode()</script></svg>').scripts[0].body, "svgCode()");
+  throwsGate(() => scan("<svg><script><b>x</b></script></svg>"), /markup inside an SVG\/XML <script>/);
+  // In XML every "<" starts markup: an SVG file's <title>, <desc> and <style> are ordinary elements.
+  assert.equal(scan('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><title>t</title><desc>d</desc><style>.a{fill:#000}</style></svg>', { xml: true }).scripts.length, 0);
+  assert.equal(scan('<svg xmlns="http://www.w3.org/2000/svg"><title><script>x</script></title></svg>', { xml: true }).scripts.length, 1);
+  assert.equal(scan('<svg xmlns="http://www.w3.org/2000/svg"><style><script>x</script></style></svg>', { xml: true }).scripts.length, 1);
+  throwsGate(() => scan('<svg xmlns="http://www.w3.org/2000/svg"><style>a < b</style></svg>', { xml: true }), /does not start a tag/);
+  // Parsing contexts a browser enters that this scanner refuses rather than models.
+  throwsGate(() => scan("<select><style><script>globalThis.pwned=1</script></style></select>"), /<select> is refused/);
+  throwsGate(() => scan("<select><option>a</option></select>", { xml: true }), /<select> is refused/);
+  throwsGate(() => scan("<script><!--<script>a</script>globalThis.pwned=1--></script>"), /script data escape sequence/);
+  assert.equal(scan("<script>if (a<b) go()</script>").scripts[0].body, "if (a<b) go()");
   throwsGate(() => scan('<!-- <script src="/a.js"> --><script src="https://cdn.example.invalid/x.js"></script>'), /comment contains markup/);
   throwsGate(() => scan("<!-- a > b -->"), /comment contains markup/);
   throwsGate(() => scan("<!-- never closed"), /unterminated comment/);
@@ -219,7 +251,7 @@ test("documents are tokenised conservatively: comments, declarations, contexts, 
   }
   assert.equal(scan('<img src="data:image/svg+xml,%3Csvg%3E"><link rel="icon" href="data:image/png;base64,AAAA">').scripts.length, 0);
   throwsGate(() => scan('<meta http-equiv="refresh" content="0">'), /without a url/);
-  throwsGate(() => scan("<svg><foreignObject><div>x</div></foreignObject></svg>", { svg: true }), /foreignObject/);
+  throwsGate(() => scan("<svg><foreignObject><div>x</div></foreignObject></svg>", { xml: true }), /foreignObject/);
   assert.equal(decodeEntities("&#106;ava&#x53;cript&colon;&amp;&lt;&quot;&unknown;"), 'javaScript:&<"&unknown;');
 });
 
@@ -274,6 +306,10 @@ test("HTML documents: known sources, pinned inline scripts, inert data blocks, b
     throwsGate(() => judge('<script type="text/javascript1.5">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge('<script language="javascript">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
     throwsGate(() => judge('<script type="application/x-javascript">globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
+    // An empty or valueless `language` falls back to JavaScript (HTML Standard), so it is executable.
+    throwsGate(() => judge('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 1 is not pinned/);
+    throwsGate(() => judge("<script language>import('https://attacker.example/matcher.js')</script>"), /inline script 1 is not pinned/);
+    assert.equal(judge('<script language="vbscript">x</script>').data, 1);
     assert.equal(judge('<script type="text/template">{"dep":"react"}</script>').data, 1);
     // Tokenizer states and SVG sources.
     throwsGate(() => judge('<noscript><script type="application/json"></noscript><script>globalThis.pwned=1</script>'), /inline script 1 is not pinned/);
@@ -296,13 +332,15 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     mkdirSync(join(outDir, "assets"), { recursive: true });
     mkdirSync(publicDir);
     const put = (rel, content) => writeFileSync(join(outDir, rel), content);
+    // Like the docs site's hand-authored diagrams: XML declaration, <title>, <desc>, a CSS <style>, a comment.
+    const CLEAN_SVG = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><title>Logo</title><desc>d</desc><style>.a{fill:#000}</style><!-- shape --><path class="a" d="M0 0h1"/></svg>';
     put("assets/index-abc.js", "console.log(1)");
     put("assets/index-abc.css", "body{}");
     put("assets/data.bin", "binary chunk");
     put("embed.js", EMBED);
     writeFileSync(join(publicDir, "embed.js"), EMBED);
     put("index.html", `<!doctype html><html><head><script>${INLINE}</script></head><body><script type="module" src="/site/assets/index-abc.js"></script><script src="/site/embed.js"></script></body></html>`);
-    put("logo.svg", '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>');
+    put("logo.svg", CLEAN_SVG);
     put("robots.txt", "User-agent: *\n");
     put("favicon.ico", Buffer.from([0, 0, 1, 0]));
     const chunkHashes = new Map([["assets/index-abc.js", sha256("console.log(1)")], ["assets/data.bin", sha256("binary chunk")]]);
@@ -341,7 +379,19 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     throwsGate(() => check(), /robots\.txt mentions allowlisted package picomatch/);
     put("robots.txt", "User-agent: *\n");
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
-    throwsGate(() => check(), /logo\.svg is an SVG document carrying a <script>/);
+    throwsGate(() => check(), /logo\.svg is an XML document carrying a <script>/);
+    put("logo.svg", CLEAN_SVG);
+    // Any XML file is judged as a document a browser may render: XHTML/SVG script, DTDs and stylesheet PIs fail.
+    put("sitemap.xml", '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.invalid/</loc></url></urlset>\n');
+    assert.equal(check().files, 9);
+    put("feed.xml", '<html xmlns="http://www.w3.org/1999/xhtml"><body><script src="https://attacker.example/matcher.js"></script></body></html>');
+    throwsGate(() => check(), /feed\.xml is an XML document carrying a <script>/);
+    put("feed.xml", '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd"><svg/>');
+    throwsGate(() => check(), /unsupported declaration/);
+    put("feed.xml", '<?xml version="1.0"?><?xml-stylesheet href="x.xsl" type="text/xsl"?><feed/>');
+    throwsGate(() => check(), /processing instructions/);
+    rmSync(join(outDir, "feed.xml"));
+    rmSync(join(outDir, "sitemap.xml"));
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg" onload="x()"></svg>');
     throwsGate(() => check(), /inline event handler/);
     put("logo.svg", '<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:x"></a></svg>');
@@ -352,7 +402,7 @@ test("every output file is a hash-checked chunk, a pinned tracked public script,
     throwsGate(() => check(), /SVG animation element/);
     put("logo.svg", '<?xml-stylesheet href="x.css"?><svg xmlns="http://www.w3.org/2000/svg"></svg>');
     throwsGate(() => check(), /processing instructions/);
-    put("logo.svg", '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>');
+    put("logo.svg", CLEAN_SVG);
     // Pinned public text that names the package by word still fails; non-word matches do not.
     const vendored = "// bundled copy of picomatch 4.0.7\n";
     const trustVendored = parseBundleTrust({ allow: [], bundle: { firstPartyScripts: [{ project: ".", public: "embed.js", sha256: sha256(vendored), reason: REASON }, { project: ".", inline: "sha256", sha256: sha256(INLINE), reason: REASON }] } }, ".");
@@ -564,6 +614,10 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await run(argv("--verify-dist", dist), lines);
     assert.match(lines.join("\n"), /deployment build .*: .* every script byte-identical to this build's chunks or pinned/);
     await rejectsGate(run(argv("--verify-dist", join(dir, "nope")), []), /does not exist/);
+    // A hand-authored SVG asset with <title>, <desc>, a CSS <style> and comments (as the docs site ships) is accepted.
+    writeFileSync(join(dist, "atlas.svg"), '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" role="img" aria-labelledby="t d">\n  <title id="t">Atlas</title>\n  <desc id="d">A map</desc>\n  <style>\n    /* entrance animation */\n    @media (prefers-reduced-motion: no-preference) { .a { animation: f 1s both; } @keyframes f { from { opacity: 0; } to { opacity: 1; } } }\n  </style>\n  <!-- legend -->\n  <path class="a" d="M0 0h1"/>\n</svg>\n');
+    await run(argv("--verify-dist", dist), []);
+    rmSync(join(dist, "atlas.svg"));
     const chunk = walkOutput(dist).find((rel) => /^assets\/.*\.js$/.test(rel));
     const html = readFileSync(join(dist, "index.html"), "utf8");
     const originalChunk = readFileSync(join(dist, chunk));
@@ -574,7 +628,7 @@ test("the deployment build's output must equal this build's chunks and pins (--v
       writeFileSync(join(dist, chunk), originalChunk);
       writeFileSync(join(dist, "index.html"), html);
       writeFileSync(join(dist, "embed.js"), EMBED);
-      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg"]) rmSync(join(dist, extra), { force: true });
+      for (const extra of ["extra.js", "matcher.txt", "payload", "module.wasm", "evil.svg", "feed.xml"]) rmSync(join(dist, extra), { force: true });
     };
     const inHtml = (snippet) => () => writeFileSync(join(dist, "index.html"), html.replace("</body>", `${snippet}</body>`));
     await refused(() => writeFileSync(join(dist, chunk), Buffer.concat([originalChunk, Buffer.from("\n/* appended */\n")])), /rewritten after the build/);
@@ -582,7 +636,15 @@ test("the deployment build's output must equal this build's chunks and pins (--v
     await refused(() => writeFileSync(join(dist, "matcher.txt"), "picomatch compiled payload\n"), /matcher\.txt mentions allowlisted package picomatch/);
     await refused(() => writeFileSync(join(dist, "payload"), "opaque"), /payload is neither a chunk of this build nor of a recognised inert type/);
     await refused(() => writeFileSync(join(dist, "module.wasm"), "\0asm"), /module\.wasm is neither a chunk/);
-    await refused(() => writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"), /evil\.svg is an SVG document carrying a <script>/);
+    await refused(() => writeFileSync(join(dist, "evil.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>x()</script></svg>"), /evil\.svg is an XML document carrying a <script>/);
+    await refused(() => writeFileSync(join(dist, "feed.xml"), '<html xmlns="http://www.w3.org/1999/xhtml"><body><script src="https://attacker.example/matcher.js"></script></body></html>'), /feed\.xml is an XML document carrying a <script>/);
+    await refused(() => writeFileSync(join(dist, "index.html"), html.replace(/<!doctype html>/i, '<!doctype html SYSTEM "><style>"><script src="https://attacker.example/p.js"></script></style>')), /unsupported declaration/);
+    await refused(inHtml('<style ><script src="https://attacker.example/p.js"></script></style>'), /unsupported tag name/);
+    await refused(inHtml('<svg><title><script src="https://attacker.example/p.js"></script></title></svg>'), /inside <svg> is an HTML integration point/);
+    await refused(inHtml("<svg><style><script>globalThis.pwned=1</script></style></svg>"), /inline script 2 is not pinned/);
+    await refused(inHtml("<select><style><script>globalThis.pwned=1</script></style></select>"), /<select> is refused/);
+    await refused(inHtml("<script><!--<script>a</script>globalThis.pwned=1--></script>"), /script data escape sequence/);
+    await refused(inHtml('<script language="">import("https://attacker.example/matcher.js")</script>'), /inline script 2 is not pinned/);
     await refused(() => writeFileSync(join(dist, "embed.js"), "/* replaced after the build */\n"), /embed\.js does not match its pin/);
     await refused(inHtml("<script>window.__late = 1</script>"), /inline script 2 is not pinned/);
     await refused(inHtml('<!-- <script src="/assets/known.js"> --><script src="https://cdn.example.invalid/picomatch.js"></script>'), /comment contains markup/);

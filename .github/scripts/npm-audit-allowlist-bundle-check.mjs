@@ -62,10 +62,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { GateError, parseAllowlist } from "./npm-audit-allowlist.mjs";
 
 export const SCRIPT_RE = /\.(?:m?js|cjs)$/i;
-const HTML_RE = /\.html?$/i;
-const SVG_RE = /\.svg$/i;
+const HTML_RE = /\.x?html?$/i;
+// XML documents (SVG included) can carry XHTML/SVG script and are judged as documents, never as inert text.
+const XML_RE = /\.(?:svg|xml|xsl|xslt|rss|atom)$/i;
 // Inert data a browser does not run: textual kinds are tripwire-scanned, binary kinds are accepted as is.
-const INERT_TEXT_RE = /\.(?:css|json|xml|webmanifest|txt|map|ts|md|vtt|csv)$/i;
+const INERT_TEXT_RE = /\.(?:css|json|webmanifest|txt|map|ts|md|vtt|csv)$/i;
 const INERT_BINARY_RE = /\.(?:png|jpe?g|gif|webp|avif|ico|woff2?|ttf|otf|eot|pdf|mp4|webm|mp3|ogg|wav)$/i;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const NODE_MODULES = "/node_modules/";
@@ -84,10 +85,10 @@ const under = (path, root) => {
   return normalisedPath === normalisedRoot || normalisedPath.startsWith(`${normalisedRoot}/`);
 };
 
-/** What a browser does with an output file that is not a chunk: "html" | "svg" | "text" | "binary" | null (opaque). */
+/** What a browser does with an output file that is not a chunk: "html" | "xml" | "text" | "binary" | null (opaque). */
 export function inertKind(fileName) {
   if (HTML_RE.test(fileName)) return "html";
-  if (SVG_RE.test(fileName)) return "svg";
+  if (XML_RE.test(fileName)) return "xml";
   if (INERT_TEXT_RE.test(fileName)) return "text";
   if (INERT_BINARY_RE.test(fileName)) return "binary";
   return null;
@@ -326,14 +327,20 @@ export function loadAllowlistDocument(path) {
   }
 }
 
-/** Parse the attributes of one start tag, quote-aware, exact names; duplicates or leftovers fail closed. */
+// HTML's ASCII whitespace, the only whitespace that delimits tag names and attributes (U+00A0 and other
+// Unicode spaces do not, so they are never accepted where a browser would read a different token).
+const WS = "[ \\t\\n\\f\\r]";
+const WS_RE = new RegExp(`^${WS}+|${WS}+$`, "g");
+const asciiTrim = (text) => text.replace(WS_RE, "");
+
+/** Parse the attributes of one start tag, quote-aware, exact ASCII names; duplicates or leftovers fail closed. */
 export function parseAttributes(text, label) {
   const attrs = new Map();
   let rest = text;
-  const ATTR = /^\s*([^\s"'=<>/`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/;
-  while (rest.trim().length > 0) {
+  const ATTR = new RegExp(`^${WS}*([a-zA-Z_:][a-zA-Z0-9_:.-]*)(?:${WS}*=${WS}*(?:"([^"]*)"|'([^']*)'|([^ \\t\\n\\f\\r"'=<>\`]+)))?`);
+  while (asciiTrim(rest).length > 0) {
     const match = ATTR.exec(rest);
-    if (!match) throw new GateError(`${label}: cannot parse attributes near ${JSON.stringify(rest.trim().slice(0, 40))}`);
+    if (!match) throw new GateError(`${label}: cannot parse attributes near ${JSON.stringify(asciiTrim(rest).slice(0, 40))}`);
     const name = match[1].toLowerCase();
     if (attrs.has(name)) throw new GateError(`${label}: attribute ${name} is repeated`);
     attrs.set(name, match[2] ?? match[3] ?? match[4] ?? null);
@@ -369,8 +376,8 @@ const JS_MIME = new Set([
 const SCRIPT_SOURCE_ATTRS = ["src", "href", "xlink:href"];
 const DOCUMENT_ORIGIN = "https://document.invalid";
 
-/** An attribute value as the browser reads it for semantics: entity-decoded, trimmed, lower-cased. */
-const semantic = (attrs, name) => decodeEntities(attrs.get(name) ?? "").trim().toLowerCase();
+/** An attribute value as the browser reads it for semantics: entity-decoded, ASCII-trimmed, lower-cased. */
+const semantic = (attrs, name) => asciiTrim(decodeEntities(attrs.get(name) ?? "")).toLowerCase();
 
 /**
  * A browser's first pass over a URL attribute: entity-decode, drop tabs and newlines, trim leading and
@@ -416,15 +423,25 @@ export function refuseAttributes(name, attrs, label) {
 }
 
 /**
- * Tokenise an HTML (or, with svg: true, an SVG) document conservatively. Returns { scripts: [{ attrs, body }],
- * preloads: string[], refreshes: string[] }. Refuses: comments holding markup, declarations other than
- * <!doctype> (the XML prolog is allowed in svg mode), processing instructions, CDATA, a "<" that does not
- * start a tag, unterminated tags, self-closing raw-text elements, refused tags, <link rel="import">,
- * <meta http-equiv="refresh"> without a url, and every attribute refuseAttributes() rejects.
+ * Tokenise an HTML document (or, with xml: true, an XML document such as SVG) conservatively. Returns
+ * { scripts: [{ attrs, body }], preloads: string[], refreshes: string[] }. Refuses: comments holding
+ * markup, any doctype other than the plain "<!doctype html>" (no doctype at all in XML), processing
+ * instructions other than the XML declaration in XML, CDATA, a "<" that does not start a tag, non-ASCII
+ * tag delimiters, unterminated tags, self-closing raw-text elements, <math>, refused tags, <link
+ * rel="import">, <meta http-equiv="refresh"> without a url, and every attribute refuseAttributes()
+ * rejects. Raw-text elements apply only in HTML outside <svg>: in XML every "<" starts markup, and inside
+ * <svg> a <style> or <textarea> is a foreign element whose children are tags, so there is no raw text and
+ * every tag is a tag. The HTML integration points inside <svg> (<title>, <desc>; <foreignObject> is refused
+ * anyway) switch the browser back to HTML parsing, where a raw-text element could swallow a "</svg>" this
+ * depth counter would honour; they are refused. <select> is refused because a browser ignores raw-text
+ * start tags inside it (so "<select><style><script>" runs the script), and a "<!--" inside a <script>
+ * body is refused because the script-data escaped states let the script run on past the first "</script>".
  */
-export function scanDocument(text, label, { svg = false } = {}) {
+export function scanDocument(text, label, { xml = false } = {}) {
   const out = { scripts: [], preloads: [], refreshes: [] };
   const lower = text.toLowerCase();
+  const asciiWs = /[ \t\n\f\r]/;
+  let svgDepth = 0;
   let i = 0;
   while (i < text.length) {
     const lt = text.indexOf("<", i);
@@ -438,35 +455,39 @@ export function scanDocument(text, label, { svg = false } = {}) {
     }
     if (lower.startsWith("<![cdata[", lt)) throw new GateError(`${label}: CDATA sections are refused`);
     if (text[lt + 1] === "!") {
-      if (!/^<!doctype\s/i.test(text.slice(lt, lt + 10))) throw new GateError(`${label}: unsupported declaration at offset ${lt}`);
-      const end = text.indexOf(">", lt);
-      if (end === -1) throw new GateError(`${label}: unterminated doctype`);
-      i = end + 1;
+      // Only the plain HTML doctype: a quoted public or system identifier could hide ">" and markup.
+      const doctype = /^<!doctype[ \t\n\f\r]+html[ \t\n\f\r]*>/i.exec(text.slice(lt, lt + 40));
+      if (xml || !doctype) throw new GateError(`${label}: unsupported declaration at offset ${lt}; only "<!doctype html>" is accepted in HTML`);
+      i = lt + doctype[0].length;
       continue;
     }
     if (text[lt + 1] === "?") {
-      // Only the XML declaration itself, in SVG mode; "<?xml-stylesheet …?>" and the like are refused.
-      if (!svg || !lower.startsWith("<?xml", lt) || !/\s/.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
+      // Only the XML declaration itself, in XML mode; "<?xml-stylesheet …?>" and the like are refused.
+      if (!xml || !lower.startsWith("<?xml", lt) || !asciiWs.test(text[lt + 5] ?? "")) throw new GateError(`${label}: processing instructions are refused`);
       const end = text.indexOf("?>", lt);
       if (end === -1) throw new GateError(`${label}: unterminated XML prolog`);
       i = end + 2;
       continue;
     }
     if (text[lt + 1] === "/") {
-      const end = text.indexOf(">", lt);
-      if (end === -1) throw new GateError(`${label}: unterminated end tag`);
-      i = end + 1;
+      const endTag = /^<\/([a-zA-Z][a-zA-Z0-9:_-]*)[ \t\n\f\r]*>/.exec(text.slice(lt, lt + 80));
+      if (!endTag) throw new GateError(`${label}: unsupported end tag at offset ${lt}`);
+      if (endTag[1].toLowerCase() === "svg" && svgDepth > 0) svgDepth -= 1;
+      i = lt + endTag[0].length;
       continue;
     }
     const nameMatch = /^<([a-zA-Z][a-zA-Z0-9:_-]*)/.exec(text.slice(lt, lt + 80));
     if (!nameMatch) throw new GateError(`${label}: "<" at offset ${lt} does not start a tag; text must be escaped as &lt;`);
     const name = nameMatch[1].toLowerCase();
-    // A browser reads the tag name up to whitespace, "/" or ">": "<script!" is an unknown element, not a
-    // script with an attribute. Anything but those three delimiters after the name is refused.
+    // A browser reads the tag name up to ASCII whitespace, "/" or ">": "<script!" and "<style " are
+    // unknown elements, not a script or style with an attribute. Anything else after the name is refused.
     const delimiter = text[lt + 1 + nameMatch[1].length];
-    if (delimiter !== undefined && !/[\s/>]/.test(delimiter)) throw new GateError(`${label}: unsupported tag name at offset ${lt} ("<${nameMatch[1]}${delimiter}"); refused`);
-    // Namespace-qualified element names (an SVG "s:script") are refused in both modes.
+    if (delimiter !== undefined && !/[ \t\n\f\r/>]/.test(delimiter)) {
+      throw new GateError(`${label}: unsupported tag name at offset ${lt} ("<${nameMatch[1]}${JSON.stringify(delimiter)}"); refused`);
+    }
+    // Namespace-qualified element names (an SVG "s:script") and MathML are refused in both modes.
     if (name.includes(":")) throw new GateError(`${label}: qualified element name <${name}> is refused`);
+    if (name === "math") throw new GateError(`${label}: <math> is refused (MathML parsing context)`);
     let j = lt + 1 + nameMatch[1].length;
     let quote = null;
     while (j < text.length) {
@@ -479,12 +500,24 @@ export function scanDocument(text, label, { svg = false } = {}) {
     }
     if (j >= text.length) throw new GateError(`${label}: unterminated <${name}> tag`);
     const rawAttrs = text.slice(lt + 1 + nameMatch[1].length, j);
-    const selfClosing = /\/\s*$/.test(rawAttrs);
-    const attrs = parseAttributes(rawAttrs.replace(/\/\s*$/, ""), `${label}: <${name}>`);
+    const selfClosing = /\/[ \t\n\f\r]*$/.test(rawAttrs);
+    const attrs = parseAttributes(rawAttrs.replace(/\/[ \t\n\f\r]*$/, ""), `${label}: <${name}>`);
     refuseAttributes(name, attrs, label);
     if (REFUSED_TAGS.has(name)) throw new GateError(`${label}: <${name}> is refused (an embedded or external executable context)`);
     if (name === "foreignobject") throw new GateError(`${label}: <foreignObject> embeds HTML inside SVG; refused`);
+    // In the "in select" insertion mode a browser ignores <style>, <title>, <xmp>, <noscript>, <noembed> and
+    // <noframes> start tags but still runs <script>, so "<select><style><script>" is not raw text to it.
+    if (name === "select") throw new GateError(`${label}: <select> is refused (a parsing context in which raw-text start tags are ignored)`);
     if (SVG_ANIMATION.has(name)) throw new GateError(`${label}: SVG animation element <${name}> can rewrite attributes after validation; refused`);
+    if (name === "svg" && !selfClosing && !xml) svgDepth += 1;
+    // Raw-text rules are an HTML-parser notion: not in XML, and not inside <svg>, where a <style> or a
+    // <script> is an SVG element whose children are tags. There, nothing is raw and every tag is seen.
+    const rawTextHere = RAW_TEXT.has(name) && !xml && svgDepth === 0;
+    // <title> and <desc> inside <svg> are HTML integration points: the browser parses their children as
+    // HTML again, so a raw-text element in there could hide a "</svg>" that this counter would honour.
+    if (!xml && svgDepth > 0 && (name === "title" || name === "desc")) {
+      throw new GateError(`${label}: <${name}> inside <svg> is an HTML integration point and is refused`);
+    }
     if (name === "link") {
       const rel = semantic(attrs, "rel").split(/\s+/);
       if (rel.includes("import")) throw new GateError(`${label}: <link rel="import"> is refused`);
@@ -500,13 +533,33 @@ export function scanDocument(text, label, { svg = false } = {}) {
       out.refreshes.push(match[1].replace(/^['"]|['"]$/g, ""));
     }
     i = j + 1;
-    if (RAW_TEXT.has(name)) {
+    if (name === "script" && !rawTextHere) {
+      // An SVG or XML script element: its content is markup-free text in practice, but it is a script.
+      if (selfClosing) {
+        out.scripts.push({ attrs, body: "" });
+        continue;
+      }
+      const match = /<\/script[ \t\n\f\r]*>/i.exec(text.slice(i));
+      if (!match) throw new GateError(`${label}: <script> without </script>`);
+      const body = text.slice(i, i + match.index);
+      if (body.includes("<")) throw new GateError(`${label}: markup inside an SVG/XML <script> is refused`);
+      out.scripts.push({ attrs, body });
+      i = i + match.index + match[0].length;
+      continue;
+    }
+    if (rawTextHere) {
       if (selfClosing) throw new GateError(`${label}: a self-closing <${name}/> is not how browsers read it; refused`);
-      // The end tag must be the real one: "</stylex>" does not close <style>.
-      const match = new RegExp(`</${name}(?=[\\s/>])`, "i").exec(text.slice(i));
+      // The end tag must be the real one: "</stylex>" or "</style >" does not close <style>.
+      const match = new RegExp(`</${name}(?=[ \\t\\n\\f\\r/>])`, "i").exec(text.slice(i));
       if (!match) throw new GateError(`${label}: <${name}> without </${name}>`);
       const close = i + match.index;
-      if (name === "script") out.scripts.push({ attrs, body: text.slice(i, close) });
+      if (name === "script") {
+        const body = text.slice(i, close);
+        // "<!--" switches the browser's tokeniser to the script-data escaped states, in which a "</script>"
+        // that follows a nested "<script" does not end the script; the browser would run on past this point.
+        if (body.includes("<!--")) throw new GateError(`${label}: a script data escape sequence ("<!--") inside <script> is refused`);
+        out.scripts.push({ attrs, body });
+      }
       i = close; // the end tag is consumed on the next iteration
     }
   }
@@ -527,8 +580,10 @@ export function checkDocuments({ dir, files, known, base, trust, packages = [], 
     result.documents += 1;
     const doc = scanDocument(readFileSync(join(dir, rel), "utf8"), tag(rel));
     for (const { attrs, body } of doc.scripts) {
-      // The type the browser acts on: `type` when present (even empty), else `language` as text/<language>.
-      const type = attrs.has("type") ? semantic(attrs, "type") : attrs.has("language") ? `text/${semantic(attrs, "language")}` : "";
+      // The type the browser acts on (HTML Standard "prepare the script element"): `type` when present
+      // (even empty); else `language` as text/<language> when it is non-empty; else JavaScript.
+      const language = attrs.has("language") ? semantic(attrs, "language") : "";
+      const type = attrs.has("type") ? semantic(attrs, "type") : language !== "" ? `text/${language}` : "";
       if (type === "importmap") throw new GateError(`${tag(rel)}: import maps are refused`);
       const executable = JS_MIME.has(type);
       const sources = SCRIPT_SOURCE_ATTRS.filter((attr) => attrs.has(attr));
@@ -608,10 +663,11 @@ export function judgeOutput({ dir, chunkHashes, trust, publicDir, base, packages
     }
     const kind = inertKind(rel);
     if (kind === "html") continue; // judged below, once every script is known
-    if (kind === "svg") {
+    if (kind === "xml") {
+      // SVG, sitemaps, feeds: an XML document a browser may render natively; it may carry no script at all.
       const text = written().toString("utf8");
-      const doc = scanDocument(text, `${label}${rel}`, { svg: true });
-      if (doc.scripts.length > 0) throw new GateError(`${label}${rel} is an SVG document carrying a <script>; refused`);
+      const doc = scanDocument(text, `${label}${rel}`, { xml: true });
+      if (doc.scripts.length > 0) throw new GateError(`${label}${rel} is an XML document carrying a <script>; refused`);
       tripwire(`${label}${rel}`, text, packages);
       continue;
     }
