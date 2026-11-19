@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — generated agents draw trace and span ids from the operating system, not Python's `random` module (#105)
+
+- **`code_generator.py`, `OTEL_BOOTSTRAP`.** The injected OpenTelemetry bootstrap used the SDK's
+  default id generator, which takes its bits from Python's `random` module, seeded once per
+  process. A runtime restored from a snapshot (`platformVersion: V2`) resumes that seeded state, so
+  independently running instances emitted identical trace and span ids, merging unrelated requests
+  into one trace and making per-invocation accounting unreliable. The bootstrap now defines one
+  `IdGenerator` that reads `os.urandom` (span ids retried while zero, which the SDK treats as
+  invalid): the X-Ray generator keeps its 32-bit epoch-seconds prefix and takes its 96 random bits
+  from it, the external-collector provider is constructed with it, and the provider that
+  `StrandsTelemetry` builds when no endpoint is set gets it assigned before any tracer exists, the
+  same way the bootstrap already assigns its sampler. A provider that a configurator installed
+  before the bootstrap is repaired too, in place: every tracer it created holds a reference to the
+  same generator object, so the bootstrap rebinds that object's two methods to the entropy-backed
+  implementation of the same id shape (classified by type: X-Ray-named generators keep the
+  epoch-seconds prefix, the SDK default is plain, an unknown class is judged from one sample id; an
+  instance with read-only attributes is repaired at its class instead, and an immutable type is
+  replaced with every holder of it, provider and existing tracers alike, redirected to the
+  replacement). The X-Ray
+  prefix is clamped to X-Ray's 32-bit range and a zero id is redrawn. The SDK's
+  `RandomIdGenerator` is no longer imported by generated code. Tests run the bootstrap in paired
+  subprocesses with the `random` module seeded identically on five paths (X-Ray, external
+  collector, no endpoint, pre-configured plain and X-Ray-shaped providers, the last two also
+  emitting through a tracer created before the bootstrap), require different ids and, for X-Ray
+  shapes, a different random suffix, prove on every path that a generator fed from the seeded
+  module is caught, and pin the clamp, the zero redraw and the in-place repair deterministically.
+  No launcher or dependency change.
+
 ### Fixed — canvas usability from external evaluator feedback (Code Interpreter/Browser, tool-to-runtime, runtime-name tabs, validation reasons)
 
 - **Code Interpreter and Browser nodes are usable again.** Dropping either node created it
