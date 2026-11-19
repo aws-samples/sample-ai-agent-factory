@@ -200,7 +200,14 @@ def _environments(project: Path, *, full: bool, log: Path) -> dict[str, Any]:
     steps["backend uv sync --frozen"] = _run(
         [uv, "sync", "--frozen", "--all-extras"], cwd=project / "backend", log=log, env=env
     )
-    tools = {"backend_python": str(project / "backend" / ".venv" / "bin" / "python"), "uv": uv, "npm": _which("npm")}
+    tools = {
+        "backend_python": str(project / "backend" / ".venv" / "bin" / "python"),
+        "uv": uv,
+        "npm": _which("npm"),
+        # The frontend suite runs the repository's npm-audit gate scripts (.github/scripts/) directly
+        # with node, so the executable is recorded by digest like every other tool.
+        "node": _which("node"),
+    }
     if full:
         infra_python = project / "infra" / ".venv" / "bin" / "python"
         steps["infra venv"] = _run(

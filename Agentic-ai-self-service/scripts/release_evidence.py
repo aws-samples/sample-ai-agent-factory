@@ -62,7 +62,7 @@ _SAFE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 #: Tool placeholders are resolved to absolute executables supplied by the operator and
 #: recorded by path AND digest. Context placeholders are filled by the recorder itself.
-_TOOL_PLACEHOLDERS = frozenset({"backend_python", "infra_python", "actionlint", "npm", "uv", "cdk"})
+_TOOL_PLACEHOLDERS = frozenset({"backend_python", "infra_python", "actionlint", "npm", "node", "uv", "cdk"})
 _CONTEXT_PLACEHOLDERS = frozenset({"artifact_dir", "junit_xml", "run_dir", "region", "account_id", "scenario_id"})
 _PASSTHROUGH_ENVIRONMENT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "USER", "SHELL")
 # Names a LIVE scenario child may inherit so the AWS SDK resolves the credential the operator

@@ -83,10 +83,12 @@
       "selector_type": "javascript",
       "check_ids": ["lint-test-build-verify"],
       "commands": [
-        ["{npm}", "audit", "--audit-level=high"],
+        ["{node}", "--test", "../../.github/scripts/npm-audit-allowlist.test.mjs", "../../.github/scripts/npm-audit-allowlist-bundle-check.test.mjs"],
+        ["{node}", "../../.github/scripts/npm-audit-allowlist.mjs", "--level", "high"],
         ["{npm}", "run", "lint"],
         ["{npm}", "run", "test", "--", "--reporter=default", "--reporter=junit", "--outputFile={junit_xml}"],
         ["{npm}", "run", "build"],
+        ["{node}", "../../.github/scripts/npm-audit-allowlist-bundle-check.mjs", "--out", "{artifact_dir}/bundle-graph", "--first-party-root", "../..", "--verify-dist", "dist"],
         ["{npm}", "run", "verify:production-build"]
       ],
       "required_environment": [

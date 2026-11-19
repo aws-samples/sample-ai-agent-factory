@@ -234,6 +234,82 @@ def test_downloadable_offline_suite_is_exact_and_tool_pinned():
         assert (PROJECT_ROOT / "backend" / relative).is_file(), relative
 
 
+def test_frontend_certification_suite_runs_the_npm_audit_gate_exactly_as_ci_does():
+    traceability = _json(TRACEABILITY_PATH)
+    suite = _suite(traceability, "frontend")
+    commands = suite["commands"]
+    gate = "../../.github/scripts/npm-audit-allowlist.mjs"
+    bundle_check = "../../.github/scripts/npm-audit-allowlist-bundle-check.mjs"
+    self_tests = [gate.removesuffix(".mjs") + ".test.mjs", bundle_check.removesuffix(".mjs") + ".test.mjs"]
+
+    assert suite["working_directory"] == "frontend"
+    # The raw audit must not come back: an unpatchable advisory in build-only tooling would fail a
+    # certification campaign that CI, which runs the gate, had already accepted.
+    assert not any(command[:2] == ["{npm}", "audit"] for command in commands)
+    assert commands[0] == ["{node}", "--test", *self_tests]
+    assert commands[1] == ["{node}", gate, "--level", "high"]
+    build = commands.index(["{npm}", "run", "build"])
+    verify = commands.index(["{npm}", "run", "verify:production-build"])
+    bundle = next(index for index, command in enumerate(commands) if command[:2] == ["{node}", bundle_check])
+    assert build < bundle < verify, "the shipped dist/ is judged after the build and before the production verification"
+    assert commands[bundle] == [
+        "{node}",
+        bundle_check,
+        "--out",
+        "{artifact_dir}/bundle-graph",
+        "--first-party-root",
+        "../..",
+        "--verify-dist",
+        "dist",
+    ]
+    # The paths are relative to the suite's working directory and must resolve inside this repository.
+    frontend = PROJECT_ROOT / "frontend"
+    for relative in (gate, bundle_check, *self_tests):
+        assert (frontend / relative).resolve().is_file(), relative
+    assert (frontend / "../..").resolve() == REPOSITORY_ROOT
+
+    # CI's frontend job runs the same gate steps with the same arguments, in the same order around the
+    # build, from the same working directory and with nothing that could swallow a failure, so
+    # certification and CI cannot drift apart. The commands are pinned exactly, not searched for.
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    job = next(job for job in workflow["jobs"].values() if "npm-audit-allowlist.mjs" in _workflow_steps(job))
+    steps = job["steps"]
+
+    def normalized(step: dict) -> str:
+        return " ".join((step.get("run") or "").replace("\\\n", " ").split())
+
+    def only_step(fragment: str) -> int:
+        hits = [index for index, step in enumerate(steps) if fragment in normalized(step)]
+        assert len(hits) == 1, (fragment, hits)
+        return hits[0]
+
+    scripts = '"$GITHUB_WORKSPACE/.github/scripts/'
+    self_test = only_step("npm-audit-allowlist.test.mjs")
+    audit = only_step('npm-audit-allowlist.mjs" --level')
+    built = only_step("npm run build")
+    bundle = only_step('npm-audit-allowlist-bundle-check.mjs" --out')
+    verified = only_step("npm run verify:production-build")
+    assert self_test < audit < built < bundle < verified
+    assert normalized(steps[self_test]) == (
+        f'node --test {scripts}npm-audit-allowlist.test.mjs" {scripts}npm-audit-allowlist-bundle-check.test.mjs"'
+    )
+    assert normalized(steps[audit]) == f'node {scripts}npm-audit-allowlist.mjs" --level high'
+    assert normalized(steps[bundle]) == (
+        f'node {scripts}npm-audit-allowlist-bundle-check.mjs" --out "$RUNNER_TEMP/bundle-graph" '
+        '--first-party-root "$GITHUB_WORKSPACE" --verify-dist dist'
+    )
+    assert normalized(steps[built]) == "npm run build"
+    assert normalized(steps[verified]) == "npm run verify:production-build"
+    for index in (self_test, audit, built, bundle, verified):
+        step = steps[index]
+        assert step.get("working-directory") == "Agentic-ai-self-service/frontend", step.get("name")
+        # A required step must run unconditionally and must fail the job when it fails.
+        assert "if" not in step, step.get("name")
+        assert "continue-on-error" not in step, step.get("name")
+        assert "||" not in normalized(step) and ";" not in normalized(step), step.get("name")
+    assert not any("npm audit" in normalized(step) for step in steps)
+
+
 def test_ci_cannot_skip_release_documentation_or_downloadable_contracts():
     workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
