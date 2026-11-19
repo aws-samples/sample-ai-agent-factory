@@ -20,6 +20,7 @@ import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
 import { LiteLLMRegistryPanel } from './LiteLLMRegistryPanel';
 import { DeployTargetsPanel } from './DeployTargetsPanel';
+import { WorkspacesPanel } from './WorkspacesPanel';
 import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
 import { McpServersPanel } from './registry/McpServersPanel';
 import { TokenInfoCard } from './registry/TokenInfoCard';
@@ -354,6 +355,10 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           {/* Phase 7 — multi-region / multi-account deployment targets (opt-in). */}
           <div className="mt-3">
             <DeployTargetsPanel />
+          </div>
+          {/* Plan §3.B — workspaces, policy and risk-tiered admission (flag `workspacePolicy`, admins). */}
+          <div className="mt-3">
+            <WorkspacesPanel isAdmin={isAdmin} />
           </div>
           {/* Status filter tabs with live counts (reference-registry pattern). */}
           <div className="flex gap-2 mt-3 flex-wrap" role="group" aria-label="Filter agents by status">

@@ -9,6 +9,42 @@ import type { PromotionEvidence, PromotionPolicy } from './evaluations';
 // Types
 // ============================================================================
 
+/** One rule of the risk classifier that fired for the version (plan §3.B). */
+export interface AdmissionReason {
+  code: string;
+  kind: 'floor' | 'modifier';
+  tier: 'low' | 'medium' | 'high';
+  message: string;
+}
+
+/**
+ * The workspace admission decision recorded on the version row at deploy time
+ * (`AdmissionDecision`, camelCase). Absent on versions deployed while the `workspacePolicy`
+ * flag was off.
+ */
+export interface VersionAdmission {
+  outcome: 'admitted' | 'denied';
+  workspaceId: string;
+  tier: 'low' | 'medium' | 'high';
+  reasons: AdmissionReason[];
+  /** Approver groups the tier routes to; empty means auto-approved. */
+  approvers: string[];
+  violations: Array<{ code: string; path: string; message: string }>;
+  admissionVersion: number;
+  classifierVersion: number;
+  /** Tools not verified read-only and custom code (admission version 3): what public ingress may not reach unreviewed. */
+  ingressSensitiveCapabilities?: string[];
+  /** What was judged, as declared (admission version 3); re-admitted when a trigger is attached. */
+  inventory?: Record<string, unknown> | null;
+}
+
+/** One approver group's approval of the version, recorded by the approve route. */
+export interface AdmissionApproval {
+  group: string;
+  approverSub: string;
+  approvedAt: string;
+}
+
 export interface AgentVersionSummary {
   runtime_name: string;
   version_id: string;
@@ -24,6 +60,8 @@ export interface AgentVersionSummary {
   production_gate_required?: boolean | null;
   promotion_policy?: PromotionPolicy | null;
   promotion_evidence?: PromotionEvidence | null;
+  admission?: VersionAdmission | null;
+  admission_approvals?: AdmissionApproval[] | null;
 }
 
 export interface RuntimeSlotsSummary {

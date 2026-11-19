@@ -16,6 +16,24 @@ the same `404` as a nonexistent route.
 `PUT /api/workspaces/{workspaceId}/policy` (scope `admin`) stores one policy per workspace. The
 schema is strict: an unknown key is `422`, and so is `unclassified` inside an allow-list.
 
+A policy is **never replaced blind**. Every stored policy has a version, served as the `ETag` of a
+`GET` or `PUT`: an opaque quoted token (`<incarnation>.<revision>`, where the incarnation is a random id
+minted when the policy is created and the revision counts the writes within it). A `PUT` says what it is
+based on: `If-Match: "<token>"` to replace the policy exactly as it was read, or `If-None-Match: *` to
+create one that does not exist yet. The store enforces the precondition on both attributes in the same
+DynamoDB write, so two admins editing the same policy cannot overwrite each other: the second save is
+`412 policy_revision_conflict` (the body names `expectedVersion` and `currentVersion`) and nothing
+changes, which is what keeps a form opened before a colleague added `g-security` to the high routing from
+silently removing it again. Because a delete followed by a create mints a new incarnation, a form opened
+before the deletion cannot overwrite the recreated policy either (a plain counter would restart at 1 and
+let it; the `412` then says the policy was deleted and recreated). **Deletion is conditional the same
+way**: `DELETE` must carry `If-Match` with the version the admin confirmed, because a workspace without
+its own policy falls back to the org `default`, so a delete confirmation opened before a colleague
+tightened or recreated the policy must not remove it (`412`, nothing deleted). A `PUT` with neither
+header, or a `DELETE` without `If-Match`, is `428 precondition_required`; `If-Match: *`, a weak validator,
+a token this store never issued or both headers at once is `400`. Policies written before versions
+existed read as the legacy token `"0"` and can be claimed or deleted exactly once as such.
+
 ```json
 {
   "workspaceId": "finance",
@@ -103,7 +121,7 @@ names no flow carries no classifications.
 
 ## The risk classifier
 
-Pure and deterministic (`services/risk_classifier.py`, version 2). Each rule is a floor; the
+Pure and deterministic (`services/risk_classifier.py`, version 4). Each rule is a floor; the
 budget rule is a modifier applied last. Reasons are returned in this order.
 
 | Rule | Tier |
@@ -112,7 +130,7 @@ budget rule is a modifier applied last. Reasons are returned in this order.
 | a `write` tool | medium |
 | a non-Bedrock model provider | medium |
 | `confidential` or `pii` knowledge | high |
-| public ingress (webhook / email trigger) **and** a write or pay tool | high |
+| public ingress (webhook / email trigger) **and** an ingress-sensitive capability: a tool that is not verified read-only (write, pay **or unclassified**), or executable custom code | high |
 | custom code | medium |
 | an unclassified tool or knowledge item | `defaults.unclassifiedRiskTier` (medium unless lowered) |
 | per-agent budget above the workspace default | one tier higher |
@@ -164,6 +182,103 @@ Stored policies are read strongly consistently and must be **complete** document
 admin API writes, at every level); a truncated item is refused as corruption rather than read as an
 unconstrained workspace.
 
+## Triggers attached after deployment
+
+A trigger is ingress attached to a **production** runtime after it was admitted
+(`POST /api/runtimes/{name}/triggers`), so the admission decision never saw it. With the flag on, the
+route **re-admits the agent with the trigger added**, under the workspace's **current** policy
+(`services/trigger_admission.py`), after ownership (a non-owner stays `404`), request validation
+(`400`) and eligibility (`409`), and before its first side effect (the webhook's secret), so a refusal
+creates nothing.
+
+The admission decision (version 3) records an **inventory** of what it judged, as the builder declared
+it (model, tools with their labels, knowledge, channels, triggers, custom code, Region, budget):
+exactly the fields the classifier and the allow-lists read, kept as labels rather than effective
+classes so the policy of the day decides what they mean. The attachment rebuilds that spec plus the
+trigger and runs the real admission against today's policy:
+
+| Trigger | Version | Result |
+|---|---|---|
+| `cron`, `eventbridge`, `s3` | any | Allowed without reading anything: the platform's own plumbing never changes the tier. With the flag off, every trigger takes this path. |
+| `webhook` | deployed without admission (flag off at the time) | `403 policy_denied` / `version_not_admitted`: its tools were never classified. Redeploy under the policy first. |
+| `webhook` | admission older than version 3 | `403 policy_denied` / `admission_predates_ingress_rule`: nothing recorded to re-admit from. Redeploy under the policy first. |
+| `webhook` | admitted (version 3) | The **current** policy is read (missing or unreadable: `503`, never permission). The agent plus the webhook is admitted against it in full: a connector, model, data class, channel or Region the policy no longer allows refuses the attachment with the allow-list's own code; the tier is recomputed (public ingress with any **ingress-sensitive capability** is `high`); and every approver group the current policy names for that tier must have approved this version. Pending groups: `403 policy_denied` / `trigger_raises_risk_tier` when the trigger raises the tier, `trigger_requires_approval` when the tier is unchanged but today's routing needs a group the version lacks. A tightened policy therefore applies to an agent admitted `high` under a looser one, and revoking `trustBuilderClassifications` revokes the exemption a `read` label once bought. |
+
+A capability is **ingress-sensitive** when nothing verifies it is harmless behind public ingress: a
+tool whose effective class is `write`, `pay` or **unclassified** (a Lambda nobody classified may mutate
+anything; a builder's `read` label counts only while the workspace trusts builder classifications), or
+any executable **custom code** node (moving the mutation into code is not a way around the gate). The
+decision records the list (`ingressSensitiveCapabilities`) for the badge, from the same classifier
+helper the ingress rule uses; tests pin the recorded inventory to re-admit identically to the original
+spec on every gallery template, and the list to the rule.
+
+The judgement is a snapshot, so the row write is **bound to it**: the trigger's `TransactWriteItems`
+also condition-checks the exact policy item the judgement read. A policy changed or deleted between
+the judgement and the write cancels the transaction (`409`, nothing created). A present but malformed
+admission record is `409`, never read as "no requirement"; a version-3 record missing its inventory or
+capabilities is malformed, and so is an inventory missing **any** of its fields (`tools`, `knowledge`,
+`customCode`, `model`, `region`, ... are required to be present, as explicit empty lists or nulls where
+the agent has none): a record that lost its `tools` list would otherwise re-admit as a toolless, low-risk
+agent and get its webhook without the security approval its real tier needs. Note the consequence until
+specs can declare triggers (Phase 3): approvers
+can only approve the groups a version's admission routed to, so an agent whose current routing names a
+group its admission did not cannot get a webhook at all; the path is a workspace whose policy fits the
+agent's real ingress, then a redeploy. Slack and Teams channel routes do not exist yet; when they do,
+they go through this gate.
+
+```json
+{
+  "detail": {
+    "code": "policy_denied",
+    "workspaceId": "finance",
+    "tier": "medium",
+    "violations": [
+      { "code": "trigger_raises_risk_tier", "path": "/triggers/0/type", "message": "a webhook trigger is public ingress; combined with this agent's write tools it makes the agent high risk, but the version was admitted medium and approval from g-security is missing; in this workspace a high-risk agent needs their approval before it can be reached from the internet" }
+    ],
+    "message": "This trigger cannot be attached: a webhook trigger is public ingress; ... Nothing was created."
+  }
+}
+```
+
+## Admin → Workspaces (the UI)
+
+Admins manage policies from the **Agent Registry** modal, in the admin panels under the search box,
+while the flag is on (off, the panel is not rendered: its routes would answer `404`). The panel lists
+every policy with who it governs, what it allows and who approves; creates or edits one from a
+**preset**; deletes one after an explicit confirmation; and warns when no `default` policy exists
+(with the flag on, every deploy is `503` until one does).
+
+| Preset | Sets |
+|---|---|
+| **Locked-down** | Bedrock only; `toolRiskClasses: [read]` (verified read connectors only; an unclassified Lambda or MCP tool is refused, not floored); `dataClasses: [public, internal]`; `channels: [web, api]`; budgets 50 / 100 / 1000 USD; **strict** Gateway guardrails; unclassified items floored to **high**; medium → the approver groups, high → security + approvers. |
+| **Standard** | Bedrock only; tools and data are not filtered by class (the tier governs: an unclassified or write tool is medium and goes to the approvers, payments or sensitive data is high and goes to security too); budgets 100 / 500 / 5000 USD; standard guardrails; unclassified floored to medium. **Every gallery template deploys under it.** |
+| **Developer** | Nothing constrained, every tier auto-approved, builders' own classifications trusted, unclassified floored to low. |
+
+The approver and security groups are inputs the admin types (a group nobody holds would gate a tier
+forever). They and the medium/high routing fields are one state seen two ways: typing reviewers fills
+the routing, editing the routing refills the reviewers, before or after a preset is applied, so a group
+typed anywhere is never dropped on save. The panel **refuses to save** a policy whose review is
+reduced (a tier auto-approves, or high risk adds no reviewer beyond the medium approvers, which is what
+a reviewed preset with the security group left blank would be) unless the admin ticks *Accept reduced
+review* (the Developer preset ticks it, because that is what it means), and "Create the default
+policy" starts from Standard rather than from an unconstrained document, so the org-wide default
+cannot become "everything auto-approves" by accident. The three preset documents are a contract: the frontend snapshots them to
+`backend/tests/fixtures/workspace_policy/presets/` and `backend/tests/test_workspace_presets.py`
+validates each against the schema and pins what it admits.
+
+**Edit** fetches the policy as the server holds it now, with its version token, and the save names that
+version (`If-Match`); a new policy is created only if none exists (`If-None-Match: *`). When a colleague
+saved first, or deleted and recreated the policy, the backend's `412` is shown verbatim, the admin's form
+is kept, and **Reload current version** fetches the colleague's version so the change can be reapplied on
+top of it instead of over it. **Delete** reads the policy first and shows exactly what is about to be
+deleted (name, version, approval routing) before asking for confirmation; the delete names that version,
+so a policy changed or recreated meanwhile stays and the refusal is shown. A response without a version
+is refused rather than edited or deleted.
+
+Every version in the deploy panel's **Versions** list carries a **tier badge** (`low` / `medium` /
+`high risk`, the classifier's reasons in its tooltip, and the groups whose approval is still pending);
+versions deployed while the flag was off show none.
+
 ## The refusal
 
 ```json
@@ -184,29 +299,38 @@ unconstrained workspace.
 Reason codes: `provider_not_allowed`, `model_not_allowed`, `connector_not_allowed`,
 `tool_risk_class_not_allowed`, `tool_unclassified`, `data_class_not_allowed`, `knowledge_unclassified`,
 `channel_not_allowed`, `region_not_allowed`, `budget_undeclared`, `budget_exceeds_workspace`,
-`workspace_not_member`, `workspace_selection_required`. Every refusal is audited like any other write
-to `/api/deploy`.
+`workspace_not_member`, `workspace_selection_required`; for a trigger attachment, the same allow-list
+codes plus `version_not_admitted`, `admission_predates_ingress_rule`, `trigger_raises_risk_tier` and
+`trigger_requires_approval`. A refused policy write is `precondition_required` (`428`) or
+`policy_revision_conflict` (`412`). Every refusal is audited like any other write
+to `/api/deploy`, `/api/runtimes/{name}/triggers` or `/api/workspaces/{id}/policy`.
 
 ## Where it lives
 
 - Policies: the shared org-config table (`TAG_POLICY_TABLE_NAME`), items `WORKSPACE#<id>#POLICY`
-  under `org_id`; strongly consistent reads; floats stored as `Decimal`. No new table or IAM grant.
+  under `org_id` with an `incarnation` (minted at create) and a `revision` counter; strongly consistent
+  reads; every write conditional on both; floats stored as `Decimal`. No new table or IAM grant.
 - Routes: `/api/workspaces/{proxy+}` → the **deployment** Lambda (`routers/workspace_policies.py`);
   the exact `GET /api/workspaces` (workflow sharing) stays on the workflow Lambda.
 - Code: `schemas/workspace_policy.py`, `services/risk_classifier.py`, `services/admission_spec.py`,
   `services/workspace_admission.py`, `services/workspace_policy_service.py`,
   `services/workspace_approval.py`, the gate in `deployment_handler._reject_workspace_policy_violation`,
-  and the approve route plus promote gate in `routers/versions.py`.
+  the approve route plus promote gate in `routers/versions.py`, and the trigger attachment gate
+  `services/trigger_admission.py` + `routers/triggers._reject_trigger_policy_violation`.
+- UI: `frontend/src/components/modals/WorkspacesPanel.tsx` (with `workspacePresets.ts` and
+  `workspacePolicyForm.ts`), `frontend/src/services/api/workspacePolicies.ts`, and the badge
+  `frontend/src/components/deploy/AdmissionBadge.tsx` on `VersionsList`.
 
 ## Not in this release
 
 - Cedar per-workspace policy sets and the Gateway guardrail profile from `defaults.guardrailProfile`.
-- The Admin → Workspaces UI (presets *Locked-down*, *Standard*, *Developer*) and the tier badge on
-  agent cards; the data for the badge is already served (`admission` on deployment status and version rows).
+- A tier badge on **registry** cards: a registry entry does not carry the admission of the version it
+  was published from, so the badge lives on the Versions list.
 - Aggregate budget reservation across a workspace's agents (`perWorkspaceMonthlyUsd` is recorded, not
   enforced at admission).
 - A trusted source for knowledge data classes; until one exists, a locked workspace treats every
   knowledge item as unclassified.
-- Triggers (and Slack/Teams channels) are attached after deployment by their own routes, so the
-  public-ingress rule fires only for specs that carry them and the channel allow-list sees only the
-  protocol and A2A channels at deploy time; gating those routes on the workspace policy is a follow-up.
+- Spec-declared triggers and Slack/Teams channel routes (Phase 3). Until then the public-ingress rule
+  fires at deploy time only for specs that carry triggers, the channel allow-list sees only the
+  protocol and A2A channels at deploy time, and a trigger attached afterwards is judged by the
+  attachment gate above.

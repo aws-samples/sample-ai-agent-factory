@@ -229,7 +229,7 @@ def _standard_policy(**overrides: Any) -> WorkspacePolicy:
 
 def test_a_medium_risk_canvas_lands_in_staging_and_its_rows_carry_the_admission(spy, medium_flow, table, monkeypatch):
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put("default", _standard_policy())
+    table.store.put("default", _standard_policy(), expected=None)
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
 
@@ -252,7 +252,7 @@ def test_an_explicit_production_request_for_a_medium_risk_canvas_is_409_with_zer
     spy, medium_flow, table, monkeypatch
 ):
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put("default", _standard_policy())
+    table.store.put("default", _standard_policy(), expected=None)
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA], deploymentSlot="production"))
 
@@ -267,7 +267,7 @@ def test_a_low_risk_canvas_still_lands_in_production_with_an_auto_approved_admis
     """Same canvas, but the policy does not route medium anywhere: the agent is still medium risk
     (the classifier is policy-independent) yet has no approver, so it deploys as before."""
     _flags(monkeypatch, {"workspacePolicy": True})
-    table.store.put("default", _standard_policy(approval={}))
+    table.store.put("default", _standard_policy(approval={}), expected=None)
 
     response = _client().post("/api/deploy", json=_body(flowId=FLOW_ID, connectors=[JIRA]))
 

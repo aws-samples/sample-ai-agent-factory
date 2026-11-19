@@ -37,18 +37,28 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.schemas.agent_spec_v2 import AgentSpecV2
 from app.schemas.workspace_policy import RiskTier, WorkspacePolicy
-from app.services.risk_classifier import RiskReason, RiskResult, admissible_data_class, admissible_risk_class, classify
+from app.services.admission_inventory import AdmissionInventory
+from app.services.risk_classifier import (
+    RiskReason,
+    RiskResult,
+    admissible_data_class,
+    admissible_risk_class,
+    classify,
+    ingress_sensitive_capabilities,
+)
 
 #: Wire-level ``code`` of a denied decision; tests assert the exact value.
 POLICY_DENIED = "policy_denied"
 
-#: Bump when the rule set changes behaviour.
-ADMISSION_VERSION = 1
+#: Bump when the rule set or the recorded document changes behaviour.
+#: 2 (development only, no row carries it): recorded ``ingressSensitiveTools``.
+#: 3: records ``ingressSensitiveCapabilities`` and the ``inventory`` a later attachment is re-admitted from.
+ADMISSION_VERSION = 3
 
 
 class PolicyViolation(BaseModel):
@@ -69,6 +79,12 @@ class AdmissionDecision(BaseModel):
     #: Set on both outcomes: a denied agent still has a tier, which the UI badge shows.
     tier: RiskTier
     reasons: list[RiskReason]
+    #: Capabilities public ingress must not reach without the high-tier gate (tools not verified
+    #: read-only, executable custom code), as classified at admission; informational for the badge.
+    ingress_sensitive_capabilities: list[str] = Field(default_factory=list)
+    #: What was judged, as the builder declared it. A trigger attached later is RE-ADMITTED from this
+    #: under the policy of that day; a version-3 decision without it is corrupt (``workspace_approval``).
+    inventory: AdmissionInventory | None = None
     #: Approver groups the tier routes to under this policy. Empty means auto-approve.
     approvers: list[str]
     violations: list[PolicyViolation]
@@ -304,6 +320,8 @@ def admit(spec: AgentSpecV2, policy: WorkspacePolicy) -> AdmissionDecision:
         workspace_id=policy.workspace_id,
         tier=risk.tier,
         reasons=risk.reasons,
+        ingress_sensitive_capabilities=ingress_sensitive_capabilities(spec, policy),
+        inventory=AdmissionInventory.from_spec(spec),
         approvers=approvers_for(risk.tier, policy),
         violations=violations,
         classifier_version=risk.classifier_version,

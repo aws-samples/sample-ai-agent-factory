@@ -209,7 +209,7 @@ they are not reconciled AWS charges or an account-level spending guarantee.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/runtimes/{name}/triggers` | Provision an active `cron` / `eventbridge` / `s3` / `webhook` trigger against the exact owned production deployment; webhook creation returns its signing secret once |
+| `POST` | `/api/runtimes/{name}/triggers` | Provision an active `cron` / `eventbridge` / `s3` / `webhook` trigger against the exact owned production deployment; webhook creation returns its signing secret once. With the `workspacePolicy` flag on, a `webhook` re-admits the agent with the trigger under the workspace's current policy before any side effect: `403 policy_denied` (the allow-list codes, `version_not_admitted`, `admission_predates_ingress_rule`, `trigger_raises_risk_tier`, `trigger_requires_approval`), `409` for an unreadable admission record or a policy that changed between the judgement and the write, `503` for an unreadable policy; schedule/event/file triggers are never judged. See [docs/WORKSPACES.md](WORKSPACES.md#triggers-attached-after-deployment). |
 | `GET` | `/api/runtimes/{name}/triggers` | List the runtime's trigger lifecycle state and provisioned public handles |
 | `DELETE` | `/api/runtimes/{name}/triggers/{id}` | Stop and delete the trigger's platform-owned resources and webhook HMAC secret |
 
@@ -309,9 +309,9 @@ cannot be read, deploys referencing an integration return `503`.
 | `DELETE` | `/api/workflows/{id}/share/{sub}` | Revoke a share |
 | `GET` | `/api/workspaces` | List workspace-visible workflows with effective role |
 | `GET` | `/api/workspaces/policies` | Every workspace policy in the org (flag `workspacePolicy`; `admin` scope; exact `404` while the flag is off). See [docs/WORKSPACES.md](WORKSPACES.md). |
-| `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored) |
-| `PUT` | `/api/workspaces/{workspaceId}/policy` | Create or replace a policy; strict schema (`422` on unknown keys or `unclassified` in an allow-list), the body's `workspaceId` must equal the path's (`400`) |
-| `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete a policy (`204`, idempotent) |
+| `GET` | `/api/workspaces/{workspaceId}/policy` | One workspace's policy (`404` with a message when none is stored); `ETag` is its version, an opaque quoted token (`<incarnation>.<revision>`) |
+| `PUT` | `/api/workspaces/{workspaceId}/policy` | Create (`If-None-Match: *`) or replace (`If-Match: "<token>"`, the `ETag` exactly as read) a policy; never blind: neither header is `428 precondition_required`, a stale or misdirected one (including a token from before a delete and recreate) is `412 policy_revision_conflict` naming `currentVersion`, and nothing changes; `If-Match: *`, a weak validator, a token never issued or both headers is `400`. Strict schema (`422` on unknown keys or `unclassified` in an allow-list); the body's `workspaceId` must equal the path's (`400`). The response's `ETag` is the new version |
+| `DELETE` | `/api/workspaces/{workspaceId}/policy` | Delete exactly the version read: `If-Match: "<token>"` required (`428` without it; `412 policy_revision_conflict` when the policy changed, was recreated or is already gone, nothing deleted); `204` on success |
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
 

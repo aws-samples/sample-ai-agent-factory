@@ -1,0 +1,43 @@
+{
+  "workspaceId": "finance",
+  "name": "Finance",
+  "adminGroups": [
+    "g-admins-super"
+  ],
+  "memberGroups": [
+    "g-finance-builders"
+  ],
+  "allowed": {
+    "providers": [
+      "bedrock"
+    ],
+    "models": [],
+    "connectors": [],
+    "toolRiskClasses": [],
+    "dataClasses": [],
+    "channels": [],
+    "regions": []
+  },
+  "budgets": {
+    "perAgentMonthlyUsd": 100,
+    "maxAgentMonthlyUsd": 500,
+    "perWorkspaceMonthlyUsd": 5000
+  },
+  "approval": {
+    "low": [],
+    "medium": [
+      "g-approvers"
+    ],
+    "high": [
+      "g-security",
+      "g-approvers"
+    ]
+  },
+  "defaults": {
+    "platformVersion": null,
+    "guardrailProfile": "standard",
+    "memory": "shortTerm",
+    "unclassifiedRiskTier": "medium",
+    "trustBuilderClassifications": false
+  }
+}

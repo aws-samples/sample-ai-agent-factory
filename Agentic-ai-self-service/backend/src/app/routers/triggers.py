@@ -100,6 +100,7 @@ from app.services.trigger_store import (
     TriggerClaimConflict,
     TriggerDeleteBusy,
     TriggerDeliveryInactive,
+    TriggerPolicyConflict,
     TriggerSecretDeletionRefused,
     WebhookIngressBusy,
     WebhookIngressConflict,
@@ -310,6 +311,82 @@ def _resolve_owned_runtime(runtime_name: str, caller_sub: str) -> str:
     return _resolve_owned_runtime_claim(runtime_name, caller_sub).target_runtime_arn
 
 
+def _reject_trigger_policy_violation(trigger_type: str, claim: RuntimeClaim):
+    """Workspace policy for the attachment (plan §3.B; ``services/trigger_admission``). Flag-gated, fail closed.
+
+    Behind the ``workspacePolicy`` feature flag: off, this returns ``None`` before reading anything. On,
+    it runs AFTER ownership (a non-owner stays 404), request validation (400) and eligibility (409), and
+    BEFORE the first side effect (the webhook secret), so a refusal costs nothing. A schedule or event
+    trigger is allowed without a read; a webhook is judged against the version row's recorded admission
+    and the workspace's CURRENT policy. A malformed admission record blocks (409) and an unreadable
+    policy is 503, never "no requirement". The ``403 policy_denied`` envelope is the deploy refusal's.
+    Returns the allowed judgement so the caller can bind the row write to the policy item it read
+    (``TriggerAdmission.policy_fence``). Failure TYPES are logged, never request content.
+    """
+    from app.services.feature_flags import get_feature_flags
+
+    if not get_feature_flags().enabled("workspacePolicy"):
+        return None
+
+    from app.services.trigger_admission import judge_trigger_attachment, trigger_denial_detail
+    from app.services.workspace_approval import MalformedAdmissionError
+    from app.services.workspace_policy_service import (
+        DEFAULT_ORG_ID,
+        WorkspacePolicyUnavailableError,
+        get_workspace_policy_store,
+    )
+
+    def _lookup(workspace_id: str):
+        try:
+            return get_workspace_policy_store().get_snapshot(DEFAULT_ORG_ID, workspace_id)
+        except WorkspacePolicyUnavailableError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any store failure is "unavailable"; type only in logs
+            raise WorkspacePolicyUnavailableError(type(exc).__name__) from exc
+
+    version = claim.version
+    try:
+        result = judge_trigger_attachment(
+            trigger_type,
+            version.admission,
+            version.admission_approvals,
+            owner_sub=version.owner_sub,
+            policy_lookup=_lookup,
+        )
+    except MalformedAdmissionError as exc:
+        logger.error(
+            "Trigger refused: runtime %s has an unreadable admission record (%s)", claim.slot.runtime_name, exc
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This runtime's workspace admission record cannot be read, so the trigger was refused rather "
+                "than attached unjudged. Nothing was created. An administrator must look at the version row."
+            ),
+        ) from exc
+    except WorkspacePolicyUnavailableError as exc:
+        logger.error("Trigger refused: workspace policy unavailable (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The workspace policy that governs this runtime could not be read, so the trigger was refused "
+                "rather than attached unjudged. Nothing was created."
+            ),
+        ) from exc
+    logger.info(
+        "Trigger admission: runtime=%s type=%s workspace=%s admitted=%s resulting=%s outcome=%s",
+        claim.slot.runtime_name,
+        trigger_type,
+        result.workspace_id,
+        result.admitted_tier,
+        result.resulting_tier,
+        result.outcome,
+    )
+    if result.outcome == "denied":
+        raise HTTPException(status_code=403, detail=trigger_denial_detail(result))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -478,6 +555,10 @@ async def create_trigger(
             detail="Triggers require a canonical AgentCore production runtime ARN",
         ) from None
 
+    # Workspace policy for the attachment (plan §3.B): the last check before the first side effect. The
+    # allowed judgement carries the policy item it read; the row write below is conditioned on it.
+    policy_admission = _reject_trigger_policy_violation(body.type, claim)
+
     if body.type == TYPE_WEBHOOK:
         # Inbound webhook uses the platform's static /hooks route. Mint the
         # per-trigger HMAC secret before the row transaction; only its ARN is
@@ -509,6 +590,7 @@ async def create_trigger(
             webhook_secret_ref=webhook_secret_ref,
             webhook_out_url=webhook_out_url,
             provisioning_token=provisioning_token,
+            policy_fence=policy_admission.policy_fence if policy_admission is not None else None,
         )
     except Exception as exc:
         # Secrets Manager + DynamoDB cannot share a transaction. Compensate the
@@ -529,6 +611,17 @@ async def create_trigger(
                     "Trigger create compensation could not delete webhook secret for runtime %s",
                     runtime_name,
                 )
+        if isinstance(exc, TriggerPolicyConflict):
+            # Nothing was written; the workspace policy the attachment was judged against changed (or
+            # was deleted) between the judgement and the write. The judgement must be redone.
+            logger.warning("Trigger create for runtime %s lost a race with a workspace policy change", runtime_name)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The workspace policy changed while the trigger was being judged; re-check the policy "
+                    "and retry. Nothing was created."
+                ),
+            ) from None
         if isinstance(exc, TriggerClaimConflict):
             # Nothing was written; the runtime moved under the request. Not a server error and
             # not a 404 either: the caller's read WAS authorized, it is just no longer current.

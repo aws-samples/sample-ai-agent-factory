@@ -67,6 +67,9 @@ export {
   type AgentVersionSummary,
   type RuntimeSlotsSummary,
   type PromoteResult,
+  type VersionAdmission,
+  type AdmissionApproval,
+  type AdmissionReason,
 } from './api/versions';
 
 // ============================================================================
@@ -188,6 +191,15 @@ export {
 // `export … from` re-exports without binding locally, so the ApiClient methods
 // below need their own type import.
 import type { LiteLLMRegistryConfig, LiteLLMServer } from './api/registry';
+import {
+  deleteWorkspacePolicy,
+  getWorkspacePolicy,
+  listWorkspacePolicies,
+  putWorkspacePolicy,
+  type PutPrecondition,
+  type StoredWorkspacePolicy,
+  type WorkspacePolicyDocument,
+} from './api/workspacePolicies';
 
 // ============================================================================
 // Re-export connectors domain
@@ -252,6 +264,25 @@ export {
   addDeployAccount,
   type DeployTargetsConfig,
 } from './api/admin';
+
+// ============================================================================
+// Re-export workspace policies domain (plan §3.B; flag `workspacePolicy`, admin scope)
+// ============================================================================
+
+export {
+  listWorkspacePolicies,
+  getWorkspacePolicy,
+  putWorkspacePolicy,
+  deleteWorkspacePolicy,
+  isRevisionConflict,
+  currentVersionOf,
+  versionFromEtag,
+  preconditionHeaders,
+  POLICY_REVISION_CONFLICT_STATUS,
+  type PutPrecondition,
+  type StoredWorkspacePolicy,
+  type WorkspacePolicyDocument,
+} from './api/workspacePolicies';
 
 // ============================================================================
 // Re-export models domain
@@ -415,6 +446,26 @@ export class ApiClient {
   // Versions
   async listVersions(runtimeName: string): Promise<AgentVersionSummary[]> {
     return apiRequest<AgentVersionSummary[]>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions`, {}, this.baseUrl);
+  }
+
+  // Workspace policies (plan §3.B; flag `workspacePolicy`, admin scope)
+  async listWorkspacePolicies(): Promise<WorkspacePolicyDocument[]> {
+    return listWorkspacePolicies(this.baseUrl);
+  }
+
+  /** The policy with the version token (`ETag`) a later save must name. */
+  async getWorkspacePolicy(workspaceId: string): Promise<StoredWorkspacePolicy> {
+    return getWorkspacePolicy(workspaceId, this.baseUrl);
+  }
+
+  /** `'create'` for a policy that must not exist yet; `{ version }` to replace exactly the one that was read. */
+  async putWorkspacePolicy(policy: WorkspacePolicyDocument, precondition: PutPrecondition): Promise<StoredWorkspacePolicy> {
+    return putWorkspacePolicy(policy, precondition, this.baseUrl);
+  }
+
+  /** Deletes exactly the confirmed version (`If-Match`); a changed or recreated policy is a 412 and stays. */
+  async deleteWorkspacePolicy(workspaceId: string, precondition: { version: string }): Promise<void> {
+    return deleteWorkspacePolicy(workspaceId, precondition, this.baseUrl);
   }
 
   async getSlots(runtimeName: string): Promise<RuntimeSlotsSummary> {

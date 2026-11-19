@@ -4,9 +4,11 @@ Routes (router prefix ``/api/workspaces``), every one behind the ``workspacePoli
 FIRST (off: the exact 404 of a nonexistent route) and the ``admin`` scope SECOND:
 
   GET    /api/workspaces/policies                 list every workspace policy in the org
-  GET    /api/workspaces/{workspaceId}/policy     read one policy (404 when none is stored)
-  PUT    /api/workspaces/{workspaceId}/policy     create or replace a policy (strict schema)
-  DELETE /api/workspaces/{workspaceId}/policy     delete a policy (204; idempotent)
+  GET    /api/workspaces/{workspaceId}/policy     read one policy (404 when none is stored); ``ETag``
+                                                  carries its version token
+  PUT    /api/workspaces/{workspaceId}/policy     create (``If-None-Match: *``) or replace
+                                                  (``If-Match: "<version>"``) a policy (strict schema)
+  DELETE /api/workspaces/{workspaceId}/policy     delete exactly the version read (``If-Match``; 204)
 
 ROUTING: this router is mounted on the DEPLOYMENT Lambda (``app/deployment_handler.py``), not the
 workflow Lambda, because policies live in the shared org-config table that only the deployment
@@ -20,16 +22,31 @@ deploy, so it is an org-admin control, not a per-workspace one; ``adminGroups`` 
 carried for the later UI and for component C, not consulted here. The ``workspaceId`` in the path
 must equal the one in the body on PUT, so a policy cannot be filed under another workspace's key.
 
+Replacement and deletion are never blind. Every stored policy has a version
+(``services/workspace_policy_service.PolicyVersion``: an incarnation minted at creation plus a revision
+within it), served as the ``ETag`` of GET and PUT as an opaque quoted token. A PUT must say what it is
+based on: ``If-Match: "<token>"`` to replace the policy exactly as read, or ``If-None-Match: *`` to
+create one that does not exist yet; a DELETE must name the version it is deleting (``If-Match``). The
+store enforces the precondition atomically with the write, so two admins editing the same policy cannot
+overwrite each other, a policy deleted and recreated under the same id gets a new incarnation (so a form
+opened before the deletion cannot overwrite or delete the recreated policy), and a delete confirmation
+opened before a colleague tightened the policy cannot remove it (a workspace without its own policy
+falls back to the org ``default``). A stale or misdirected save or delete is
+``412 policy_revision_conflict`` naming the current version and nothing changes. A PUT or DELETE
+without its precondition is ``428 precondition_required``; a request that cannot mean one thing (both
+headers, ``If-Match: *``, a token this store never issued) is ``400``.
+
 Fail closed: a store failure is 503 and nothing is written.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 
 from app.schemas.workspace_policy import WorkspacePolicy
 from app.services.feature_flags import require_feature
@@ -37,7 +54,10 @@ from app.services.rbac import require_scopes
 from app.services.workspace_policy_service import (
     DEFAULT_ORG_ID,
     InvalidWorkspaceIdError,
+    PolicyVersion,
+    StoredPolicy,
     WorkspacePolicyError,
+    WorkspacePolicyRevisionConflict,
     WorkspacePolicyStore,
     get_workspace_policy_store,
     validate_workspace_id,
@@ -50,6 +70,15 @@ router = APIRouter(prefix="/api/workspaces", tags=["workspace-policies"])
 _GATES = [Depends(require_feature(FLAG)), Depends(require_scopes("admin"))]
 
 _STORE_UNAVAILABLE = "The workspace policy store is unavailable. Nothing was changed."
+
+#: Wire-level ``detail.code`` values of the precondition refusals; tests and the UI assert them.
+PRECONDITION_REQUIRED = "precondition_required"
+POLICY_REVISION_CONFLICT = "policy_revision_conflict"
+
+_PRECONDITION_HELP = (
+    'send If-Match: "<version>" (the ETag of the policy exactly as you read it) to replace an existing '
+    "policy, or If-None-Match: * to create one that does not exist yet"
+)
 
 
 def _store() -> WorkspacePolicyStore:
@@ -73,6 +102,127 @@ def _as_document(policy: WorkspacePolicy) -> dict[str, Any]:
     return policy.model_dump(by_alias=True, mode="json")
 
 
+def etag_of(version: PolicyVersion) -> str:
+    """The strong validator a version is served as: its token, quoted. Opaque to clients."""
+    return f'"{version.token}"'
+
+
+def _policy_response(record: StoredPolicy) -> Response:
+    return JSONResponse(content=_as_document(record.policy), headers={"ETag": etag_of(record.version)})
+
+
+def parse_if_match(value: str) -> PolicyVersion:
+    """The version an ``If-Match`` names. Only a strong validator this store issued is accepted: ``*``
+    would mean "replace whatever is there", which is exactly the blind write this header exists to
+    forbid, and a weak validator (``W/``) never satisfies ``If-Match``."""
+    token = value.strip()
+    if token == "*":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"If-Match: * would replace the policy without knowing what it says now; {_PRECONDITION_HELP}",
+        )
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        token = token[1:-1]
+    try:
+        return PolicyVersion.parse(token)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"If-Match must be the policy's ETag exactly as served; {_PRECONDITION_HELP}",
+        ) from exc
+
+
+def expected_version(if_match: str | None, if_none_match: str | None) -> PolicyVersion | None:
+    """What the request claims the table holds: ``None`` for "nothing yet" (``If-None-Match: *``), a
+    version for ``If-Match``. Neither header is ``428``; both, or an ``If-None-Match`` other than
+    ``*``, is ``400``: a write whose precondition is ambiguous is not attempted."""
+    if if_match is not None and if_none_match is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"send either If-Match or If-None-Match, not both; {_PRECONDITION_HELP}",
+        )
+    if if_none_match is not None:
+        if if_none_match.strip() != "*":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"If-None-Match must be *, meaning the policy must not exist yet; {_PRECONDITION_HELP}",
+            )
+        return None
+    if if_match is None:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail={
+                "code": PRECONDITION_REQUIRED,
+                "message": (f"A workspace policy is never replaced blind: {_PRECONDITION_HELP}. Nothing was changed."),
+            },
+        )
+    return parse_if_match(if_match)
+
+
+def expected_version_for_delete(if_match: str | None, if_none_match: str | None = None) -> PolicyVersion:
+    """The version a DELETE says it is deleting. There is no "create" form for a delete, so the only
+    acceptable precondition is ``If-Match`` with the token as read. An ``If-None-Match`` on a DELETE is
+    meaningless and, together with ``If-Match``, self-contradictory, so any ``If-None-Match`` is ``400``
+    (a request that cannot mean one thing is never attempted); without ``If-Match`` the request is ``428``."""
+    if if_none_match is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "If-None-Match is not valid on a delete: a policy is deleted only by naming the exact "
+                f"version to remove with If-Match. {_PRECONDITION_HELP}. Nothing was deleted."
+            ),
+        )
+    if if_match is None:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail={
+                "code": PRECONDITION_REQUIRED,
+                "message": (
+                    'A workspace policy is never deleted blind: send If-Match: "<version>" (the ETag of the policy '
+                    "exactly as you read it) to delete that policy. Nothing was deleted."
+                ),
+            },
+        )
+    return parse_if_match(if_match)
+
+
+def _revision_conflict(exc: WorkspacePolicyRevisionConflict, *, deleting: bool = False) -> HTTPException:
+    workspace_id, expected, current = exc.workspace_id, exc.expected, exc.current
+    outcome = "Nothing was deleted." if deleting else "Nothing was changed."
+    if expected is None:
+        message = (
+            f"A policy for workspace '{workspace_id}' already exists; read it and send If-Match with its ETag to "
+            f"replace it. {outcome}"
+        )
+    elif current is None:
+        message = (
+            f"The policy for workspace '{workspace_id}' no longer exists, so there was nothing to "
+            f"{'delete' if deleting else 'replace; send If-None-Match: * to create it'}. {outcome}"
+        )
+    elif exc.recreated:
+        message = (
+            f"The policy for workspace '{workspace_id}' was deleted and recreated since it was read, so the policy "
+            f"you read no longer exists; read the current policy "
+            f"{'before deleting it' if deleting else 'and reapply the change'}. {outcome}"
+        )
+    else:
+        message = (
+            f"The policy for workspace '{workspace_id}' changed since it was read (revision {expected.revision}, "
+            f"now {current.revision}); read the current policy "
+            f"{'before deleting it' if deleting else 'and reapply the change'}. {outcome}"
+        )
+    return HTTPException(
+        status_code=status.HTTP_412_PRECONDITION_FAILED,
+        detail={
+            "code": POLICY_REVISION_CONFLICT,
+            "workspaceId": workspace_id,
+            "expectedVersion": expected.token if expected else None,
+            "currentVersion": current.token if current else None,
+            "message": message,
+        },
+    )
+
+
 @router.get("/policies", dependencies=_GATES)
 def list_policies() -> list[dict[str, Any]]:
     try:
@@ -83,21 +233,26 @@ def list_policies() -> list[dict[str, Any]]:
 
 
 @router.get("/{workspace_id}/policy", dependencies=_GATES)
-def get_policy(workspace_id: str) -> dict[str, Any]:
+def get_policy(workspace_id: str) -> Response:
     workspace_id = _workspace_id(workspace_id)
     try:
-        policy = _store().get(DEFAULT_ORG_ID, workspace_id)
+        record = _store().read(DEFAULT_ORG_ID, workspace_id)
     except (ClientError, BotoCoreError, WorkspacePolicyError) as exc:
         raise _store_failure(exc, "read") from exc
-    if policy is None:
+    if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"No policy is stored for workspace '{workspace_id}'"
         )
-    return _as_document(policy)
+    return _policy_response(record)
 
 
 @router.put("/{workspace_id}/policy", dependencies=_GATES)
-def put_policy(workspace_id: str, body: WorkspacePolicy) -> dict[str, Any]:
+def put_policy(
+    workspace_id: str,
+    body: WorkspacePolicy,
+    if_match: Annotated[str | None, Header()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
     workspace_id = _workspace_id(workspace_id)
     if body.workspace_id != workspace_id:
         raise HTTPException(
@@ -106,20 +261,32 @@ def put_policy(workspace_id: str, body: WorkspacePolicy) -> dict[str, Any]:
                 f"workspaceId in the body ({body.workspace_id!r}) must equal the one in the path ({workspace_id!r})"
             ),
         )
+    expected = expected_version(if_match, if_none_match)
     try:
-        stored = _store().put(DEFAULT_ORG_ID, body)
-    except (ClientError, BotoCoreError) as exc:
+        stored = _store().put(DEFAULT_ORG_ID, body, expected=expected)
+    except WorkspacePolicyRevisionConflict as exc:
+        logger.info("Workspace policy write refused, version conflict: workspace=%s", workspace_id)
+        raise _revision_conflict(exc) from exc
+    except (ClientError, BotoCoreError, WorkspacePolicyError) as exc:
         raise _store_failure(exc, "write") from exc
-    logger.info("Workspace policy stored: workspace=%s", workspace_id)
-    return _as_document(stored)
+    logger.info("Workspace policy stored: workspace=%s version=%s", workspace_id, stored.version.token)
+    return _policy_response(stored)
 
 
 @router.delete("/{workspace_id}/policy", dependencies=_GATES, status_code=status.HTTP_204_NO_CONTENT)
-def delete_policy(workspace_id: str) -> Response:
+def delete_policy(
+    workspace_id: str,
+    if_match: Annotated[str | None, Header()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
     workspace_id = _workspace_id(workspace_id)
+    expected = expected_version_for_delete(if_match, if_none_match)
     try:
-        _store().delete(DEFAULT_ORG_ID, workspace_id)
-    except (ClientError, BotoCoreError) as exc:
+        _store().delete(DEFAULT_ORG_ID, workspace_id, expected=expected)
+    except WorkspacePolicyRevisionConflict as exc:
+        logger.info("Workspace policy delete refused, version conflict: workspace=%s", workspace_id)
+        raise _revision_conflict(exc, deleting=True) from exc
+    except (ClientError, BotoCoreError, WorkspacePolicyError) as exc:
         raise _store_failure(exc, "delete") from exc
-    logger.info("Workspace policy deleted: workspace=%s", workspace_id)
+    logger.info("Workspace policy deleted: workspace=%s version=%s", workspace_id, expected.token)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

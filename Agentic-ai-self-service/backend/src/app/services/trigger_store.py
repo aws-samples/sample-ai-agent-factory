@@ -53,6 +53,7 @@ from app.services.agent_versions_store import (
     get_slots_store,
     get_versions_store,
 )
+from app.services.workspace_policy_service import PolicyFence
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,26 @@ class TriggerClaimConflict(RuntimeError):
     """
 
 
+class TriggerPolicyConflict(TriggerClaimConflict):
+    """The workspace policy the attachment was judged against changed (or was deleted) between the
+    judgement and the trigger write (plan §3.B).
+
+    A whole-transaction outcome like its parent: no trigger row was written and the slot fence did not
+    move. The caller must redo the judgement against the current policy rather than retry.
+    """
+
+
+def _policy_condition_failed(reasons: list[str], index: int) -> bool:
+    """Whether a cancelled transaction failed ONLY on the policy ``ConditionCheck`` at ``index``.
+
+    DynamoDB reports one reason per action in request order (``None`` for an action that passed). When
+    the claim conditions also failed, the runtime moved as well, and the parent conflict is the answer.
+    """
+    if len(reasons) <= index or reasons[index] != "ConditionalCheckFailed":
+        return False
+    return all(reason in ("None", "") for position, reason in enumerate(reasons) if position != index)
+
+
 class TriggerDeleteBusy(RuntimeError):
     """A live delivery lease currently prevents trigger deletion."""
 
@@ -376,8 +397,13 @@ class TriggerStore:
         webhook_path: str | None = None,
         provisioning_token: str | None = None,
         trigger_id: str | None = None,
+        policy_fence: PolicyFence | None = None,
     ) -> Trigger:
         """Write a trigger row, conditioned on the claim it was authorized against, and return it.
+
+        ``policy_fence`` (plan §3.B) adds a fourth action: a ``ConditionCheck`` that the workspace policy
+        item the attachment was judged against is still exactly that document, so a policy tightened
+        or deleted between the judgement and this write cancels the write (``TriggerPolicyConflict``).
 
         F-81f. One ``TransactWriteItems`` with three actions:
 
@@ -505,6 +531,10 @@ class TriggerStore:
                 }
             },
         ]
+        if policy_fence is not None:
+            # Plan §3.B: the attachment was judged against this exact policy item. A policy changed or
+            # deleted since the judgement cancels the write, so no row lands under a superseded permission.
+            items.append(policy_fence.condition_check())
         # The resource's client: it applies the document serializer, so plain Python values go in
         # (typed ``{"S": ...}`` values would be wrapped twice and fail every condition with a
         # TypeError cancellation that looks exactly like a lost race).
@@ -523,6 +553,11 @@ class TriggerStore:
                         runtime_name,
                         reasons or "<none reported>",
                     )
+                if policy_fence is not None and _policy_condition_failed(reasons, len(items) - 1):
+                    raise TriggerPolicyConflict(
+                        f"the workspace policy runtime {runtime_name}'s trigger was judged against changed before "
+                        f"the write; transaction cancelled ({reasons})"
+                    ) from None
                 # No botocore message in the raise: it echoes the request, including the sub.
                 raise TriggerClaimConflict(
                     f"runtime {runtime_name} changed between the ownership read and the trigger write; "
