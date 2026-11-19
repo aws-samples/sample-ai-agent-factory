@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — the release-certification chain runs the npm-audit gate, not the raw audit
+
+- **`release/production-readiness-traceability.json`, frontend suite.** The certification chain
+  ran `npm audit --audit-level=high` directly, so an unpatchable advisory in build-only tooling
+  (as GHSA-fc5q-39xc-vjpf was until GitHub withdrew it) failed a certification campaign that CI
+  had already accepted. The suite now runs exactly what CI runs: the gate's own self-tests, then
+  `.github/scripts/npm-audit-allowlist.mjs --level high` (the full audit with every dependency
+  class included, a second `--omit=dev` audit the allowlist never applies to, and the narrow,
+  expiring allowlist), and after the build
+  `.github/scripts/npm-audit-allowlist-bundle-check.mjs --verify-dist dist` (the shipped `dist/`
+  must consist only of the recorded build's chunks, pinned scripts and judged documents). The
+  recorder gains a `node` tool placeholder so the gate's interpreter is recorded by path and
+  digest like every other tool; the clean-clone scenario resolves it next to `npm`. The contract
+  test pins the suite to these commands and checks the scripts exist at the referenced paths.
+
 ### Fixed — canvas usability from external evaluator feedback (Code Interpreter/Browser, tool-to-runtime, runtime-name tabs, validation reasons)
 
 - **Code Interpreter and Browser nodes are usable again.** Dropping either node created it
