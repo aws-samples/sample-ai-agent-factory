@@ -845,3 +845,348 @@ def test_build_otel_env_vars_rejects_non_namespace_arn():
             },
             runtime_name="agent-x",
         )
+
+
+# A local OTLP sink so the exporters of the X-Ray and external paths have somewhere to deliver and
+# the subprocess exits promptly; the mode is read from ID_PROBE_MODE (xray, external or none).
+_ID_PROBE_SETUP = """
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+os.environ["AWS_REGION"] = "eu-west-1"
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIDEXAMPLE"  # pragma: allowlist secret
+os.environ["AWS_SECRET_ACCESS_KEY"] = "secret-example"  # pragma: allowlist secret
+os.environ["OTEL_SERVICE_NAME"] = "id-probe.DEFAULT"
+os.environ["OTEL_TRACES_SAMPLER"] = "always_on"
+mode = os.environ.pop("ID_PROBE_MODE")
+if mode == "xray":
+    os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = f"http://127.0.0.1:{server.server_port}/v1/traces"
+elif mode == "external":
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"http://127.0.0.1:{server.server_port}"
+    os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] = "http/protobuf"
+elif mode in ("adopted", "adopted-xray"):
+    # A provider configured before the bootstrap (a launcher's configurator): the SDK default
+    # generator, or an X-Ray-shaped one built on the random module like a distro's would be.
+    import time as _pre_time
+    from opentelemetry import trace as _pre_trace
+    from opentelemetry.sdk.trace import TracerProvider as _PreProvider
+    from opentelemetry.sdk.trace.id_generator import RandomIdGenerator as _PreRandom
+
+    class _PreXRay(_PreRandom):
+        def generate_trace_id(self):
+            return (int(_pre_time.time()) << 96) | random.getrandbits(96)
+
+    provider = _PreProvider(id_generator=_PreXRay()) if mode == "adopted-xray" else _PreProvider()
+    _pre_trace.set_tracer_provider(provider)
+    _pre_tracer = _pre_trace.get_tracer("instrumentation-before-bootstrap")
+"""
+
+_ID_PROBE_MODES = ["xray", "external", "none", "adopted", "adopted-xray"]
+_XRAY_SHAPED = {"xray", "adopted-xray"}
+
+_ID_PROBE_ASSERTION = """
+from opentelemetry import trace
+with trace.get_tracer("id-probe").start_as_current_span("probe") as probe_span:
+    context = probe_span.get_span_context()
+pre_context = None
+pre_tracer = globals().get("_pre_tracer")
+if pre_tracer is not None:
+    # A tracer acquired BEFORE the bootstrap still holds the configurator's generator object;
+    # the bootstrap must have repaired that object in place.
+    with pre_tracer.start_as_current_span("probe-before-bootstrap") as pre_span:
+        pre_context = pre_span.get_span_context()
+_otel_force_flush()
+server.shutdown()
+print("IDS", format(context.trace_id, "032x"), format(context.span_id, "016x"))
+if pre_context is not None:
+    print("IDS_PRE", format(pre_context.trace_id, "032x"), format(pre_context.span_id, "016x"))
+"""
+
+
+def _ids_from_seeded_runs(
+    bootstrap: str, mode: str, prelude: str = ""
+) -> list[tuple[str, str, str | None, str | None]]:
+    """Run the bootstrap twice with Python's random module seeded identically; return each run's ids.
+
+    Each entry is (trace, span, earlier_trace, earlier_span); the earlier-tracer pair is None unless the
+    mode installed a provider before the bootstrap.
+    """
+    seeded = "import random\nrandom.seed(20261119)\n" + prelude
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_AUTH_SECRET_ARN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        env.pop(key, None)
+    env["ID_PROBE_MODE"] = mode
+    results = []
+    for _ in range(2):
+        completed = subprocess.run(
+            [sys.executable, "-c", seeded + _ID_PROBE_SETUP + bootstrap + _ID_PROBE_ASSERTION],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=90,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert "OTEL bootstrap failed" not in completed.stderr, completed.stderr
+        lines = completed.stdout.splitlines()
+        _, trace_hex, span_hex = next(line for line in lines if line.startswith("IDS ")).split()
+        pre = next((line.split()[1:] for line in lines if line.startswith("IDS_PRE ")), None)
+        results.append((trace_hex, span_hex, *(pre or (None, None))))
+    return results
+
+
+@pytest.mark.parametrize("mode", _ID_PROBE_MODES)
+def test_generated_ids_do_not_depend_on_the_random_module_state(mode):
+    """A runtime restored from a snapshot resumes Python's seeded random state. Two processes that
+    start from the same seed stand in for two restored instances: the trace and span ids of a span
+    started after the bootstrap (as the agent's own spans are) must differ on every path: X-Ray,
+    external collector, no endpoint, and a provider that a configurator installed before the
+    bootstrap, with a plain or an X-Ray-shaped random-module generator."""
+    assert "RandomIdGenerator as _Otel" not in OTEL_BOOTSTRAP, "the SDK's random-module generator is imported again"
+    (trace_a, span_a, pre_trace_a, pre_span_a), (trace_b, span_b, pre_trace_b, pre_span_b) = _ids_from_seeded_runs(
+        OTEL_BOOTSTRAP, mode
+    )
+    assert len(trace_a) == 32 and len(span_a) == 16
+    assert trace_a != trace_b, mode
+    assert span_a != span_b, mode
+    assert int(trace_a, 16) != 0 and int(span_a, 16) != 0
+    if mode in _XRAY_SHAPED:
+        import time
+
+        # The shape is preserved: an epoch-seconds prefix, and the random suffix itself (not just
+        # the timestamp) differs between the two instances.
+        assert abs(int(trace_a[:8], 16) - int(time.time())) < 60, trace_a
+        assert trace_a[8:] != trace_b[8:], mode
+    if mode.startswith("adopted"):
+        # The tracer the configurator created before the bootstrap is repaired too.
+        assert pre_trace_a is not None and pre_trace_a != pre_trace_b and pre_span_a != pre_span_b, mode
+        if mode in _XRAY_SHAPED:
+            assert pre_trace_a[8:] != pre_trace_b[8:], mode
+    else:
+        assert pre_trace_a is None
+
+
+@pytest.mark.parametrize("mode", _ID_PROBE_MODES)
+def test_a_generator_fed_from_the_random_module_is_caught(mode):
+    """Mutant: every os.urandom read in the bootstrap replaced by bytes from the seeded random
+    module. Identically seeded processes then repeat their ids on every path, which the test above
+    must detect (for the X-Ray shapes the random suffix repeats even when the second differs)."""
+    assert OTEL_BOOTSTRAP.count("_otel_os.urandom(") == 6
+    mutant = OTEL_BOOTSTRAP.replace("_otel_os.urandom(", "_seeded_bytes(")
+    prelude = "def _seeded_bytes(n):\n    return random.getrandbits(8 * n).to_bytes(n, 'big')\n"
+    (trace_a, span_a, pre_trace_a, pre_span_a), (trace_b, span_b, pre_trace_b, pre_span_b) = _ids_from_seeded_runs(
+        mutant, mode, prelude
+    )
+    assert span_a == span_b, "the mutant should have repeated its span id"
+    assert trace_a[8:] == trace_b[8:] if mode in _XRAY_SHAPED else trace_a == trace_b, mode
+    if mode.startswith("adopted"):
+        assert pre_span_a == pre_span_b, "the mutant should have repeated the earlier tracer's span id"
+
+
+def _bootstrap_prelude_namespace() -> dict:
+    """The bootstrap's module-level prefix (imports, generators, repair helper), executed alone."""
+    prefix = OTEL_BOOTSTRAP.split("\ndef _otel_bootstrap():")[0]
+    namespace: dict = {}
+    exec(compile(prefix, "<otel-bootstrap-prelude>", "exec"), namespace)  # noqa: S102 - the repository's own generated source
+    return namespace
+
+
+def test_xray_generator_clamps_the_clock_and_never_returns_zero(monkeypatch):
+    ns = _bootstrap_prelude_namespace()
+    draws = iter([b"\x00" * 12, b"\x00" * 11 + b"\x07"])
+    monkeypatch.setattr(ns["_otel_os"], "urandom", lambda n: next(draws))
+    monkeypatch.setattr(ns["_otel_time"], "time", lambda: -5.0)  # a clock before 1970 clamps to 0
+    assert ns["_XRayIdGenerator"]().generate_trace_id() == 7, "the all-zero id must be redrawn"
+    monkeypatch.setattr(ns["_otel_time"], "time", lambda: float(2**40))  # far past 2106 clamps to 2**32 - 1
+    monkeypatch.setattr(ns["_otel_os"], "urandom", lambda n: b"\x01" * n)
+    trace_id = ns["_XRayIdGenerator"]().generate_trace_id()
+    assert trace_id >> 96 == (1 << 32) - 1 and trace_id < 1 << 128
+
+
+def test_repairing_a_generator_in_place_covers_tracers_created_before_the_bootstrap(monkeypatch):
+    import time
+
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
+
+    ns = _bootstrap_prelude_namespace()
+    repair = ns["_otel_repair_generator"]
+
+    provider = TracerProvider()  # SDK default: one RandomIdGenerator shared by every tracer it creates
+    earlier = provider.get_tracer("instrumentation-before-bootstrap")
+    original = provider.id_generator
+    assert repair(original) is original, "rebound in place, so the earlier tracer is repaired too"
+    monkeypatch.setattr(ns["_otel_os"], "urandom", lambda n: b"\x42" * n)
+    assert original.generate_span_id() == int.from_bytes(b"\x42" * 8, "big")
+    assert original.generate_trace_id() == int.from_bytes(b"\x42" * 16, "big")
+    with earlier.start_as_current_span("via-the-earlier-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+    assert repair(original) is original, "idempotent"
+
+    class AwsXRayIdGenerator(RandomIdGenerator):  # classified by name: keeps the epoch-seconds prefix
+        pass
+
+    xray = repair(AwsXRayIdGenerator())
+    assert abs((xray.generate_trace_id() >> 96) - int(time.time())) <= 1
+
+    class Unknown(RandomIdGenerator):  # classified from a sample id: X-Ray-shaped here
+        def generate_trace_id(self):
+            return (int(time.time()) << 96) | 1
+
+    judged = repair(Unknown())
+    assert abs((judged.generate_trace_id() >> 96) - int(time.time())) <= 1
+
+    class Frozen(IdGenerator):  # read-only attributes: repaired at the class, so earlier tracers follow
+        @property
+        def generate_span_id(self):
+            return lambda: 1
+
+        @property
+        def generate_trace_id(self):
+            return lambda: 1
+
+    frozen = Frozen()
+    frozen_provider = TracerProvider(id_generator=frozen)
+    earlier_frozen = frozen_provider.get_tracer("instrumentation-before-bootstrap-frozen")
+    assert repair(frozen) is frozen
+    assert frozen.generate_span_id() == int.from_bytes(b"\x42" * 8, "big")
+    with earlier_frozen.start_as_current_span("via-the-earlier-frozen-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+
+    # A type whose instance and class both refuse rebinding is replaced, and every holder of it
+    # (the provider and the tracers it already created) is redirected to the replacement.
+    import abc
+
+    class ImmutableMeta(abc.ABCMeta):  # IdGenerator is an ABC, so the metaclass must derive from ABCMeta
+        def __setattr__(cls, key, value):
+            if key in ("generate_span_id", "generate_trace_id"):
+                raise TypeError("immutable")
+            super().__setattr__(key, value)
+
+    class Immutable(IdGenerator, metaclass=ImmutableMeta):
+        def __setattr__(self, key, value):  # the instance refuses rebinding as well
+            raise AttributeError("immutable instance")
+
+        def generate_span_id(self):
+            return 1
+
+        def generate_trace_id(self):
+            return 1
+
+    immutable = Immutable()
+    immutable_provider = TracerProvider(id_generator=immutable)
+    earlier_immutable = immutable_provider.get_tracer("instrumentation-before-bootstrap-immutable")
+
+    class HostileReferrer:  # references the generator but exposes a raising `id_generator` property
+        def __init__(self, generator):
+            self.other = generator
+
+        @property
+        def id_generator(self):
+            raise RuntimeError("not a holder")
+
+    hostile = HostileReferrer(immutable)  # must not abort the repair, and must be left alone
+    replacement = repair(immutable)
+    assert hostile.other is immutable
+    assert replacement is not immutable and isinstance(replacement, ns["_OsEntropyIdGenerator"])
+    assert immutable_provider.id_generator is replacement
+    with earlier_immutable.start_as_current_span("via-the-earlier-immutable-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+    assert immutable.generate_span_id() == 1, "the immutable object itself is untouched"
+
+    # An instance whose own __dict__ shadows the class methods and refuses assignment: the class
+    # repair takes but does not reach the instance, so the holders must be redirected instead.
+    class Shadowed(IdGenerator):
+        def __init__(self):
+            vars(self)["generate_span_id"] = lambda: 1
+            vars(self)["generate_trace_id"] = lambda: 1
+
+        def __setattr__(self, key, value):
+            raise AttributeError("frozen instance")
+
+        def generate_span_id(self):
+            return 2
+
+        def generate_trace_id(self):
+            return 2
+
+    shadowed = Shadowed()
+    shadowed_provider = TracerProvider(id_generator=shadowed)
+    earlier_shadowed = shadowed_provider.get_tracer("instrumentation-before-bootstrap-shadowed")
+    shadow_replacement = repair(shadowed)
+    assert shadow_replacement is not shadowed and shadowed_provider.id_generator is shadow_replacement
+    with earlier_shadowed.start_as_current_span("via-the-earlier-shadowed-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+    assert shadowed.generate_span_id() == 1, "the shadowing instance method is untouched"
+
+    # A proxy that forwards method lookups to a seeded delegate while accepting (and ignoring)
+    # assignments: neither the instance nor the class repair takes effect, so holders are redirected.
+    class Proxy(IdGenerator):
+        def __init__(self, delegate):
+            object.__setattr__(self, "_delegate", delegate)
+
+        def __getattribute__(self, name):
+            if name in ("generate_span_id", "generate_trace_id"):
+                return getattr(object.__getattribute__(self, "_delegate"), name)
+            return object.__getattribute__(self, name)
+
+        def generate_span_id(self):
+            return 3
+
+        def generate_trace_id(self):
+            return 3
+
+    proxy = Proxy(RandomIdGenerator())
+    proxy_provider = TracerProvider(id_generator=proxy)
+    earlier_proxy = proxy_provider.get_tracer("instrumentation-before-bootstrap-proxy")
+    proxy_replacement = repair(proxy)
+    assert proxy_replacement is not proxy and proxy_provider.id_generator is proxy_replacement
+    with earlier_proxy.start_as_current_span("via-the-earlier-proxy-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+
+    # A sealed instance whose assignment policy raises an ordinary exception: the class repair
+    # takes over, and the instance's lookups reach the new methods.
+    class Sealed(IdGenerator):
+        def __setattr__(self, key, value):
+            raise RuntimeError("sealed")
+
+        def generate_span_id(self):
+            return 4
+
+        def generate_trace_id(self):
+            return 4
+
+    sealed = Sealed()
+    sealed_provider = TracerProvider(id_generator=sealed)
+    earlier_sealed = sealed_provider.get_tracer("instrumentation-before-bootstrap-sealed")
+    assert repair(sealed) is sealed
+    with earlier_sealed.start_as_current_span("via-the-earlier-sealed-tracer") as span:
+        assert span.get_span_context().span_id == int.from_bytes(b"\x42" * 8, "big")
+
+    # A dict-like referrer that raises on read or write must be skipped, not abort the repair.
+    class HostileDict(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("not a holder")
+
+    hostile_dict = HostileDict(id_generator=immutable)
+    assert isinstance(repair(immutable), ns["_OsEntropyIdGenerator"])
+    assert dict.__getitem__(hostile_dict, "id_generator") is immutable
