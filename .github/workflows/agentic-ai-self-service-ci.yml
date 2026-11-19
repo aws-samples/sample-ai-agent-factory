@@ -366,9 +366,19 @@ jobs:
       - name: Install
         working-directory: Agentic-ai-self-service/frontend
         run: npm ci
+      # Full `npm audit --audit-level=high` (runtime AND build/dev dependencies), with a narrow expiring
+      # allowlist for advisories that have no patched release (.github/npm-audit-allowlist.json). The
+      # gates' own self-tests run first so a regression in a gate can never pass as a clean audit; they
+      # run from the frontend because the bundle-check cases build real mini projects with its Vite.
+      - name: Audit gate self-test
+        working-directory: Agentic-ai-self-service/frontend
+        run: |
+          node --test \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs" \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.test.mjs"
       - name: Audit dependencies
         working-directory: Agentic-ai-self-service/frontend
-        run: npm audit --audit-level=high
+        run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
       - name: Lint
         working-directory: Agentic-ai-self-service/frontend
         run: npx eslint .
@@ -385,6 +395,24 @@ jobs:
           VITE_COGNITO_USER_POOL_ID: us-east-1_CiFixture
           VITE_COGNITO_CLIENT_ID: ci-fixture-client
         run: npm run build
+      # The allowlist's premise is that an exempted advisory lives only in build tooling. npm's dev/prod
+      # classification cannot prove that (application source importing a dev-only transitive package is
+      # bundled all the same), so the real module graph is checked against the bundle just built: the
+      # project's own Vite build is re-run into a scratch directory with a recording plugin (same config,
+      # mode and VITE_ values, so its chunks are byte-identical to dist/), every chunk's resolved modules are
+      # attributed to their package, and dist/ must consist only of those chunks, scripts pinned in
+      # .github/npm-audit-allowlist.json and documents whose inline scripts are pinned there. Modules
+      # anywhere in this repository are first-party; anything else fails closed.
+      - name: Allowlisted advisories must be absent from the shipped bundle
+        working-directory: Agentic-ai-self-service/frontend
+        env:
+          VITE_API_BASE_URL: https://frontend.example.invalid
+          VITE_AWS_REGION: us-east-1
+          VITE_COGNITO_USER_POOL_ID: us-east-1_CiFixture
+          VITE_COGNITO_CLIENT_ID: ci-fixture-client
+        run: |
+          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" \
+            --out "$RUNNER_TEMP/bundle-graph" --first-party-root "$GITHUB_WORKSPACE" --verify-dist dist
       - name: Verify production bundle
         working-directory: Agentic-ai-self-service/frontend
         env:

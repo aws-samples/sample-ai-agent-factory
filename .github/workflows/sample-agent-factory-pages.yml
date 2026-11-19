@@ -88,8 +88,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Same gate as `npm run audit` (npm audit --audit-level=high) plus the repository's narrow expiring
+      # allowlist for advisories with no patched release (.github/npm-audit-allowlist.json). The gates'
+      # own self-tests run first so a regression in a gate can never pass as a clean audit (the
+      # bundle-check cases build real mini projects with this site's Vite).
+      - name: Audit gate self-test
+        run: |
+          node --test \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.test.mjs" \
+            "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.test.mjs"
+
       - name: Audit dependencies
-        run: npm run audit
+        run: node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist.mjs" --level high
 
       - name: TypeScript check
         run: npm run typecheck
@@ -102,6 +112,18 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The allowlist's premise is that an exempted advisory lives only in build tooling, which npm's
+      # dev/prod classification cannot prove. The site's own client build (the only bundle a browser loads;
+      # the SSR bundle runs at build time to prerender) is re-run into a scratch directory with a recording
+      # plugin, every chunk's resolved modules are attributed to their package, and the prerendered dist/
+      # must consist only of those chunks (same bytes), scripts pinned in .github/npm-audit-allowlist.json
+      # and documents whose inline scripts (the hash shim, the redirect stubs) are pinned there. Modules
+      # anywhere in this repository are first-party; anything else fails closed.
+      - name: Allowlisted advisories must be absent from the shipped bundle
+        run: |
+          node "$GITHUB_WORKSPACE/.github/scripts/npm-audit-allowlist-bundle-check.mjs" \
+            --out "$RUNNER_TEMP/bundle-graph" --first-party-root "$GITHUB_WORKSPACE" --verify-dist dist
 
       - name: Validate static artifact
         run: npm run validate:static

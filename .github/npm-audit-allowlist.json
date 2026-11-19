@@ -1,0 +1,34 @@
+{
+  "_comment": "Narrow, EXPIRING exceptions for `npm audit --audit-level=high`, enforced by .github/scripts/npm-audit-allowlist.mjs in CI. Add an entry only for an advisory with NO patched release, after confirming it does not reach the shipped bundle; always set an expiry so it is re-reviewed. An expired entry fails CI until it is removed (fixed upstream) or renewed with a fresh review.",
+  "allow": [],
+  "bundle": {
+    "_comment": "Read by .github/scripts/npm-audit-allowlist-bundle-check.mjs. Everything a browser can run must be explained: a chunk of the project's own Vite build (judged from Rollup's resolved module graph), one of Vite's own helper modules, a virtual module listed here, or a repository-authored script pinned here. 'project' is the path from the repository root. An inline pin is the sha256 of the script body with each line trimmed and empty lines dropped; a 'pattern' pin is an anchored regular expression for generated stubs. The check prints the sha256 of any unpinned inline script so a reviewed change can be re-pinned deliberately.",
+    "trustedVirtualModules": [
+      {
+        "id": "\u0000virtual:repo-index",
+        "project": "docs-site",
+        "reason": "Generated at build time by docs-site/src/vite-plugins/repo-index.ts from files in this repository (notebook list, Cedar policy text, documentation titles); it contains data, not code from any npm package."
+      }
+    ],
+    "firstPartyScripts": [
+      {
+        "project": "Agentic-ai-self-service/frontend",
+        "public": "agentcore-chat-v1.js",
+        "sha256": "58216cc2657db10b9b9d5f25791497687a50c8f0f1c4010625133588bf50a5bb",
+        "reason": "Hand-written embeddable chat web component (frontend/public/agentcore-chat-v1.js), served verbatim from public/ for customers to drop into their own pages; plain DOM code with no dependencies."
+      },
+      {
+        "project": "docs-site",
+        "inline": "sha256",
+        "sha256": "dec6b402c9ac1de82052066bdf51f892e149e5a58d20c63c33c30a8d960ac8ad",
+        "reason": "The legacy hash-router redirect shim in docs-site/index.html (the <!-- hash-shim --> block that maps '/#/security' style URLs to their new paths), as Vite emits it into every prerendered page; plain DOM code with no dependencies."
+      },
+      {
+        "project": "docs-site",
+        "inline": "pattern",
+        "pattern": "^window\\.location\\.replace\\('/sample-ai-agent-factory/(?:[A-Za-z0-9_-]+/)*' \\+ window\\.location\\.search \\+ window\\.location\\.hash\\);$",
+        "reason": "The one-line redirect stub docs-site/scripts/prerender.mjs writes for every moved route (redirectStub); the target is a path under the GitHub Pages base made of letter/digit/dash/underscore segments each ending in '/', so no dot segment can leave the base."
+      }
+    ]
+  }
+}
