@@ -31,10 +31,11 @@ import urllib.parse
 import zipfile
 
 import pytest
-import yaml
 from app.models.deployment_models import RuntimeConfig
 from app.services.resource_ownership import owner_sub_hash
 from fastapi.testclient import TestClient
+
+from tests.cfn_yaml_support import parse_template_without_intrinsics
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 SUB = "0a1b2c3d-export-staging-owner"
@@ -197,7 +198,7 @@ def test_a_cfn_workload_with_ten_tags_exports_with_four_object_tags_and_all_ten_
     # ...and the workload's own tags are in the template, not lost to make room.
     with zipfile.ZipFile(io.BytesIO(put["Body"])) as zf:
         template_name = next(n for n in zf.namelist() if n.endswith("/template.yaml"))
-        template = yaml.load(zf.read(template_name), Loader=_CfnLoader)
+        template = parse_template_without_intrinsics(zf.read(template_name))
     tagged = [
         r
         for r in template["Resources"].values()
@@ -238,13 +239,6 @@ def test_positive_control_exactly_the_limit_is_not_refused(s3, monkeypatch):
         == 200
     )
     assert len(s3.puts) == 1
-
-
-class _CfnLoader(yaml.SafeLoader):
-    pass
-
-
-_CfnLoader.add_multi_constructor("!", lambda loader, suffix, node: None)
 
 
 @pytest.mark.parametrize(("route", "_prefix", "_type"), ROUTES)

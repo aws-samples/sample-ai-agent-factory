@@ -13,10 +13,11 @@ them; an OpenAPI spec or a Smithy model, which the export has no emitter for, is
 from __future__ import annotations
 
 import pytest
-import yaml
 from app.models.deployment_models import DeployRequest
 from app.services.cfn_template_generator import CfnExportUnsupportedError, CfnTemplateGenerator
 from app.services.gateway_deployer import _default_lambda_tool_schema
+
+from tests.cfn_yaml_support import parse_template_as_strings
 
 ARN = "arn:aws:lambda:us-east-1:111122223333:function:customer-order-tool"
 ARN_B = "arn:aws:lambda:us-east-1:111122223333:function:second-tool:live"
@@ -42,7 +43,7 @@ def _request(gateway_config: dict, **extra) -> DeployRequest:
 
 def _template(gateway_config: dict, **extra) -> dict:
     bundle = CfnTemplateGenerator().generate(_request(gateway_config, **extra))
-    return yaml.load(bundle.template_yaml, Loader=yaml.BaseLoader)
+    return parse_template_as_strings(bundle.template_yaml)
 
 
 def _targets(template: dict) -> dict:

@@ -3364,8 +3364,138 @@ OTEL_BOOTSTRAP = '''
 # OTEL observability bootstrap (injected by AgentCore Flows)
 import os as _otel_os
 import logging as _otel_logging
+import time as _otel_time
 _otel_log = _otel_logging.getLogger("agentcore.otel")
 _otel_provider = None
+
+try:
+    from opentelemetry.sdk.trace.id_generator import IdGenerator as _OtelIdGenerator
+except ImportError:  # no SDK: _otel_bootstrap() reports it and continues without tracing
+    _OtelIdGenerator = object
+
+
+class _OsEntropyIdGenerator(_OtelIdGenerator):
+    """Trace and span ids from the operating system's entropy.
+
+    The SDK default draws them from Python's random module, which is seeded
+    once per process: a runtime restored from a snapshot resumes that state
+    and repeats ids across restored instances. os.urandom does not.
+    """
+
+    def generate_span_id(self):
+        span_id = int.from_bytes(_otel_os.urandom(8), "big")
+        while span_id == 0:
+            span_id = int.from_bytes(_otel_os.urandom(8), "big")
+        return span_id
+
+    def generate_trace_id(self):
+        trace_id = int.from_bytes(_otel_os.urandom(16), "big")
+        while trace_id == 0:
+            trace_id = int.from_bytes(_otel_os.urandom(16), "big")
+        return trace_id
+
+
+class _XRayIdGenerator(_OsEntropyIdGenerator):
+    """X-Ray trace IDs: 32-bit epoch seconds plus 96 random bits.
+
+    The prefix is clamped to the 32-bit range X-Ray defines, so a platform
+    clock before 1970 or past 2106 still yields a valid id, and a zero id is
+    redrawn like the plain generator's.
+    """
+
+    def generate_trace_id(self):
+        seconds = min(max(int(_otel_time.time()), 0), (1 << 32) - 1)
+        trace_id = (seconds << 96) | int.from_bytes(_otel_os.urandom(12), "big")
+        while trace_id == 0:
+            trace_id = (seconds << 96) | int.from_bytes(_otel_os.urandom(12), "big")
+        return trace_id
+
+
+def _otel_repair_generator(generator):
+    """Make an existing id generator draw from the OS, keeping its id shape.
+
+    A provider configured before this bootstrap (a launcher's configurator,
+    for example) handed every tracer it created a reference to this one
+    generator object, so rebinding the object's two methods repairs tracers
+    created before the bootstrap as well as those created after it. The id
+    shape is classified by type: a generator named for X-Ray keeps the
+    epoch-seconds prefix, the SDK's RandomIdGenerator is plain, and an
+    unknown class is judged from one sample id. An instance that refuses the
+    rebinding (read-only attributes) is repaired at its class instead, which
+    every instance of that class follows; an immutable type is replaced, and
+    every holder of it (the provider and the tracers it already created) is
+    redirected to the replacement.
+    """
+    if isinstance(generator, _OsEntropyIdGenerator):
+        return generator
+    name = type(generator).__name__
+    if "xray" in name.lower():
+        xray_shaped = True
+    elif name == "RandomIdGenerator":
+        xray_shaped = False
+    else:
+        sample = generator.generate_trace_id()
+        xray_shaped = abs((sample >> 96) - int(_otel_time.time())) < 600
+    replacement = _XRayIdGenerator() if xray_shaped else _OsEntropyIdGenerator()
+
+    def _resolves_to(bound, function, owner):
+        # A repair counts only if the generator's own lookups now reach the
+        # entropy-backed method; a proxy may store the assignment unused.
+        return (
+            getattr(bound, "__func__", None) is function
+            and getattr(bound, "__self__", None) is owner
+        )
+
+    try:
+        generator.generate_span_id = replacement.generate_span_id
+        generator.generate_trace_id = replacement.generate_trace_id
+        if _resolves_to(
+            generator.generate_span_id, replacement.generate_span_id.__func__, replacement
+        ) and _resolves_to(
+            generator.generate_trace_id, replacement.generate_trace_id.__func__, replacement
+        ):
+            return generator
+    except Exception:
+        pass
+    try:
+        generator_class = type(generator)
+
+        def _span_from_entropy(self):
+            return replacement.generate_span_id()
+
+        def _trace_from_entropy(self):
+            return replacement.generate_trace_id()
+
+        generator_class.generate_span_id = _span_from_entropy
+        generator_class.generate_trace_id = _trace_from_entropy
+        # The instance may still shadow the class (an entry in its own
+        # __dict__, or a __getattribute__ that forwards elsewhere).
+        if _resolves_to(generator.generate_span_id, _span_from_entropy, generator) and _resolves_to(
+            generator.generate_trace_id, _trace_from_entropy, generator
+        ):
+            return generator
+    except Exception:
+        pass
+    # Neither the instance nor its class can be changed: point every object
+    # that holds this generator as its `id_generator` (the provider and the
+    # tracers it already created) at the replacement instead. Referrers are
+    # arbitrary objects, so every step is guarded; a referrer that misbehaves
+    # is skipped, never allowed to abort the agent's cold start.
+    import gc as _otel_gc
+
+    for holder in _otel_gc.get_referrers(generator):
+        try:
+            # Instance attributes are held either inline on the object
+            # (CPython's managed dict) or in a materialised __dict__.
+            if isinstance(holder, dict):
+                if holder.get("id_generator") is generator:
+                    holder["id_generator"] = replacement
+            elif getattr(holder, "id_generator", None) is generator:
+                holder.id_generator = replacement
+        except Exception:
+            continue
+    return replacement
+
 
 def _otel_bootstrap():
     global _otel_provider
@@ -3415,9 +3545,14 @@ def _otel_bootstrap():
             Decision as _OtelDecision,
             SamplingResult as _OtelSamplingResult,
         )
-
         existing_provider = _otel_trace_api.get_tracer_provider()
         adot_configured = isinstance(existing_provider, _OtelSdkTracerProvider)
+        if adot_configured:
+            # A provider configured before this bootstrap: repair its id
+            # source in place, which also covers the tracers it has created.
+            existing_provider.id_generator = _otel_repair_generator(
+                existing_provider.id_generator
+            )
         if traces_endpoint and not adot_configured:
             # CloudWatch's traces OTLP endpoint requires SigV4. The stock Python
             # OTLP exporter does not sign direct requests (AWS documents a local
@@ -3428,7 +3563,6 @@ def _otel_bootstrap():
             # Session instead; credentials are resolved per request so a warm
             # runtime survives role credential rotation.
             import requests as _otel_requests
-            import time as _otel_time
             from requests.auth import AuthBase as _OtelRequestsAuthBase
             from botocore.auth import SigV4Auth as _OtelBotocoreSigV4Auth
             from botocore.awsrequest import AWSRequest as _OtelAwsRequest
@@ -3442,9 +3576,6 @@ def _otel_bootstrap():
             )
             from opentelemetry.sdk.trace.export import (
                 BatchSpanProcessor as _OtelBatchSpanProcessor,
-            )
-            from opentelemetry.sdk.trace.id_generator import (
-                RandomIdGenerator as _OtelRandomIdGenerator,
             )
 
             signing_region = _otel_os.environ.get("AWS_REGION", "")
@@ -3473,13 +3604,6 @@ def _otel_bootstrap():
                     ).add_auth(aws_request)
                     prepared_request.headers.update(dict(aws_request.headers.items()))
                     return prepared_request
-
-            class _XRayIdGenerator(_OtelRandomIdGenerator):
-                """X-Ray trace IDs: 32-bit epoch seconds plus 96 random bits."""
-
-                def generate_trace_id(self):
-                    random_bits = super().generate_trace_id() & ((1 << 96) - 1)
-                    return (int(_otel_time.time()) << 96) | random_bits
 
             signed_session = _otel_requests.Session()
             signed_session.auth = _XRaySigV4Auth(signing_region)
@@ -3538,6 +3662,7 @@ def _otel_bootstrap():
                         )
                     }
                 ),
+                id_generator=_OsEntropyIdGenerator(),
             )
             existing_provider.add_span_processor(
                 _OtelBatchSpanProcessor(_OtelExternalSpanExporter())
@@ -3662,6 +3787,13 @@ def _otel_bootstrap():
         telemetry = StrandsTelemetry(
             tracer_provider=existing_provider if adot_configured else None
         )
+        if not adot_configured:
+            # StrandsTelemetry built this provider with the SDK's default id
+            # generator (Python's random module); repair it in place, which
+            # also covers any tracer Strands created while setting it up.
+            telemetry.tracer_provider.id_generator = _otel_repair_generator(
+                telemetry.tracer_provider.id_generator
+            )
         telemetry.tracer_provider.sampler = _UsagePreservingSampler(
             telemetry.tracer_provider.sampler
         )
