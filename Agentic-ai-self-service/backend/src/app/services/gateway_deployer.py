@@ -559,8 +559,16 @@ def _load_static_schema_document(text: str, label: str) -> dict:
             yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
             _construct_mapping,
         )
+        # Drive the SafeLoader subclass directly instead of through yaml.load. The
+        # result is identical (yaml.load is exactly construct-loader / get_single_data
+        # / dispose), but the document can only ever be built by this safe loader, and
+        # the code no longer carries PyYAML's unsafe-by-history entry point.
         try:
-            document = yaml.load(text, Loader=_UniqueSafeLoader)
+            loader = _UniqueSafeLoader(text)
+            try:
+                document = loader.get_single_data()
+            finally:
+                loader.dispose()
         except yaml.YAMLError as exc:
             raise RuntimeError(f"Gateway {label} schema is not valid JSON or YAML") from exc
     if not isinstance(document, dict):

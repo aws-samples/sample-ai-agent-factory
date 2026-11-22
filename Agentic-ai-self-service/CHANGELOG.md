@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security — YAML is parsed by safe loaders driven directly, never through `yaml.load`
+
+- **`gateway_deployer.py`, `_load_static_schema_document`; export tests.** An AppSec scan (ACAT
+  UnsafeYAMLLoad) flagged four `yaml.load(...)` calls: the parser for a tenant-supplied OpenAPI or
+  Smithy schema on a Gateway target, and three tests that read back exported CloudFormation
+  templates. Every call already passed a safe loader (a `SafeLoader` subclass, or `BaseLoader`), so
+  none could instantiate arbitrary objects; the finding is about the entry point, which is the
+  function that executes `!!python/object` payloads when handed `yaml.Loader` or `UnsafeLoader` and
+  is one refactor away from doing so. Each safe loader is now constructed and driven directly
+  (`get_single_data()` then `dispose()`, which is exactly what `yaml.load` does), so parsed documents
+  are unchanged and the unsafe entry point is no longer referenced. The export tests share one
+  helper (`tests/cfn_yaml_support.py`). A new test lints the backend source and test ASTs for any
+  reference to the unsafe PyYAML entry points (`load`, `load_all`, `full_load`, `unsafe_load`),
+  the `Loader`/`FullLoader`/`UnsafeLoader` classes and their `C` variants, or a `getattr` on the
+  yaml module, and pins that the schema parser refuses a `!!python/object/apply` payload as
+  invalid YAML with an `os.system` tripwire proving nothing ran, while still refusing duplicate
+  keys. The workshop
+  module-2 template test carried the same pattern and is rewritten the same way. No launcher or
+  dependency change.
+
 ### Fixed — generated agents draw trace and span ids from the operating system, not Python's `random` module (#105)
 
 - **`code_generator.py`, `OTEL_BOOTSTRAP`.** The injected OpenTelemetry bootstrap used the SDK's
