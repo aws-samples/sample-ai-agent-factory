@@ -8,4 +8,4 @@
 pytest==9.1.1        # unit + integration test runner
 requests==2.34.2     # live integration tests (HTTP calls to the gateway)
 boto3==1.43.24       # mcp_client.py SSM lookup + Cognito/SSM calls in the helper scripts
-certifi==2026.7.22   # scripts/mcp_client.py TLS CA bundle (keep current)
+certifi==2026.10.18   # scripts/mcp_client.py TLS CA bundle (keep current)
