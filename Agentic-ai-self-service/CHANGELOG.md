@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 ### Security — YAML is parsed by safe loaders driven directly, never through `yaml.load`
 
 - **`gateway_deployer.py`, `_load_static_schema_document`; export tests.** An AppSec scan (ACAT
-  UnsafeYAMLLoad) flagged four `yaml.load(...)` calls: the parser for a tenant-supplied OpenAPI or
+  UnsafeYAMLLoad) flagged four calls to `yaml.load`: the parser for a tenant-supplied OpenAPI or
   Smithy schema on a Gateway target, and three tests that read back exported CloudFormation
   templates. Every call already passed a safe loader (a `SafeLoader` subclass, or `BaseLoader`), so
   none could instantiate arbitrary objects; the finding is about the entry point, which is the
