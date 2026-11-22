@@ -22,9 +22,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import yaml
 from app.models.deployment_models import DeployRequest
 from app.services.cfn_template_generator import CfnTemplateGenerator
+
+from tests.cfn_yaml_support import parse_template_as_strings
 
 STEP_LAMBDAS = Path(__file__).resolve().parents[2] / "infra" / "stacks" / "platform" / "step_lambdas.py"
 PREFIX = "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:"
@@ -49,7 +50,7 @@ def _gateway_target_template() -> dict:
             }
         )
     )
-    return yaml.load(bundle.template_yaml, Loader=yaml.BaseLoader)
+    return parse_template_as_strings(bundle.template_yaml)
 
 
 def _provider_tag_statement(template: dict) -> dict:
