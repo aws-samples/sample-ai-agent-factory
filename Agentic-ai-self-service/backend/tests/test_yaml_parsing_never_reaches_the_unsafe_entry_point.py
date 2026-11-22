@@ -1,6 +1,6 @@
 """YAML is parsed only by safe loaders driven directly, never through ``yaml.load`` (AppSec ACAT UnsafeYAMLLoad).
 
-An AppSec scan of the repository flagged four ``yaml.load(...)`` calls, one in the gateway
+An AppSec scan of the repository flagged four calls to ``yaml.load``, one in the gateway
 deployer's static-schema parser and three in export tests. Every one already passed a safe
 loader (a ``SafeLoader`` subclass or ``BaseLoader``), so none could instantiate arbitrary
 objects. The finding is about the entry point itself: ``yaml.load`` is the function that
@@ -84,10 +84,14 @@ Offender = tuple[int, str]  # (line, description)
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
 
 
-def _python_sources() -> list[Path]:
-    files = [p for root in ("src", "tests") for p in (BACKEND / root).rglob("*.py")]
-    # .venv / lib never sit under src or tests, but build helpers may symlink; be explicit.
-    return sorted(p for p in files if ".venv" not in p.parts and "lib" not in p.parts)
+def _python_sources(root: Path = BACKEND) -> list[Path]:
+    """Every Python file under ``root/src`` and ``root/tests``, skipping only virtual environments.
+
+    Repository-owned code is scanned wherever it sits, including a directory called ``lib``;
+    the generated ``backend/lib`` build tree is outside both roots and never considered.
+    """
+    files = [p for sub in ("src", "tests") for p in (root / sub).rglob("*.py")]
+    return sorted(p for p in files if ".venv" not in p.parts)
 
 
 def _merge(*paths: Bindings) -> Bindings:
@@ -325,6 +329,15 @@ def test_no_backend_module_references_the_yaml_load_entry_point_or_an_unsafe_loa
     assert not offenders, "\n".join(["drive a SafeLoader/BaseLoader directly instead:", *offenders])
 
 
+def test_source_discovery_covers_owned_helpers_under_lib_and_skips_virtualenvs(tmp_path):
+    for rel in ("src/app/lib/helper.py", "tests/lib/support.py", "tests/.venv/site.py", "src/.venv/pkg/mod.py"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("import yaml\n", encoding="utf-8")
+    found = {p.relative_to(tmp_path).as_posix() for p in _python_sources(tmp_path)}
+    assert found == {"src/app/lib/helper.py", "tests/lib/support.py"}
+
+
 def _offenders_of(tmp_path: Path, source: str) -> set[Offender]:
     sample = tmp_path / "sample.py"
     sample.write_text(source, encoding="utf-8")
@@ -343,14 +356,14 @@ c = yl.Loader
 d = getattr(y, "unsafe_load")
 e = getattr(y, NAME)
 f = y.CSafeLoader
-g = yaml.load("x")  # 'yaml' is not bound in this module, so this is some other object
+g = YAML_.load("x")  # 'yaml' is not bound in this module, so this is some other object
 from yaml import loader as yl2
 h = yl2.UnsafeLoader("x").get_single_data()
 from yaml import cyaml
 i = cyaml.CSafeLoader  # the safe C loader through a submodule alias must not count
 # yaml.load in a comment must not count
 '''yaml.unsafe_load in a docstring must not count'''
-"""
+""".replace("YAML_", "yaml")  # the parsed sample names the real module; this file never spells the flagged call
 
 GUARD_SELF_TEST_EXPECTED = {
     (3, "from yaml import FullLoader"),
