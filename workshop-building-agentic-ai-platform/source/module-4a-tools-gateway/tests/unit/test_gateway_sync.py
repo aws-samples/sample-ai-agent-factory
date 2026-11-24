@@ -76,6 +76,11 @@ class TestBuildTargetConfig:
         from services.gateway_sync import sigv4_service_for
 
         assert sigv4_service_for("https://abc.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp") == "bedrock-agentcore"
+        # AgentCore Runtime endpoints have no leading label: bare host, runtime ARN in the path.
+        assert sigv4_service_for(
+            "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3A123456789012%3Aruntime%2Fx-abc/invocations"
+        ) == "bedrock-agentcore"
+        assert sigv4_service_for("https://notbedrock-agentcore.us-west-2.amazonaws.com/x") == "execute-api"
         assert sigv4_service_for("https://x1y2.execute-api.us-west-2.amazonaws.com/prod/mcp") == "execute-api"
         assert sigv4_service_for("https://abc123.lambda-url.us-west-2.on.aws/") == "lambda"
         assert sigv4_service_for("https://d123.cloudfront.net/mcp/currenttime") == "execute-api"

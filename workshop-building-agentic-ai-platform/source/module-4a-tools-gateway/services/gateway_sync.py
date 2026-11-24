@@ -35,7 +35,11 @@ _BLOCKED_URL_PATTERNS = [
 # ("Specify the authorization type and credentials to access the gateway
 # target", AgentCore developer guide). Lambda targets need no provider block.
 _SIGV4_SERVICE_BY_HOST = [
-    (re.compile(r"\.bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$"), "bedrock-agentcore"),
+    # AgentCore Gateway hosts carry a leading label (<id>.gateway.bedrock-agentcore...);
+    # AgentCore Runtime invocation endpoints are the bare host
+    # (bedrock-agentcore.<region>.amazonaws.com, runtime ARN in the path), so the
+    # label is optional here.
+    (re.compile(r"(^|\.)bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$"), "bedrock-agentcore"),
     (re.compile(r"\.execute-api\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$"), "execute-api"),
     (re.compile(r"\.lambda-url\.[a-z0-9-]+\.on\.aws(:\d+)?$"), "lambda"),
 ]
