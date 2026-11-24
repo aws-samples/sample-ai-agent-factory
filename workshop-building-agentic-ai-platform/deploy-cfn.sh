@@ -614,11 +614,14 @@ if [[ "$OPERATION" == "deploy" ]]; then
     # reported workshop-agentcore-stack "deployed successfully", the stack stayed
     # CREATE_FAILED with no outputs, and code-editor died on "No export named
     # ac-OmniSpaceId found". The check below turns that into a recorded failure.
-    PRIOR_STATUS=$(aws cloudformation describe-stacks \
-      --stack-name "$STACK_NAME" \
-      --query "Stacks[0].StackStatus" \
-      --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+    PRIOR_STATUS=$(current_stack_status "$STACK_NAME")
     case "$PRIOR_STATUS" in
+      UNKNOWN)
+        echo "The state of '$STACK_NAME' could not be read (access, network or throttling), so this"
+        echo "run does not know whether it exists and does not deploy it blind. Fix the read and"
+        echo "run deploy again."
+        record_stack_failure "$STACK_NAME" "state could not be read before deploy"
+        continue ;;
       ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED)
         echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. CloudFormation"
         echo "does not accept an update in this state; remove it first, then run deploy again:"
@@ -662,11 +665,9 @@ if [[ "$OPERATION" == "deploy" ]]; then
         CFN_PARAMS+=(ParameterKey="$PKEY",ParameterValue="$PVAL")
       done
 
-      # Check if stack exists
-      EXISTING_STATUS=$(aws cloudformation describe-stacks \
-        --stack-name "$STACK_NAME" \
-        --query "Stacks[0].StackStatus" \
-        --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+      # Whether the stack exists decides create-stack vs update-stack. PRIOR_STATUS
+      # was read a moment ago and an unreadable state already stopped this stack.
+      EXISTING_STATUS="$PRIOR_STATUS"
 
       CREATE_ARGS=(
         --stack-name "$STACK_NAME"
@@ -948,12 +949,21 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       # and "All 5 stack(s) destroyed" for an account that never had them. A
       # participant pointed at the wrong region would read that as proof their
       # resources are gone. Say what actually happened instead.
-      if ! aws cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1; then
+      STATUS=$(current_stack_status "$STACK_NAME")
+      if [[ "$STATUS" == "DOES_NOT_EXIST" ]]; then
         echo "[$((TEMPLATES - i))/$TEMPLATES] Stack '$STACK_NAME' does not exist -- already gone."
         echo ""
         continue
       fi
-      echo "[$((TEMPLATES - i))/$TEMPLATES] Deleting stack '$STACK_NAME' ..."
+      if [[ "$STATUS" == "UNKNOWN" ]]; then
+        # A failed read is not proof of absence: say so and count it as not destroyed.
+        echo "[$((TEMPLATES - i))/$TEMPLATES] The state of '$STACK_NAME' could not be read, so it is"
+        echo "not treated as gone and not deleted. Fix the read and run destroy again."
+        FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (state could not be read)\n"
+        echo ""
+        continue
+      fi
+      echo "[$((TEMPLATES - i))/$TEMPLATES] Deleting stack '$STACK_NAME' (state $STATUS) ..."
     fi
 
     if ! aws cloudformation delete-stack --stack-name "$STACK_NAME"; then
@@ -972,9 +982,25 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       REASON=$(aws cloudformation describe-stack-events --stack-name "$STACK_NAME" \
         --query "StackEvents[?ResourceStatus=='DELETE_FAILED']|[0].[LogicalResourceId,ResourceStatusReason]" \
         --output text 2>/dev/null || true)
-      echo "ERROR: stack '$STACK_NAME' failed to delete."
-      [[ -n "${REASON//[[:space:]]/}" ]] && echo "       $REASON"
-      FAILED_STACKS="${FAILED_STACKS}${STACK_NAME}\n"
+      STATE_NOW=$(current_stack_status "$STACK_NAME")
+      case "$STATE_NOW" in
+        DOES_NOT_EXIST)
+          # The waiter gave up, but the stack is gone: the delete finished late.
+          echo "Stack '$STACK_NAME' deleted (the waiter returned before the delete finished)."
+          DELETED=$((DELETED + 1)) ;;
+        *_IN_PROGRESS)
+          echo "ERROR: waiting for '$STACK_NAME' ended while CloudFormation is still deleting it"
+          echo "       (state $STATE_NOW). Check the stack in the console, then run destroy again."
+          FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (still $STATE_NOW)\n" ;;
+        UNKNOWN)
+          echo "ERROR: waiting for '$STACK_NAME' ended with an error and its state could not be read."
+          echo "       Check the stack in the console, then run destroy again."
+          FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (state could not be read)\n" ;;
+        *)
+          echo "ERROR: stack '$STACK_NAME' failed to delete (state $STATE_NOW)."
+          [[ -n "${REASON//[[:space:]]/}" ]] && echo "       $REASON"
+          FAILED_STACKS="${FAILED_STACKS}${STACK_NAME}\n" ;;
+      esac
     fi
     echo ""
   done

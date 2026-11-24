@@ -44,7 +44,7 @@ The name has two halves, and both are evidence. The prefix is the `prefix=` argu
 | **Module 3a** — [Connect to Tools Gateway (MCP)](../connect-gateway-mcp/) | `prefix="gw"` | `gw_tg-workshop-flights-mcp___search_flights` |
 | **Module 3b** — [Connect to Tools Gateway (AgentCore)](../connect-gateway-agentcore/) | `prefix="gateway"` | `gateway_tg-workshop-flights-mcp___search_flights` |
 
-The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** that served the call — so the tool name tells you which Lambda behind which gateway was asked, and the expanded result shows whether it answered.
+The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** the request went to — so the tool name tells you which Lambda behind which gateway was asked, and only the expanded result shows whether it answered.
 
 ## Test 2: budget comparison
 
