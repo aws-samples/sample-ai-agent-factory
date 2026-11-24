@@ -44,7 +44,7 @@ The name has two halves, and both are evidence. The prefix is the `prefix=` argu
 | **Module 3a** — [Connect to Tools Gateway (MCP)](../connect-gateway-mcp/) | `prefix="gw"` | `gw_tg-workshop-flights-mcp___search_flights` |
 | **Module 3b** — [Connect to Tools Gateway (AgentCore)](../connect-gateway-agentcore/) | `prefix="gateway"` | `gateway_tg-workshop-flights-mcp___search_flights` |
 
-The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** the request went to — so the tool name tells you which Lambda behind which gateway was asked, and only the expanded result shows whether it answered.
+The second half, `tg-workshop-flights-mcp`, is the **gateway target** encoded in the tool name the agent requested — so the tool name tells you which Lambda behind which gateway the agent asked for, and only the expanded result (or the trace in Module 5) shows whether the request reached it and succeeded.
 
 ## Test 2: budget comparison
 
@@ -159,7 +159,7 @@ aws cognito-idp admin-delete-user --user-pool-id $USER_POOL_ID \
   --username "$SMOKE_USER" --region $REGION && echo "Removed the throwaway user."
 :::
 
-Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent requested for this flight search (a name shows the request was routed to the Gateway; whether the call succeeded is in the tool result, which Test 1 showed under the tool chip), typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it invoked.
+Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent requested for this flight search (a name shows that the agent requested a Gateway tool; inspect its result, or its trace in Module 5, to confirm routing and successful execution), typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it requested.
 
 ::alert[`HTTP 403` with `Claim 'client_id' value mismatch with configuration.` means an IdToken was used instead of an AccessToken. `Failed to start MCP client` in the response body means `/FAST-stack/gateway_url` points at a Gateway that no longer exists — re-run the SSM step on the *Connect the Gateway* page.]{type="info"}
 

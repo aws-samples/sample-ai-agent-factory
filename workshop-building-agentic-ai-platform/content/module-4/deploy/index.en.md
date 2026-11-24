@@ -624,7 +624,7 @@ Open the Amplify URL in your browser and log in. Send a test message:
 
 Read the tool chips rather than the agent's prose: each chip names a tool the agent requested, not one that ran successfully. Click a chip to expand its arguments and result (FAST collapses them by default), and read the result to tell a successful call from an unknown-tool or authentication error. This shows the travel tools are listed in the system prompt but not connected to the gateway yet.
 
-You will wire them in the **Connect to Tools Gateway** step. After that, the same request shows a chip named `gw_tg-workshop-flights-mcp___search_flights` (MCP path) or `gateway_tg-workshop-flights-mcp___search_flights` (AgentCore path): the second half of the name is the gateway target the request went to (the expanded result shows whether it answered).
+You will wire them in the **Connect to Tools Gateway** step. After that, the same request shows a chip named `gw_tg-workshop-flights-mcp___search_flights` (MCP path) or `gateway_tg-workshop-flights-mcp___search_flights` (AgentCore path): the second half of the name is the gateway target encoded in the tool name the agent requested (the expanded result or the trace shows whether it was reached and answered).
 
 ::alert[If the agent does not respond at all, check the AgentCore Runtime logs in CloudWatch under `/aws/bedrock-agentcore/runtimes/`.]{type="warning"}
 

@@ -48,12 +48,13 @@ record_stack_failure() {
   DEPLOY_FAILED_STACKS="${DEPLOY_FAILED_STACKS}$1 ($2)\n"
   if [[ "$CONTINUE_ON_FAILURE" != "1" ]]; then
     echo ""
-    echo "Stopping here: stack '$1' failed ($2). See the message above for how to retry."
+    echo "Stopping here: the deployment of stack '$1' could not be confirmed ($2). See the"
+    echo "message above for what to check or how to retry."
     exit 1
   fi
   echo "DEPLOY_CONTINUE_ON_FAILURE=1 -- recorded and continuing to the next stack."
-  echo "Note: stacks that import this one's outputs will now fail on the missing"
-  echo "      export rather than on a problem of their own."
+  echo "Note: stacks that import this one's outputs may fail if the exports they need are"
+  echo "      unavailable, rather than on a problem of their own."
 }
 
 # The retry advice for a stack that CloudFormation did operate on and that is now
@@ -77,6 +78,14 @@ stack_is_healthy() {
   esac
 }
 
+# cfn_says_absent <error text>: true only for CloudFormation's own ValidationError
+# on a Describe call saying the stack or resource does not exist. Other errors can
+# contain the words "does not exist" too (an expired SSO token: "Token for ...
+# does not exist") and must never read as absence.
+cfn_says_absent() {
+  grep -qE '\(ValidationError\) when calling the Describe(Stacks|StackResource) operation: (Stack with id [^ ]+ does not exist|Resource [^ ]+ does not exist for stack)' <<<"$1"
+}
+
 # current_stack_status <stack>: the stack's status, DOES_NOT_EXIST, or UNKNOWN when
 # the read itself failed (access, network, throttling), so that no message guesses
 # what CloudFormation did from the failure of an API call alone.
@@ -85,7 +94,7 @@ current_stack_status() {
   if out=$(aws cloudformation describe-stacks --stack-name "$1" \
       --query "Stacks[0].StackStatus" --output text 2>&1); then
     echo "$out"
-  elif grep -q "does not exist" <<<"$out"; then
+  elif cfn_says_absent "$out"; then
     echo "DOES_NOT_EXIST"
   else
     echo "UNKNOWN"
@@ -99,8 +108,7 @@ current_stack_status() {
 advise_after_failure() {
   case "$2" in
     DOES_NOT_EXIST)
-      echo "No stack '$1' exists, so nothing was created. Fix the cause reported above and run"
-      echo "deploy again." ;;
+      echo "No stack '$1' currently exists. Fix the cause reported above and run deploy again." ;;
     UNKNOWN)
       echo "The current state of '$1' could not be read, so the outcome of the call is unknown."
       echo "Check the stack in the CloudFormation console or with"
@@ -110,7 +118,7 @@ advise_after_failure() {
       echo "CloudFormation is still working on '$1' (state $2): the call returned before it"
       echo "finished. Wait for a terminal state (the console, or"
       echo "  aws cloudformation describe-stacks --stack-name $1"
-      echo "), then run deploy again; a healthy stack is picked up unchanged." ;;
+      echo "), check the result, then run deploy again." ;;
     CREATE_FAILED|UPDATE_FAILED)
       retry_in_place_hint "$1" ;;
     ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED)
@@ -122,9 +130,9 @@ advise_after_failure() {
       echo "  aws cloudformation continue-update-rollback --stack-name $1"
       echo "and deploy again, or remove the stack with ./deploy-cfn.sh cleanup." ;;
     CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
-      echo "Stack '$1' is in the healthy state $2 despite the error above (for example the call"
-      echo "timed out after CloudFormation had finished). Run deploy again; it is picked up"
-      echo "unchanged." ;;
+      echo "Stack '$1' reads as $2 despite the error above (for example the call timed out after"
+      echo "CloudFormation had finished). Check that the template and parameters you requested"
+      echo "are what is deployed, then run deploy again." ;;
     *)
       echo "Stack '$1' is in state $2. Fix the cause reported above and run deploy again, or"
       echo "remove the stack with ./deploy-cfn.sh cleanup." ;;
@@ -242,13 +250,18 @@ omni_probe_failed() {
 EXISTING_OMNI_SPACE_ID=""
 if [[ "$OPERATION" == "deploy" ]]; then
   OMNI_PROBE_ERR=$(mktemp)
+  # Remove the temp file on any exit, including an interruption, until the normal
+  # removal below clears the traps.
+  trap 'rm -f "$OMNI_PROBE_ERR"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   AGENTCORE_STACK_ABSENT=0
   if OMNI_PROBE_OUT=$(aws cloudformation describe-stacks \
       --stack-name workshop-agentcore-stack \
       --query "Stacks[0].Outputs[?OutputKey=='OmniSpaceId'].OutputValue" \
       --output text 2>"$OMNI_PROBE_ERR"); then
     [[ "$OMNI_PROBE_OUT" == "None" || -z "$OMNI_PROBE_OUT" ]] || EXISTING_OMNI_SPACE_ID="$OMNI_PROBE_OUT"
-  elif grep -q "does not exist" "$OMNI_PROBE_ERR"; then
+  elif cfn_says_absent "$(cat "$OMNI_PROBE_ERR")"; then
     AGENTCORE_STACK_ABSENT=1   # no stack yet: the normal first deploy
   else
     omni_probe_failed "describe-stacks"
@@ -262,14 +275,18 @@ if [[ "$OPERATION" == "deploy" ]]; then
         --query "[StackResourceDetail][?ResourceStatus!='DELETE_COMPLETE'].PhysicalResourceId | [0]" \
         --output text 2>"$OMNI_PROBE_ERR"); then
       [[ "$OMNI_PROBE_OUT" == "None" || -z "$OMNI_PROBE_OUT" ]] || EXISTING_OMNI_SPACE_ID="$OMNI_PROBE_OUT"
-    elif grep -q "does not exist" "$OMNI_PROBE_ERR"; then
+    elif cfn_says_absent "$(cat "$OMNI_PROBE_ERR")"; then
       :   # the stack never created an OmniSpace resource
     else
       omni_probe_failed "describe-stack-resource"
     fi
   fi
   rm -f "$OMNI_PROBE_ERR"
+  trap - EXIT INT TERM
 fi
+# F9 of the review: the override handling and the narrative below describe a
+# deploy. destroy and cleanup never probe the space, so they skip this block.
+if [[ "$OPERATION" == "deploy" ]]; then
 if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]] && override_names_caller "$OMNI_CONSOLE_PRINCIPAL_ARN"; then
   if [[ -z "$EXISTING_OMNI_SPACE_ID" ]]; then
     echo "CloudWatch Omni: OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_ARN) names the"
@@ -308,6 +325,7 @@ else
   echo "CloudWatch Omni: $CALLER_ARN creates the space and becomes its Space Admin"
   echo "                 (Omni's own grant). To admit a different console identity, set"
   echo "                 OMNI_CONSOLE_PRINCIPAL_ARN, or add a grant later (Module 5 step 1)."
+fi
 fi
 DIR_NAME=$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
 # S3 caps a bucket name at 63 characters, and the directory name is the one part
@@ -798,10 +816,10 @@ if [[ "$OPERATION" == "deploy" ]]; then
         echo "The state of '$STACK_NAME' could not be read after the deploy call, so its outcome"
         echo "is not confirmed."
       else
-        echo "Stack '$STACK_NAME' finished in state $FINAL_STATUS, not CREATE_COMPLETE,"
-        echo "UPDATE_COMPLETE or UPDATE_ROLLBACK_COMPLETE. The deploy call reported no error,"
-        echo "which happens when nothing in the template changed: an unchanged failed stack"
-        echo "stays failed and exports nothing."
+        echo "Current state of '$STACK_NAME' is $FINAL_STATUS; the requested healthy outcome"
+        echo "(CREATE_COMPLETE, UPDATE_COMPLETE or UPDATE_ROLLBACK_COMPLETE) is not confirmed. A"
+        echo "deploy call that reports no error while nothing in the template changed leaves a"
+        echo "failed stack failed, with no exports."
       fi
       advise_after_failure "$STACK_NAME" "$FINAL_STATUS"
       record_stack_failure "$STACK_NAME" "final status $FINAL_STATUS"
@@ -823,7 +841,7 @@ if [[ "$OPERATION" == "deploy" ]]; then
   done
 
   if [[ -n "$DEPLOY_FAILED_STACKS" ]]; then
-    echo "The following stack(s) FAILED:"
+    echo "The following stack(s) could not be confirmed as deployed:"
     printf '%b' "$DEPLOY_FAILED_STACKS" | while IFS= read -r s; do
       [[ -n "$s" ]] && echo "  - $s"
     done
@@ -853,10 +871,13 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
   # a self-service teardown would strip GuardDuty coverage from every one of
   # their VPCs. The workshop VPC still exists at this point -- an undeletable
   # endpoint inside it is the whole reason this block runs.
-  WORKSHOP_VPCS=$(aws ec2 describe-vpcs \
+  if ! WORKSHOP_VPCS=$(aws ec2 describe-vpcs \
     --filters "Name=tag:Workshop,Values=AgentCore-Platform" \
-    --query 'Vpcs[].VpcId' --output text 2>/dev/null || true)
-  if [[ -z "${WORKSHOP_VPCS//[[:space:]]/}" ]]; then
+    --query 'Vpcs[].VpcId' --output text 2>&1); then
+    echo "  WARNING: could not list the workshop VPCs, so the GuardDuty unblock is skipped;"
+    echo "           a VPC that still has endpoints will fail its stack delete below."
+    echo "           $WORKSHOP_VPCS"
+  elif [[ -z "${WORKSHOP_VPCS//[[:space:]]/}" ]]; then
     echo "  No workshop-tagged VPCs found -- nothing to unblock"
   else
     # describe-* wants one comma-separated Values list, not whitespace.
@@ -864,17 +885,22 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     VPC_FILTER="${VPC_FILTER%,}"
     echo "  Limiting to workshop VPCs: $VPC_FILTER"
 
-    GD_ENDPOINTS=$(aws ec2 describe-vpc-endpoints \
+    if ! GD_ENDPOINTS=$(aws ec2 describe-vpc-endpoints \
       --filters "Name=vpc-endpoint-state,Values=available,pending" \
                 "Name=vpc-id,Values=${VPC_FILTER}" \
       --query "VpcEndpoints[?contains(ServiceName,'guardduty')].VpcEndpointId" \
-      --output text 2>/dev/null || true)
-    if [[ -z "${GD_ENDPOINTS//[[:space:]]/}" ]]; then
+      --output text 2>&1); then
+      echo "  WARNING: could not list GuardDuty VPC endpoints; none is removed here."
+      echo "           $GD_ENDPOINTS"
+    elif [[ -z "${GD_ENDPOINTS//[[:space:]]/}" ]]; then
       echo "  No GuardDuty VPC endpoints found"
     else
       for ep in $GD_ENDPOINTS; do
-        if aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$ep" >/dev/null 2>&1; then
-          echo "  Deleted GuardDuty VPC endpoint $ep"
+        # A successful call can still report the endpoint under "Unsuccessful";
+        # and deletion is asynchronous, so success here is a request, not removal.
+        if EP_OUT=$(aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$ep" --output json 2>&1) \
+           && ! grep -q '"Error"' <<<"$EP_OUT"; then
+          echo "  Deletion requested for GuardDuty VPC endpoint $ep (removal completes asynchronously)"
         else
           echo "  WARNING: could not delete GuardDuty VPC endpoint $ep -- it will block"
           echo "           VPC deletion. Requires ec2:DeleteVpcEndpoints on a resource"
@@ -883,11 +909,13 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       done
     fi
 
-    GD_SGS=$(aws ec2 describe-security-groups \
+    if ! GD_SGS=$(aws ec2 describe-security-groups \
       --filters "Name=group-name,Values=GuardDutyManagedSecurityGroup*" \
                 "Name=vpc-id,Values=${VPC_FILTER}" \
-      --query "SecurityGroups[*].GroupId" --output text 2>/dev/null || true)
-    if [[ -z "${GD_SGS//[[:space:]]/}" ]]; then
+      --query "SecurityGroups[*].GroupId" --output text 2>&1); then
+      echo "  WARNING: could not list GuardDuty managed security groups; none is removed here."
+      echo "           $GD_SGS"
+    elif [[ -z "${GD_SGS//[[:space:]]/}" ]]; then
       echo "  No GuardDuty managed security groups found"
     else
       for sg in $GD_SGS; do
@@ -938,6 +966,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       if [[ "$STATUS" == "UNKNOWN" ]]; then
         echo "Skipping '$STACK_NAME': its state could not be read, so it is not deleted. Check it"
         echo "in the CloudFormation console and run cleanup again."
+        FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (state could not be read)\n"
         continue
       fi
 
@@ -967,10 +996,24 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     fi
 
     if ! aws cloudformation delete-stack --stack-name "$STACK_NAME"; then
-      echo "WARNING: could not start deletion of '$STACK_NAME' -- continuing."
-      FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (delete-stack call rejected)\n"
-      echo ""
-      continue
+      # The call returned an error; that alone does not say whether CloudFormation
+      # accepted it, so the state is read back.
+      STATE_NOW=$(current_stack_status "$STACK_NAME")
+      case "$STATE_NOW" in
+        DOES_NOT_EXIST)
+          echo "delete-stack returned an error, but '$STACK_NAME' is gone."
+          DELETED=$((DELETED + 1))
+          echo ""
+          continue ;;
+        DELETE_IN_PROGRESS)
+          echo "delete-stack returned an error, but '$STACK_NAME' is DELETE_IN_PROGRESS; waiting for it." ;;
+        *)
+          echo "WARNING: delete-stack returned an error for '$STACK_NAME' (current state $STATE_NOW)"
+          echo "         -- continuing with the other stacks."
+          FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (delete-stack call failed, state $STATE_NOW)\n"
+          echo ""
+          continue ;;
+      esac
     fi
     echo "Waiting for stack '$STACK_NAME' to be deleted ..."
     if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"; then
@@ -1043,11 +1086,20 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
   # before a delete is attempted.
   echo "Post-delete: removing the log groups the deleted stacks left behind..."
   ORPHANS=0
+  SWEEP_UNCONFIRMED=0
   for ((i = 0; i < TEMPLATES; i++)); do
     TEMPLATE_LOCATION=$(yq -r ".infrastructure.cloudformationTemplates[$i].templateLocation" "$CONTENTSPEC")
     LABEL=$(yq -r ".infrastructure.cloudformationTemplates[$i].label" "$CONTENTSPEC")
 
-    if aws cloudformation describe-stacks --stack-name "$LABEL" >/dev/null 2>&1; then
+    # Sweep only behind a stack that is confirmed gone. Any other state keeps its
+    # log groups: a surviving stack owns them, and an unreadable state is not
+    # proof of absence.
+    LABEL_STATUS=$(current_stack_status "$LABEL")
+    if [[ "$LABEL_STATUS" != "DOES_NOT_EXIST" ]]; then
+      if [[ "$LABEL_STATUS" == "UNKNOWN" ]]; then
+        echo "  The state of '$LABEL' could not be read; its log groups are left in place."
+        SWEEP_UNCONFIRMED=1
+      fi
       continue
     fi
 
@@ -1116,8 +1168,12 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
                 } | sort -u || true )
 
     for lg in $LG_NAMES; do
-      FOUND=$(aws logs describe-log-groups --log-group-name-prefix "$lg" \
-        --query "logGroups[?logGroupName=='$lg'].logGroupName" --output text 2>/dev/null || true)
+      if ! FOUND=$(aws logs describe-log-groups --log-group-name-prefix "$lg" \
+        --query "logGroups[?logGroupName=='$lg'].logGroupName" --output text 2>&1); then
+        echo "  WARNING: could not check whether log group $lg exists; it is left in place."
+        SWEEP_UNCONFIRMED=1
+        continue
+      fi
       [[ -n "${FOUND//[[:space:]]/}" ]] || continue
       if aws logs delete-log-group --log-group-name "$lg" >/dev/null 2>&1; then
         echo "  Deleted orphaned log group $lg"
@@ -1137,7 +1193,10 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     done
   done
   if [[ "$ORPHANS" -eq 0 ]]; then
-    echo "  No orphaned log groups found"
+    echo "  No orphaned log groups were deleted"
+  fi
+  if [[ "$SWEEP_UNCONFIRMED" == "1" ]]; then
+    FAILED_STACKS="${FAILED_STACKS}log-group sweep incomplete (a stack or log-group state could not be read)\n"
   fi
   echo ""
 
@@ -1148,8 +1207,8 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     done
     echo ""
     echo "Resolve the reason above and re-run '$0 $OPERATION' -- it is safe to"
-    echo "re-run, already-deleted stacks are skipped. Until every stack is gone you"
-    echo "are still being charged for DocumentDB, Aurora, Fargate and the NAT Gateways."
+    echo "re-run, already-deleted stacks are skipped. Resources in surviving stacks may"
+    echo "continue to incur charges; inspect those stacks."
     exit 1
   fi
   if [[ "$OPERATION" == "cleanup" ]]; then
@@ -1178,8 +1237,8 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     # FAILED_STACKS branch above has already exited, so a re-run keeps its
     # templates. `--expected-bucket-owner` for the same reason as the create path:
     # the name is predictable, so never empty a bucket this account does not own.
-    if aws s3api head-bucket --bucket "$S3_BUCKET" --region "$REGION" \
-         --expected-bucket-owner "$ACCOUNT_ID" >/dev/null 2>&1; then
+    if HB_OUT=$(aws s3api head-bucket --bucket "$S3_BUCKET" --region "$REGION" \
+         --expected-bucket-owner "$ACCOUNT_ID" 2>&1); then
       echo "Removing assets bucket '$S3_BUCKET' ..."
       if aws s3 rm "s3://$S3_BUCKET" --recursive --only-show-errors &&
          aws s3api delete-bucket --bucket "$S3_BUCKET" --region "$REGION"; then
@@ -1189,8 +1248,19 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
         echo "         a copy of source/, so it costs very little, but it is yours to"
         echo "         delete: aws s3 rb s3://$S3_BUCKET --force"
       fi
-    else
+    elif grep -qE '\(404\)|Not Found' <<<"$HB_OUT"; then
+      # Only HeadBucket's own 404 means gone; a 403, a timeout or a credential
+      # error leaves presence unconfirmed.
       echo "Assets bucket '$S3_BUCKET' is already gone."
+    else
+      echo "WARNING: could not confirm whether assets bucket '$S3_BUCKET' still exists:"
+      echo "         $HB_OUT"
+      echo "         Check it with: aws s3api head-bucket --bucket $S3_BUCKET"
+      echo "         and remove it if present: aws s3 rb s3://$S3_BUCKET --force"
+      BUCKET_UNCONFIRMED=1
+    fi
+    if [[ "${BUCKET_UNCONFIRMED:-0}" == "1" ]]; then
+      exit 1
     fi
   fi
 fi
