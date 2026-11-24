@@ -345,9 +345,78 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     # Never a bare cloudwatch:* or observabilityadmin:* in the hub statement.
     assert "cloudwatch:*" not in provision["Action"]
     assert "observabilityadmin:*" not in provision["Action"]
-    # The sink and the hub keys/log groups are the only service-wide grants.
-    assert set(by_sid["ProvisionGovernanceTelemetryStacks"]["Action"]) == {"kms:*", "logs:*", "oam:*"}
+    assert "ProvisionGovernanceTelemetryStacks" not in by_sid
     assert "organizations:CreatePolicy" not in all_actions(policy)
+
+
+def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> None:
+    policy = render("audit")
+    granted = all_actions(policy)
+    # No service-wide or wildcard action anywhere in the audit document.
+    assert not any(action.endswith(":*") or "*" in action for action in granted)
+
+    wildcard_only = by_sid(policy, "CreateGovernanceTelemetryResources")
+    assert wildcard_only["Resource"] == "*"
+    assert set(wildcard_only["Action"]) == {
+        "application-signals:StartDiscovery",
+        "kms:CreateKey",
+        "kms:ListAliases",
+        "kms:ListKeys",
+        "oam:CreateSink",
+        "oam:ListSinks",
+    }
+
+    keys = by_sid(policy, "ManageOmniHubKeys")
+    assert keys["Resource"] == f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
+    assert {"kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:TagResource", "kms:EnableKeyRotation"} <= set(keys["Action"])
+    assert not {"kms:Encrypt", "kms:CreateGrant", "kms:ReEncryptFrom", "kms:Sign"} & granted
+    space_key = by_sid(policy, "UseOmniSpaceKey")
+    assert set(space_key["Action"]) == {"kms:Decrypt", "kms:GenerateDataKey"}
+    assert space_key["Condition"] == {"StringEquals": {"aws:ResourceTag/cw-omni": "true"}}
+    aliases = by_sid(policy, "ManageOmniHubKeyAliases")
+    assert set(aliases["Resource"]) == {
+        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-space-{REGION}",
+        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-centralized-logs-{REGION}",
+        f"arn:aws:kms:{REGION}:{AUDIT}:key/*",
+    }
+
+    # The sink: tagging unconditioned (tag-on-create), everything else pinned to
+    # the two AuditStack deployments through CloudFormation's reserved tag.
+    tags = by_sid(policy, "TagAuditOamSink")
+    assert "Condition" not in tags
+    assert set(tags["Action"]) == {"oam:ListTagsForResource", "oam:TagResource", "oam:UntagResource"}
+    sink = by_sid(policy, "ManageAuditStackOamSink")
+    assert sink["Resource"] == f"arn:aws:oam:{REGION}:{AUDIT}:sink/*"
+    assert set(sink["Action"]) == {"oam:DeleteSink", "oam:GetSink", "oam:GetSinkPolicy", "oam:PutSinkPolicy"}
+    assert set(sink["Condition"]["StringEquals"]["aws:ResourceTag/aws:cloudformation:stack-name"]) == {
+        "AgenticAI-Platform-AuditStack",
+        "Nonprod-Audit",
+    }
+    assert "oam:CreateLink" not in granted
+    # Those pins must follow the names the code gives the AuditStack.
+    assert '"AgenticAI-Platform-AuditStack"' in (ROOT / "bin" / "agentic-ai-platform.ts").read_text()
+    pipeline = (ROOT / "pipelines" / "platform-pipeline-stack.ts").read_text()
+    assert re.search(r"""["']Nonprod["']""", pipeline) and re.search(r"""["']Audit["']""", pipeline)
+
+    log_groups = by_sid(policy, "CreateTransactionSearchLogGroups")
+    assert set(log_groups["Action"]) == {"logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutRetentionPolicy"}
+    assert set(log_groups["Resource"]) == {
+        f"arn:aws:logs:{REGION}:{AUDIT}:log-group:aws/spans:*",
+        f"arn:aws:logs:{REGION}:{AUDIT}:log-group:/aws/application-signals/data:*",
+    }
+    # Never a data-plane log read or a log-group delete.
+    assert not {
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:StartQuery",
+        "logs:Unmask",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+    } & granted
+    slr = by_sid(policy, "CreateApplicationSignalsServiceLinkedRole")
+    assert slr["Resource"].endswith("/AWSServiceRoleForCloudWatchApplicationSignals")
+    runner = by_sid(policy, "ManageOmniGoldenGateRunnerRole")
+    assert runner["Resource"] == f"arn:aws:iam::{AUDIT}:role/AgenticAIGoldenGateRunner-{REGION}"
 
 
 ORG_STACK = "AgenticAI-Management-OrgStack"
@@ -513,9 +582,9 @@ def test_management_policy_keeps_the_omni_domain_and_leaves_the_hub_to_audit() -
     assert "xray:UpdateTraceSegmentDestination" not in granted
 
 
-def test_management_without_organization_id_keeps_the_previous_document() -> None:
-    # Backwards compatible: the pre-existing invocation still renders, carries
-    # no Organizations grant, and says so on stderr (stdout stays pure JSON).
+def test_management_without_organization_id_renders_domain_and_log_archive_only() -> None:
+    # The pre-existing invocation still renders and says on stderr that it
+    # carries no Organizations grant (stdout stays pure JSON).
     previous = subprocess.run(
         [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION],
         cwd=ROOT,
@@ -534,6 +603,18 @@ def test_management_without_organization_id_keeps_the_previous_document() -> Non
         "ReadOuAndScp",
         "ReadOrganization",
     }
+    # What the management document no longer carries, in either form: the Omni
+    # hub (space, hub roles, centralization rule, Transaction Search) moved to
+    # the audit document, so the Audit account bootstraps from `audit`.
+    hub_actions = {
+        "cloudwatch:CreateSpace",
+        "observabilityadmin:CreateCentralizationRuleForOrganization",
+        "xray:UpdateTraceSegmentDestination",
+    }
+    for document in (policy, pinned):
+        assert not hub_actions & all_actions(document)
+        assert "ManageOmniHubRoles" not in {s["Sid"] for s in document["Statement"]}
+    assert hub_actions <= all_actions(render("audit"))
     malformed = subprocess.run(
         [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION, "--organization-id", "org-123"],
         cwd=ROOT,

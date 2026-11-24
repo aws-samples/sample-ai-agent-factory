@@ -32,8 +32,9 @@ and change or delete only the OUs and SCPs that stack created, keyed on the
 reserved aws:cloudformation:stack-name tag CloudFormation applies itself. A
 scoped document cannot cover creating the Organization (its id does not exist
 yet): create it once, then render with the id and deploy the stage against
-the existing organization. Without `--organization-id` the document is the
-previous one (Omni domain and LogArchive statements only).
+the existing organization. Without `--organization-id` the document carries
+only the Omni organization domain and the LogArchive statements; the Omni hub
+statements it used to carry now render as `audit`.
 
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
@@ -202,11 +203,10 @@ TRANSACTION_SEARCH_ACTIONS = [
     "logs:DeleteResourcePolicy",
 ]
 
-# ADR-15: CloudWatch Omni hub (Audit/Observability account). The cloudwatch
-# namespace is already fully granted to the hub by ProvisionGovernanceTelemetryStacks;
-# the Observability Admin actions below are the ones the organization
-# centralization rule, the Dataset integration and the delegated-administrator
-# path need. Access grants and the Dataset integration are applied post-deploy by
+# ADR-15: CloudWatch Omni hub (Audit/Observability account). The Observability
+# Admin actions below are the ones the organization centralization rule, the
+# Dataset integration and the delegated-administrator path need. Access grants
+# and the Dataset integration are applied post-deploy by
 # scripts/omni/omni_space_bootstrap.py with the operator's own credentials.
 OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS = [
     "observabilityadmin:CreateCentralizationRuleForOrganization",
@@ -727,17 +727,152 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     ]
 
 
+# AuditStack is instantiated twice: the platform stage (bin, stack id
+# AgenticAI-Platform-AuditStack) and the pipeline's Nonprod stage (stack name
+# Nonprod-Audit). AWS::Oam::Sink declares cloudFormationSystemTags, so
+# CloudFormation stamps aws:cloudformation:stack-name inside CreateSink and the
+# sink lifecycle is pinned to those stacks the way the management document pins
+# OUs and SCPs. Extend the list when the AuditStack is deployed under another name.
+AUDIT_STACK_NAMES = ["AgenticAI-Platform-AuditStack", "Nonprod-Audit"]
+# AWS::KMS::Key create/read/update/delete handler actions, minus CreateKey and
+# ListKeys which take no resource. Key ids are generated, so key/* in the hub
+# account and Region is the tightest ARN, and KMS needs the tag-on-create
+# TagResource grant unrestricted by key, so the statement carries no condition.
+KMS_KEY_ACTIONS = [
+    "kms:DescribeKey",
+    "kms:DisableKey",
+    "kms:DisableKeyRotation",
+    "kms:EnableKey",
+    "kms:EnableKeyRotation",
+    "kms:GetKeyPolicy",
+    "kms:GetKeyRotationStatus",
+    "kms:ListResourceTags",
+    "kms:PutKeyPolicy",
+    "kms:ScheduleKeyDeletion",
+    "kms:TagResource",
+    "kms:UntagResource",
+    "kms:UpdateKeyDescription",
+]
+APPLICATION_SIGNALS_SLR = (
+    "role/aws-service-role/application-signals.cloudwatch.amazonaws.com/"
+    "AWSServiceRoleForCloudWatchApplicationSignals"
+)
+
+
+def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]]:
+    """KMS, Logs, OAM and Transaction Search prerequisites for the Audit account.
+
+    Every action is one the CloudFormation handlers for AWS::KMS::Key,
+    AWS::KMS::Alias, AWS::Oam::Sink, AWS::CloudWatch::Space and
+    AWS::XRay::TransactionSearchConfig call (registry schemas plus the
+    Transaction Search prerequisites), pinned to the hub's keys and aliases, the
+    AuditStack's sink and the two Transaction Search log groups.
+    """
+    key_any = arn("kms", region, account, "key/*")
+    sink_any = arn("oam", region, account, "sink/*")
+    return [
+        {
+            # Actions with no resource type in the Service Authorization Reference.
+            "Sid": "CreateGovernanceTelemetryResources",
+            "Effect": "Allow",
+            "Action": [
+                "application-signals:StartDiscovery",
+                "kms:CreateKey",
+                "kms:ListAliases",
+                "kms:ListKeys",
+                "oam:CreateSink",
+                "oam:ListSinks",
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "ManageOmniHubKeys",
+            "Effect": "Allow",
+            "Action": KMS_KEY_ACTIONS,
+            "Resource": key_any,
+        },
+        {
+            # AWS::CloudWatch::Space create/update use the space key on the
+            # caller's behalf; OmniHubSpaceConstruct tags that key cw-omni=true.
+            "Sid": "UseOmniSpaceKey",
+            "Effect": "Allow",
+            "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+            "Resource": key_any,
+            "Condition": {"StringEquals": {"aws:ResourceTag/cw-omni": "true"}},
+        },
+        {
+            # Alias operations authorize against the alias and the target key, and
+            # alias resources accept no condition keys.
+            "Sid": "ManageOmniHubKeyAliases",
+            "Effect": "Allow",
+            "Action": ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"],
+            "Resource": [
+                arn("kms", region, account, f"alias/agenticai/omni-space-{region}"),
+                arn("kms", region, account, f"alias/agenticai/omni-centralized-logs-{region}"),
+                key_any,
+            ],
+        },
+        {
+            # The sink id is generated and the tag-on-create TagResource cannot see
+            # resource tags yet, so the tagging trio stays unconditioned.
+            "Sid": "TagAuditOamSink",
+            "Effect": "Allow",
+            "Action": ["oam:ListTagsForResource", "oam:TagResource", "oam:UntagResource"],
+            "Resource": sink_any,
+        },
+        {
+            "Sid": "ManageAuditStackOamSink",
+            "Effect": "Allow",
+            "Action": ["oam:DeleteSink", "oam:GetSink", "oam:GetSinkPolicy", "oam:PutSinkPolicy"],
+            "Resource": sink_any,
+            "Condition": {
+                "StringEquals": {f"aws:ResourceTag/{CFN_STACK_NAME_TAG}": AUDIT_STACK_NAMES}
+            },
+        },
+        {
+            # AWS::XRay::TransactionSearchConfig creates exactly these two log groups.
+            "Sid": "CreateTransactionSearchLogGroups",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutRetentionPolicy"],
+            "Resource": [
+                arn("logs", region, account, "log-group:aws/spans:*"),
+                arn("logs", region, account, "log-group:/aws/application-signals/data:*"),
+            ],
+        },
+        {
+            # Transaction Search prerequisites: application-signals:StartDiscovery
+            # creates and reads this service-linked role and a CloudTrail channel.
+            "Sid": "CreateApplicationSignalsServiceLinkedRole",
+            "Effect": "Allow",
+            "Action": ["iam:CreateServiceLinkedRole", "iam:GetRole"],
+            "Resource": iam_arn(account, APPLICATION_SIGNALS_SLR),
+        },
+        {
+            "Sid": "CreateApplicationSignalsCloudTrailChannel",
+            "Effect": "Allow",
+            "Action": "cloudtrail:CreateServiceLinkedChannel",
+            "Resource": arn(
+                "cloudtrail", region, account, "channel/aws-service-channel/application-signals/*"
+            ),
+        },
+        {
+            # OmniGoldenGateRunnerRoleConstruct (agenticai/omniGoldenGateRunnerPrincipalArns)
+            # names its role AgenticAIGoldenGateRunner-<region>; it is never passed
+            # to a service.
+            "Sid": "ManageOmniGoldenGateRunnerRole",
+            "Effect": "Allow",
+            "Action": OMNI_ROLE_MANAGEMENT_ACTIONS,
+            "Resource": iam_arn(account, f"role/AgenticAIGoldenGateRunner-{region}"),
+        },
+    ]
+
+
 def audit_policy(account: str, region: str) -> dict[str, Any]:
     """Audit/Observability account: AuditStack (OAM sink) and the `omni-hub` stage."""
     return {
         "Version": "2012-10-17",
         "Statement": [
-            {
-                "Sid": "ProvisionGovernanceTelemetryStacks",
-                "Effect": "Allow",
-                "Action": ["kms:*", "logs:*", "oam:*"],
-                "Resource": "*",
-            },
+            *audit_telemetry_statements(account, region),
             *omni_hub_statements(account, region),
             {
                 "Sid": "ReadCdkBootstrapVersion",
