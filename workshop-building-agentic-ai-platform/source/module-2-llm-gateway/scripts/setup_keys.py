@@ -50,7 +50,7 @@ def get_admin_key(secret_arn: str, region: str) -> str:
 
 
 # Core workshop models to register via /model/new API.
-# The wider 24-alias catalog is in reference/litellm-config.yaml for reference.
+# The wider 23-alias catalog is in reference/litellm-config.yaml for reference.
 # That file is reference documentation only — it is NOT mounted into the
 # container; this table is what the deployed proxy actually serves.
 #
@@ -80,11 +80,11 @@ WORKSHOP_MODELS = [
     ("claude-haiku", "anthropic.claude-haiku-4-5-20251001-v1:0", True, True),
     ("claude-opus-4.6", "anthropic.claude-opus-4-6-v1", True, True),
     ("claude-sonnet-4.6", "anthropic.claude-sonnet-4-6", True, True),
-    ("claude-opus-4.5", "anthropic.claude-opus-4-5-20251101-v1:0", True, True),
     ("claude-haiku-4.5", "anthropic.claude-haiku-4-5-20251001-v1:0", True, True),
-    # Claude Sonnet 4.5 (Legacy on Bedrock since 2026-10-08, EOL 2027-04-08) and
-    # Claude 4 and 4.1 are deliberately absent: superseded by the 4.5/4.6
-    # entries above, which cover every capability they had.
+    # Claude Sonnet 4.5 (Legacy on Bedrock since 2026-10-08, EOL 2027-04-08),
+    # Claude Opus 4.5 (Legacy since 2026-11-23, EOL 2027-05-23) and Claude 4 and
+    # 4.1 are deliberately absent: superseded by the 4.6 and Haiku 4.5 entries
+    # above, which cover every capability they had.
     # Amazon Nova — Nova-2 uses global.; older Nova v1 uses geo-scoped profiles.
     # Nova Premier v1 is omitted as superseded by the Nova 2 family.
     ("nova-pro", "amazon.nova-pro-v1:0", True, False),

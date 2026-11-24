@@ -21,7 +21,7 @@ Deploy an enterprise LLM Gateway using **LiteLLM Proxy** that provides governed,
 |-----------|-------------|
 | **Unified API** | OpenAI-compatible endpoint — existing code and Strands Agents work by changing the base URL |
 | **Virtual Keys** | Per-team/per-key budgets, rate limiting, and spend tracking — no provider keys exposed |
-| **13 Bedrock model aliases** | Route to Claude, Nova, Mistral, and DeepSeek through one gateway — and add more from a 24-alias reference catalog |
+| **12 Bedrock model aliases** | Route to Claude, Nova, Mistral, and DeepSeek through one gateway — and add more from a 23-alias reference catalog |
 | **Bedrock Guardrails** | Native integration with Amazon Bedrock Guardrails for content safety and PII detection |
 | **Cost Tracking** | Per-key, per-team, per-model spend attribution with `/spend/logs` API |
 | **Caching** | Optional response caching for identical requests (not enabled in this workshop's deployment; the reference config shows how) |
@@ -65,7 +65,7 @@ Strands Agents / Applications
 │                             │
 │  Claude · Nova · Mistral    │
 │   DeepSeek                  │
-│   + 24-alias reference menu │
+│   + 23-alias reference menu │
 └─────────────────────────────┘
 ```
 

@@ -82,12 +82,12 @@ All endpoints are on port 4000 (single port).
 
 Use the **friendly names** the gateway registers, not full Bedrock model IDs.
 The table below is a **representative sample**, not the full registry: `scripts/setup_keys.py`
-registers 13 aliases across Anthropic Claude, Amazon Nova, Mistral AI, and DeepSeek. Only models
+registers 12 aliases across Anthropic Claude, Amazon Nova, Mistral AI, and DeepSeek. Only models
 Bedrock reports ACTIVE are registered: Meta Llama (3.2 end-of-life, the rest Legacy), DeepSeek R1 and
 V3.1 (Legacy since 2026-09-30) and Claude Sonnet 4.5 (Legacy since 2026-10-08) were dropped because
 new accounts cannot adopt a Legacy model, and `bedrock_region.available_ids` skips anything whose
 lifecycle status flips in the deploy region.
-`reference/litellm-config.yaml` is a wider 24-alias *reference* catalog (it adds NVIDIA Nemotron,
+`reference/litellm-config.yaml` is a wider 23-alias *reference* catalog (it adds NVIDIA Nemotron,
 Qwen, Moonshot, and OpenAI OSS) — it is documentation, not mounted into the container, so it is a
 menu rather than a description of the live gateway.
 
