@@ -26,6 +26,7 @@ import {
   AccountPrincipal,
   CompositePrincipal,
   Effect,
+  IManagedPolicy,
   IPrincipal,
   PolicyDocument,
   PolicyStatement,
@@ -62,6 +63,8 @@ export interface OmniGoldenGateRunnerRoleConstructProps {
   readonly metricsNamespace?: string;
   /** Default `AgenticAIGoldenGateRunner-<region>`. */
   readonly roleName?: string;
+  /** Permissions boundary for the runner role (required through the Audit account's scoped execution policy). */
+  readonly permissionsBoundary?: IManagedPolicy;
   readonly tags?: Record<string, string>;
 }
 
@@ -112,6 +115,7 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
 
     this.role = new Role(this, 'Role', {
       roleName: props.roleName ?? `AgenticAIGoldenGateRunner-${stack.region}`,
+      permissionsBoundary: props.permissionsBoundary,
       description:
         'Assumed by the workload pipeline to run the golden-dataset promotion gate in the hub: dataset read, batch evaluation, result write.',
       assumedBy: new CompositePrincipal(...trusted),
@@ -126,15 +130,25 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
               resources: [`arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:dataset/*`],
             }),
             new PolicyStatement({
+              sid: 'BatchEvaluationStartAndList',
+              effect: Effect.ALLOW,
+              // StartBatchEvaluation and ListBatchEvaluations have no resource type
+              // in the Service Authorization Reference: IAM authorizes them against
+              // "*" only, and a grant pinned to batch-evaluate/* never matches (IAM
+              // policy simulator, 2026-11-24). The evaluation a start creates is then
+              // governed by the pinned statement below; the Region condition keeps
+              // the resource-less grant to the hub Region.
+              actions: ['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:ListBatchEvaluations'],
+              resources: ['*'],
+              conditions: { StringEquals: { 'aws:RequestedRegion': stack.region } },
+            }),
+            new PolicyStatement({
               sid: 'BatchEvaluationLifecycle',
               effect: Effect.ALLOW,
-              // The documented minimum policy for batch evaluations scopes these
-              // actions to `batch-evaluate/*` in the account and Region
-              // (AgentCore developer guide, batch evaluation prerequisites).
+              // Get, Stop and Delete take the batch evaluation ARN in the account and
+              // Region (AgentCore developer guide, batch evaluation prerequisites).
               actions: [
-                'bedrock-agentcore:StartBatchEvaluation',
                 'bedrock-agentcore:GetBatchEvaluation',
-                'bedrock-agentcore:ListBatchEvaluations',
                 'bedrock-agentcore:StopBatchEvaluation',
                 'bedrock-agentcore:DeleteBatchEvaluation',
               ],
@@ -143,13 +157,16 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
             new PolicyStatement({
               sid: 'SourceCopiesQuery',
               effect: Effect.ALLOW,
-              actions: ['logs:StartQuery', 'logs:GetLogEvents', 'logs:DescribeLogStreams', 'logs:FilterLogEvents'],
+              // GetQueryResults takes the queried log groups (Service Authorization
+              // Reference), so it is pinned with StartQuery.
+              actions: ['logs:StartQuery', 'logs:GetQueryResults', 'logs:GetLogEvents', 'logs:DescribeLogStreams', 'logs:FilterLogEvents'],
               resources: [...sourceLogGroupArns, ...resultLogGroupArns, ...resultLogGroupArns.map((a) => `${a}:*`)],
             }),
             new PolicyStatement({
               sid: 'QueryLifecycleNoResourceType',
               effect: Effect.ALLOW,
-              actions: ['logs:GetQueryResults', 'logs:StopQuery', 'logs:DescribeLogGroups', 'logs:DescribeQueries'],
+              // No resource type in the Service Authorization Reference: "*" only.
+              actions: ['logs:StopQuery', 'logs:DescribeLogGroups', 'logs:DescribeQueries'],
               resources: ['*'],
             }),
             new PolicyStatement({
@@ -192,7 +209,7 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs and batch-evaluation actions to its batch-evaluate/* ARNs (the documented minimum policy); logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeQueries have no resource type; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
+            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs and batch-evaluation Get/Stop/Delete to its batch-evaluate/* ARNs (the documented minimum policy); StartBatchEvaluation, ListBatchEvaluations, logs:StopQuery/DescribeLogGroups/DescribeQueries have no resource type (Service Authorization Reference) and take "*"; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
         },
         {
           id: 'NIST.800.53.R5-IAMNoInlinePolicy',

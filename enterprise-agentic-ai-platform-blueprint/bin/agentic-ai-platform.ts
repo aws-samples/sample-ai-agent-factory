@@ -41,8 +41,10 @@ import { OrgStack } from "../apps/management-account/lib/org-stack";
 import { OmniDomainStack } from "../apps/management-account/lib/omni-domain-stack";
 import {
   OmniHubStack,
+  type OmniHubExistingKeyArns,
   type OmniHubStackProps,
 } from "../apps/platform-account/lib/omni-hub-stack";
+import { OmniHubKeysStack } from "../apps/platform-account/lib/omni-hub-keys-stack";
 import { LogArchiveStack } from "../apps/platform-account/lib/log-archive-stack";
 import { AuditStack } from "../apps/platform-account/lib/audit-stack";
 import { GuardrailStack } from "../apps/platform-account/lib/guardrail-stack";
@@ -422,6 +424,55 @@ function omniAllocationTags(): Record<string, string> {
   };
 }
 
+/**
+ * Operator-provisioned hub keys for the `omni-hub` stage:
+ * `agenticai/omniHubKeyArns={"space":"arn:aws:kms:...","centralizedLogs":"arn:aws:kms:..."}`
+ * (the two OmniHubKeysStack outputs; a JSON object, or the JSON string a `-c`
+ * flag carries). Required when the hub deploys through the Audit account's
+ * scoped CloudFormation execution policy, which creates or changes no key.
+ */
+function omniHubKeyArnsContext(): OmniHubExistingKeyArns | undefined {
+  const key = "agenticai/omniHubKeyArns";
+  const raw: unknown = app.node.tryGetContext(key);
+  if (raw === undefined) {
+    return undefined;
+  }
+  const shape = `Context ${key} must be a JSON object with the KMS key ARNs 'space' and 'centralizedLogs' (OmniHubKeysStack outputs).`;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(shape);
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(shape);
+  }
+  const entries = parsed as Record<string, unknown>;
+  const allowed = ["space", "centralizedLogs"];
+  for (const name of Object.keys(entries)) {
+    if (!allowed.includes(name)) {
+      throw new Error(`Context ${key} has an unknown key '${name}'; allowed keys: ${allowed.join(", ")}.`);
+    }
+  }
+  const keyArn = /^arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:key\/[0-9a-f-]{36}$/;
+  for (const [name, value] of Object.entries(entries)) {
+    if (typeof value !== "string" || !keyArn.test(value)) {
+      throw new Error(
+        `Context ${key}.${name} must be a KMS key ARN (arn:aws:kms:<region>:<account>:key/<uuid>).`,
+      );
+    }
+  }
+  if (typeof entries.centralizedLogs !== "string") {
+    throw new Error(`Context ${key} must include 'centralizedLogs'.`);
+  }
+  return {
+    space: typeof entries.space === "string" ? entries.space : undefined,
+    centralizedLogs: entries.centralizedLogs,
+  };
+}
+
 /** Optional 0-100 percentage context value; undefined when absent. */
 function readOptionalPercentage(key: string): number | undefined {
   const raw = app.node.tryGetContext(key);
@@ -533,6 +584,26 @@ switch (stage) {
     });
     break;
   }
+  case "omni-hub-keys": {
+    // ADR-15 — the hub's two customer managed keys, deployed by operators ahead
+    // of the hub: the Audit account's scoped CloudFormation execution policy
+    // uses keys tagged agenticai:omni-hub=true but never creates or changes one.
+    const keysAccount = app.node.tryGetContext("agenticai/omniHubAccountId");
+    if (typeof keysAccount !== "string" || !/^\d{12}$/.test(keysAccount)) {
+      throw new Error("omni-hub-keys stage requires context 'agenticai/omniHubAccountId' (12 digits).");
+    }
+    const retainHubKeys = app.node.tryGetContext("agenticai/omniRetainKeys");
+    new OmniHubKeysStack(app, `AgenticAI-Omni-HubKeysStack-${deploymentRegion()}`, {
+      env: { account: keysAccount, region: deploymentRegion() },
+      synthesizer: omniSynthesizer(),
+      keyRemovalPolicy:
+        retainHubKeys === false || retainHubKeys === "false"
+          ? RemovalPolicy.DESTROY
+          : RemovalPolicy.RETAIN,
+      tags: omniAllocationTags(),
+    });
+    break;
+  }
   case "omni-hub": {
     // ADR-15 — CloudWatch Omni fleet space in the Audit/Observability account,
     // plus the organization centralization rule when this account is the
@@ -604,6 +675,17 @@ switch (stage) {
         "Context agenticai/omniGoldenGateSourceAccountIds needs agenticai/omniGoldenGateRunnerPrincipalArns (the pipeline roles allowed to assume the runner).",
       );
     }
+    // Permissions boundary every hub role carries (render-cfn-execution-policy.py
+    // hub-role-boundary); the Audit account's scoped execution policy requires it.
+    const hubRoleBoundary = app.node.tryGetContext("agenticai/omniHubRoleBoundary");
+    if (
+      hubRoleBoundary !== undefined &&
+      (typeof hubRoleBoundary !== "string" || !/^[\w+=,.@-]{1,128}$/.test(hubRoleBoundary))
+    ) {
+      throw new Error(
+        "Context agenticai/omniHubRoleBoundary must be the name of an IAM managed policy in the hub account.",
+      );
+    }
     new OmniHubStack(app, `AgenticAI-Omni-HubStack-${deploymentRegion()}`, {
       env: { account: hubAccount, region: deploymentRegion() },
       synthesizer: omniSynthesizer(),
@@ -627,12 +709,14 @@ switch (stage) {
         retainKeys === false || retainKeys === "false"
           ? RemovalPolicy.DESTROY
           : RemovalPolicy.RETAIN,
+      existingKeyArns: omniHubKeyArnsContext(),
       goldenGate: goldenGateRunnerPrincipalArns
         ? {
             runnerPrincipalArns: goldenGateRunnerPrincipalArns,
             sourceAccountIds: goldenGateSourceAccountIds,
           }
         : undefined,
+      roleBoundaryPolicyName: hubRoleBoundary,
       tags: omniAllocationTags(),
     });
     break;
@@ -1621,11 +1705,11 @@ switch (stage) {
   }
   case undefined:
     throw new Error(
-      "Missing required CDK context 'stage'. Pass --context stage=<management|omni-domain|omni-hub|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
+      "Missing required CDK context 'stage'. Pass --context stage=<management|omni-domain|omni-hub-keys|omni-hub|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
     );
   default:
     throw new Error(
-      `Unknown stage '${stage}'. Valid stages: management | omni-domain | omni-hub | platform | workload | sandbox | d03-platform | d03-workload | d03-workstream-gateway | pipeline | gap-closure.`,
+      `Unknown stage '${stage}'. Valid stages: management | omni-domain | omni-hub-keys | omni-hub | platform | workload | sandbox | d03-platform | d03-workload | d03-workstream-gateway | pipeline | gap-closure.`,
     );
 }
 

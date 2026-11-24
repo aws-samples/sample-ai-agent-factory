@@ -434,8 +434,46 @@ python3 pipelines/bootstrap/render-cfn-execution-policy.py workstream \
 python3 pipelines/bootstrap/render-cfn-execution-policy.py management \
   --account-id <MANAGEMENT_ACCOUNT> \
   --region eu-west-1 \
+  --organization-id <ORGANIZATION_ID> \
   > management-policy.json
+
+python3 pipelines/bootstrap/render-cfn-execution-policy.py audit \
+  --account-id <AUDIT_ACCOUNT> \
+  --region eu-west-1 \
+  > audit-policy.json
+
+python3 pipelines/bootstrap/render-cfn-execution-policy.py hub-role-boundary \
+  --account-id <AUDIT_ACCOUNT> \
+  --region eu-west-1 \
+  > hub-role-boundary.json
 ```
+
+The `management` document carries the CloudWatch Omni organization domain and, with `--organization-id`, the OU and SCP lifecycle pinned to `<ORGANIZATION_ID>`. CloudFormation stamps every OU and SCP it creates with the reserved `aws:cloudformation:stack-name` tag, so the document lets the role create OUs and SCPs only as part of `AgenticAI-Management-OrgStack` (override with `--stack-name`) and rename, delete, re-tag, attach or detach only the ones that stack created; OUs and SCPs that operators or other stacks own stay out of its reach. A document pinned to an organization cannot also create that organization, so the `management` stage deploys against an existing one when it runs through this role: if the account has no organization yet, create it once (`aws organizations create-organization --feature-set ALL`), enable the SCP policy type, then render with the new id and deploy the stage with `importExistingOrganization`. Rendering `management` without `--organization-id` emits only the Omni organization-domain and LogArchive statements (no OU/SCP lifecycle; a note on stderr says so). The Omni hub statements that the management document used to carry (space, hub roles, centralization rule, Transaction Search) now render only as `audit`, together with the OAM sink: an Audit account whose execution role was bootstrapped from the old management document must be re-bootstrapped with the `audit` document before the hub stage is deployed again. The `audit` document enumerates its KMS, CloudWatch Logs and OAM actions from the CloudFormation handler schemas and pins every typed Omni action to the hub's own resources (this Region's spaces and dashboards, the organization domain read-only, the one centralization rule the hub stack names `agenticai-fleet-<REGION>`); only actions the Service Authorization Reference gives no resource type use `*`, and those are kept to the hub Region by `aws:RequestedRegion`. It creates, tags or changes no KMS key: the hub's two keys are deployed by operators with their own credentials through the `omni-hub-keys` stage, and the hub stage imports them (`agenticai/omniHubKeyArns`); the execution role may only use keys that carry the `agenticai:omni-hub=true` tag the keys stack puts on them (`kms:Decrypt` and `kms:GenerateDataKey`, which the `AWS::CloudWatch::Space` handler calls on the caller's behalf) and read key metadata (`kms:DescribeKey`). Tagging a key at creation would need `kms:TagResource` on every key of the account and Region (KMS, "Controlling access to tags"), which would let the role bring any existing key under hub management, so that path is deliberately absent. The OAM sink lifecycle is pinned to the sinks of `AgenticAI-Platform-AuditStack` and `Nonprod-Audit` through CloudFormation's reserved stack-name tag (deploying the AuditStack under another name means extending `AUDIT_STACK_NAMES` in the renderer), and the two Transaction Search log groups are named explicitly.
+
+```bash
+# Operators, once per hub Region, with their own credentials:
+npx cdk deploy --context stage=omni-hub-keys \
+  --context agenticai/omniHubAccountId=<AUDIT_ACCOUNT> \
+  --context agenticai/omniSynthesizer=cli-credentials
+# Then the hub stage through the execution role, with the two outputs
+# (adopt mode needs only centralizedLogs):
+npx cdk deploy --context stage=omni-hub ... \
+  --context 'agenticai/omniHubKeyArns={"space":"<OmniSpaceKeyArn>","centralizedLogs":"<OmniCentralizedLogsKeyArn>"}'
+```
+
+Moving a hub that was deployed with operator credentials (its stack owns the keys, which predate the tag) to the execution role: tag both keys once, pass their ARNs as `agenticai/omniHubKeyArns`, deploy once more with operator credentials (the keys keep their ARNs and leave the stack retained, so the space and the centralization rule keep encrypting under them), then switch to the execution role. This only holds with the default `RemovalPolicy.RETAIN`; never combine it with `agenticai/omniRetainKeys=false`, which would schedule the keys for deletion.
+
+```bash
+for alias in alias/agenticai/omni-space-<REGION> alias/agenticai/omni-centralized-logs-<REGION>; do
+  key_id=$(aws kms describe-key --region <REGION> --key-id "$alias" --query KeyMetadata.KeyId --output text)
+  aws kms tag-resource --region <REGION> --key-id "$key_id" --tags TagKey=agenticai:omni-hub,TagValue=true
+  aws kms describe-key --region <REGION> --key-id "$key_id" --query KeyMetadata.Arn --output text
+done
+```
+
+Every role the hub stage creates must carry a permissions boundary. Create `hub-role-boundary.json` once per hub Region in the Audit account as the customer-managed policy `AgenticAI-OmniHubRoleBoundary-<REGION>` (`aws iam create-policy --policy-name AgenticAI-OmniHubRoleBoundary-<REGION> --policy-document file://hub-role-boundary.json`; the rendered document pins that Region's datasets, batch evaluations, evaluator functions and keys, and IAM policy names are account-wide, so two hub Regions cannot share one policy) and deploy the hub stage with `-c agenticai/omniHubRoleBoundary=AgenticAI-OmniHubRoleBoundary-<REGION>`. The `audit` document creates the operator role only with the AWS-managed `CloudWatchOmniSpaceAccessPolicy` boundary the Omni documentation prescribes and lets only the AWS-managed Omni policies be attached to it (it has no inline policy); it creates every other hub role, or changes it in any way IAM can condition on a boundary (permissions, trust policy, description, policy attachments, deletion), only while the role carries the boundary rendered for the same Region, so a hub role created before the boundary existed cannot be re-trusted or otherwise changed through the execution role until an operator puts the boundary on it (reads and tags stay open); the role names are pinned to the Region; and it grants neither `PutRolePermissionsBoundary` nor `DeleteRolePermissionsBoundary`, so a boundary is set only when `CreateRole` creates the role and bounding or unbounding an existing role is never the execution role's to do, so a template deployed through the execution role cannot turn a hub role into an administrator. The boundary grants nothing itself and caps the roles to what they do in this account: the account's log groups (no delete, no resource policy), its datasets and batch evaluations, judge models and inference profiles, and, by the `agenticai:omni-hub=true` tag that operators put on them, the hub keys and the code-evaluator functions (tag a code-based evaluator function with it before naming it in `codeEvaluatorFunctionArns`; an untagged function is outside the ceiling). Actions the Service Authorization Reference gives no resource type (`StartBatchEvaluation`, `ListBatchEvaluations`, the field-index policy calls, `DescribeLogGroups`, `DescribeQueries`, `StopQuery`, `PutRecords`, `PutMetricData`) are authorized against `*` only, so they take `*` in the boundary and in the roles' own policies; pinned to an ARN they would silently be denied (`StartBatchEvaluation` and `ListBatchEvaluations` are additionally kept to the hub Region through `aws:RequestedRegion`). `StartQuery` and `GetQueryResults` take the queried log groups and stay account-scoped. A hub deployed with operator credentials and no boundary must be redeployed once with the context key, still with operator credentials, before it is deployed through the execution role.
+
+Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
 
 Validate every generated identity policy:
 
