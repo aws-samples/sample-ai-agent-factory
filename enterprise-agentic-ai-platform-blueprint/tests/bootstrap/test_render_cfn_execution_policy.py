@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "pipelines" / "bootstrap" / "render-cfn-execution-policy.py"
@@ -346,35 +350,137 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     assert "organizations:CreatePolicy" not in all_actions(policy)
 
 
-def test_management_policy_grants_scoped_organizations_lifecycle() -> None:
+ORG_STACK = "AgenticAI-Management-OrgStack"
+STACK_TAG = "aws:cloudformation:stack-name"
+ORGANIZATIONS_MUTATIONS = {
+    "organizations:UpdateOrganizationalUnit",
+    "organizations:DeleteOrganizationalUnit",
+    "organizations:UpdatePolicy",
+    "organizations:DeletePolicy",
+    "organizations:AttachPolicy",
+    "organizations:DetachPolicy",
+    "organizations:TagResource",
+    "organizations:UntagResource",
+}
+
+
+def resources(statement: dict) -> list[str]:
+    value = statement["Resource"]
+    return value if isinstance(value, list) else [value]
+
+
+def test_management_policy_pins_organizations_changes_to_the_org_stack() -> None:
     policy = render("management")
-    manage = by_sid(policy, "ManageOrganizationUnitsAndScps")
-    assert {
+    root = f"arn:aws:organizations::{MANAGEMENT}:root/{ORGANIZATION}/*"
+    ou = f"arn:aws:organizations::{MANAGEMENT}:ou/{ORGANIZATION}/*"
+    scp = f"arn:aws:organizations::{MANAGEMENT}:policy/{ORGANIZATION}/service_control_policy/*"
+
+    # Creating an OU (under the root) or an SCP is allowed only inside the
+    # OrgStack: CloudFormation sends its reserved stack-name tag in every
+    # Create request.
+    create = by_sid(policy, "CreateOuAndScpForStack")
+    assert set(create["Action"]) == {
         "organizations:CreateOrganizationalUnit",
-        "organizations:DeleteOrganizationalUnit",
         "organizations:CreatePolicy",
-        "organizations:DeletePolicy",
-        "organizations:AttachPolicy",
-        "organizations:DetachPolicy",
-        "organizations:TagResource",
-    } <= set(manage["Action"])
-    assert "organizations:*" not in all_actions(policy)
-    assert set(manage["Resource"]) == {
-        f"arn:aws:organizations::{MANAGEMENT}:root/{ORGANIZATION}/*",
-        f"arn:aws:organizations::{MANAGEMENT}:ou/{ORGANIZATION}/*",
-        f"arn:aws:organizations::{MANAGEMENT}:policy/{ORGANIZATION}/service_control_policy/*",
-        f"arn:aws:organizations::{MANAGEMENT}:account/{ORGANIZATION}/*",
     }
-    read = by_sid(policy, "ReadOrganizationWithoutResourceScope")
-    assert read["Resource"] == "*"
+    assert set(create["Resource"]) == {root, scp}
+    assert create["Condition"] == {"StringEquals": {f"aws:RequestTag/{STACK_TAG}": ORG_STACK}}
+
+    # Every change to an existing OU or SCP requires the resource to carry the
+    # same tag, which only CloudFormation can apply (aws: prefix).
+    mutate = by_sid(policy, "ChangeStackOwnedOuAndScp")
+    assert set(mutate["Action"]) == ORGANIZATIONS_MUTATIONS
+    assert set(mutate["Resource"]) == {ou, scp}
+    assert mutate["Condition"] == {"StringEquals": {f"aws:ResourceTag/{STACK_TAG}": ORG_STACK}}
+    for statement in policy["Statement"]:
+        if ORGANIZATIONS_MUTATIONS & actions(statement):
+            assert statement["Sid"] == "ChangeStackOwnedOuAndScp"
+
+    read = by_sid(policy, "ReadOuAndScp")
+    assert "Condition" not in read
+    assert set(read["Resource"]) == {ou, scp}
     assert set(read["Action"]) == {
-        "organizations:DescribeOrganization",
-        "organizations:ListRoots",
-        "organizations:ListPolicies",
-        "organizations:ListAccounts",
+        "organizations:DescribeOrganizationalUnit",
+        "organizations:DescribePolicy",
+        "organizations:ListParents",
+        "organizations:ListTagsForResource",
+        "organizations:ListTargetsForPolicy",
     }
-    # Account membership (invite/move/remove) is never part of the stage.
-    assert not {"organizations:MoveAccount", "organizations:InviteAccountToOrganization"} & all_actions(policy)
+    unscoped = by_sid(policy, "ManageOrganization")
+    assert unscoped["Resource"] == "*"
+    assert set(unscoped["Action"]) == {
+        "organizations:CreateOrganization",
+        "organizations:DescribeOrganization",
+        "organizations:ListOrganizationalUnitsForParent",
+        "organizations:ListPolicies",
+        "organizations:ListRoots",
+    }
+    slr = by_sid(policy, "CreateOrganizationsSlr")
+    assert slr["Action"] == "iam:CreateServiceLinkedRole"
+    assert slr["Condition"] == {"StringEquals": {"iam:AWSServiceName": "organizations.amazonaws.com"}}
+
+    granted = all_actions(policy)
+    assert "organizations:*" not in granted
+    # Deleting the Organization, account membership (invite/move/remove/close)
+    # and account ARNs are never part of the stage.
+    assert not {
+        "organizations:DeleteOrganization",
+        "organizations:MoveAccount",
+        "organizations:InviteAccountToOrganization",
+        "organizations:RemoveAccountFromOrganization",
+        "organizations:CloseAccount",
+    } & granted
+    assert not any(":account/" in r for s in policy["Statement"] for r in resources(s))
+
+
+def test_management_log_archive_roles_share_one_lifecycle_statement() -> None:
+    policy = render("management")
+    roles = by_sid(policy, "ManageLogArchiveRoles")
+    assert set(roles["Resource"]) == {
+        f"arn:aws:iam::{MANAGEMENT}:role/AgenticAI-LogArchive-CWLDestinationRole",
+        f"arn:aws:iam::{MANAGEMENT}:role/Nonprod-LogArchive-CustomS3AutoDeleteObjects*",
+    }
+    assert "iam:PutRolePermissionsBoundary" not in roles["Action"]
+    assert "iam:PassRole" not in roles["Action"]
+    assert {"iam:CreateRole", "iam:DeleteRole", "iam:AttachRolePolicy", "iam:PutRolePolicy"} <= set(roles["Action"])
+    # Each role is still passable to exactly one service.
+    assert by_sid(policy, "PassLogArchiveDestinationRoleToCloudWatchLogs")["Condition"] == {
+        "StringEquals": {"iam:PassedToService": "logs.amazonaws.com"}
+    }
+    assert by_sid(policy, "PassLogArchiveAutoDeleteProviderRoleToLambda")["Condition"] == {
+        "StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}
+    }
+
+
+def test_management_stack_name_defaults_to_the_org_stack_and_is_validated() -> None:
+    # The default must be the stack id bin/agentic-ai-platform.ts gives the stage.
+    bin_source = (ROOT / "bin" / "agentic-ai-platform.ts").read_text()
+    assert f'"{ORG_STACK}"' in bin_source
+    custom = render("management", "--stack-name", "Custom-OrgStack")
+    create = by_sid(custom, "CreateOuAndScpForStack")
+    mutate = by_sid(custom, "ChangeStackOwnedOuAndScp")
+    assert create["Condition"]["StringEquals"][f"aws:RequestTag/{STACK_TAG}"] == "Custom-OrgStack"
+    assert mutate["Condition"]["StringEquals"][f"aws:ResourceTag/{STACK_TAG}"] == "Custom-OrgStack"
+    assert ORG_STACK not in json.dumps(custom)
+    malformed = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION,
+            "--organization-id", ORGANIZATION, "--stack-name", "not a stack name",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert malformed.returncode != 0
+    assert "--stack-name must be a CloudFormation stack name" in malformed.stderr
+    rejected = subprocess.run(
+        [sys.executable, str(SCRIPT), "audit", "--account-id", AUDIT, "--region", REGION, "--stack-name", ORG_STACK],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "apply only to the management policy" in rejected.stderr
 
 
 def test_management_policy_keeps_the_omni_domain_and_leaves_the_hub_to_audit() -> None:
@@ -417,7 +523,40 @@ def test_management_requires_organization_id_and_other_roles_reject_it() -> None
         text=True,
     )
     assert rejected.returncode != 0
-    assert "applies only to the management policy" in rejected.stderr
+    assert "apply only to the management policy" in rejected.stderr
+
+
+def load_renderer():
+    spec = importlib.util.spec_from_file_location("render_cfn_execution_policy", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_oversized_policy_is_refused_before_it_reaches_iam(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    renderer = load_renderer()
+    argv = [
+        "render-cfn-execution-policy.py", "platform", "--account-id", PLATFORM, "--region", REGION,
+        "--target-account-id", WORKSTREAM, "--connection-arn", CONNECTION,
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    # Shrink the limit below the platform document: the renderer must exit
+    # non-zero, name the measured size and the limit, and print no document.
+    monkeypatch.setattr(renderer, "IAM_MANAGED_POLICY_MAX_CHARS", 1024)
+    with pytest.raises(SystemExit) as refused:
+        renderer.main()
+    assert refused.value.code not in (0, None)
+    message = str(refused.value.code)
+    assert re.search(r"rendered policy is [0-9]{4,} characters", message)
+    assert "allow 1024" in message
+    assert capsys.readouterr().out == ""
+    # The real limit lets the same invocation through.
+    monkeypatch.setattr(renderer, "IAM_MANAGED_POLICY_MAX_CHARS", IAM_MANAGED_POLICY_MAX_CHARS)
+    renderer.main()
+    assert json.loads(capsys.readouterr().out)["Version"] == "2012-10-17"
 
 
 def test_every_rendered_policy_fits_one_iam_managed_policy() -> None:

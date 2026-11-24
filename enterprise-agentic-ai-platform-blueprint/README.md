@@ -443,7 +443,7 @@ python3 pipelines/bootstrap/render-cfn-execution-policy.py audit \
   > audit-policy.json
 ```
 
-The `management` document carries the Organizations OU and SCP lifecycle pinned to `<ORGANIZATION_ID>` and the CloudWatch Omni organization domain; the `audit` document carries the OAM sink and the Omni hub (space, roles, centralization rule). Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
+The `management` document carries the Organization, OU and SCP lifecycle pinned to `<ORGANIZATION_ID>` and the CloudWatch Omni organization domain. CloudFormation stamps every OU and SCP it creates with the reserved `aws:cloudformation:stack-name` tag, so the document lets the role create OUs and SCPs only as part of `AgenticAI-Management-OrgStack` (override with `--stack-name`) and rename, delete, re-tag, attach or detach only the ones that stack created; OUs and SCPs that operators or other stacks own stay out of its reach. The `audit` document carries the OAM sink and the Omni hub (space, roles, centralization rule). Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
 
 Validate every generated identity policy:
 
