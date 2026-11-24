@@ -114,8 +114,10 @@ export class EvaluationExecutionRoleConstruct extends Construct {
         // Field-index policy calls have no resource type in the Service
         // Authorization Reference: IAM authorizes them against "*" only, and a
         // grant pinned to the span log-group ARNs never matches (IAM policy
-        // simulator, 2026-11-24). The span groups the service indexes are the
-        // ones its log-read statement can see.
+        // simulator, 2026-11-24). "*" therefore means any log group in the
+        // account; nothing else in this role narrows it. Where that write
+        // authority is unacceptable, pre-provision the span groups' field
+        // indexes and drop this statement.
         actions: ['logs:DescribeIndexPolicies', 'logs:PutIndexPolicy'],
         resources: ['*'],
       }),

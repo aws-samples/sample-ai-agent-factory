@@ -1072,10 +1072,16 @@ def hub_role_boundary_policy(account: str, region: str) -> dict[str, Any]:
                 ],
             },
             {
+                # Code-based evaluators are operator-provisioned functions; only the
+                # ones operators tag agenticai:omni-hub=true are inside the ceiling,
+                # so a template cannot point a hub role at an unrelated function.
                 "Sid": "HubCodeEvaluators",
                 "Effect": "Allow",
                 "Action": ["lambda:GetFunction", "lambda:InvokeFunction"],
                 "Resource": arn("lambda", region, account, "function:*"),
+                "Condition": {
+                    "StringEquals": {f"aws:ResourceTag/{OMNI_HUB_OWNERSHIP_TAG}": "true"}
+                },
             },
             {
                 "Sid": "HubKeys",

@@ -259,6 +259,10 @@ def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(bound
     assert decisions(ADMINISTRATOR_DOCUMENT, ["logs:GetLogEvents"], [f"arn:aws:logs:{REGION}:999999999999:log-group:other"], boundary=boundary_document) == {"logs:GetLogEvents": "implicitDeny"}
     assert decisions(ADMINISTRATOR_DOCUMENT, ["kms:Decrypt"], [KEY], context((f"aws:ResourceTag/{OWNER_TAG}", "true")), boundary=boundary_document) == {"kms:Decrypt": "allowed"}
     assert decisions(ADMINISTRATOR_DOCUMENT, ["kms:Decrypt"], [KEY], context((f"aws:ResourceTag/{OWNER_TAG}", "false")), boundary=boundary_document) == {"kms:Decrypt": "implicitDeny"}
+    # Code evaluators: only functions operators tagged as hub evaluators, never an unrelated one.
+    function = f"arn:aws:lambda:{REGION}:{AUDIT}:function:cloudwatchCodeEvaluator-x"
+    assert set(decisions(ADMINISTRATOR_DOCUMENT, ["lambda:InvokeFunction", "lambda:GetFunction"], [function], context((f"aws:ResourceTag/{OWNER_TAG}", "true")), boundary=boundary_document).values()) == {"allowed"}
+    assert set(decisions(ADMINISTRATOR_DOCUMENT, ["lambda:InvokeFunction", "lambda:GetFunction"], [function], boundary=boundary_document).values()) == {"implicitDeny"}
 
 
 def test_management_role_changes_only_the_org_stacks_scps(management_document: str) -> None:

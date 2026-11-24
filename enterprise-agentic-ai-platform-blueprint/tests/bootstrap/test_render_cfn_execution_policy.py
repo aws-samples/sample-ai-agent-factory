@@ -580,7 +580,10 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
         f"arn:aws:bedrock-agentcore:{REGION}:{AUDIT}:dataset/*",
         f"arn:aws:bedrock-agentcore:{REGION}:{AUDIT}:batch-evaluate/*",
     }
-    assert sids["HubCodeEvaluators"]["Resource"] == f"arn:aws:lambda:{REGION}:{AUDIT}:function:*"
+    evaluators = sids["HubCodeEvaluators"]
+    assert evaluators["Resource"] == f"arn:aws:lambda:{REGION}:{AUDIT}:function:*"
+    # Only operator-tagged evaluator functions, never every function in the account.
+    assert evaluators["Condition"] == {"StringEquals": {"aws:ResourceTag/agenticai:omni-hub": "true"}}
     keys = sids["HubKeys"]
     assert keys["Resource"] == f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
     assert keys["Condition"] == {"StringEquals": {"aws:ResourceTag/agenticai:omni-hub": "true"}}
