@@ -24,7 +24,7 @@ Deploy an enterprise LLM Gateway using **LiteLLM Proxy** that provides governed,
 | **13 Bedrock model aliases** | Route to Claude, Nova, Mistral, and DeepSeek through one gateway — and add more from a 24-alias reference catalog |
 | **Bedrock Guardrails** | Native integration with Amazon Bedrock Guardrails for content safety and PII detection |
 | **Cost Tracking** | Per-key, per-team, per-model spend attribution with `/spend/logs` API |
-| **Caching** | Identical requests return cached responses — reduces cost and latency |
+| **Caching** | Optional response caching for identical requests (not enabled in this workshop's deployment; the reference config shows how) |
 | **Strands Agents** | Native `LiteLLMModel` provider — tool calling works through the Bedrock Converse API |
 
 ## What you'll deploy

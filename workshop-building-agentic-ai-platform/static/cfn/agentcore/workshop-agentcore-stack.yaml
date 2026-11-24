@@ -22,11 +22,13 @@ Parameters:
     Default: ''
     Description: >-
       ARN of the IAM role or user that opens CloudWatch Omni from the AWS console (Module 5).
-      Workshop Studio passes the participant role ({{.ParticipantRoleArn}}); deploy-cfn.sh passes
-      OMNI_CONSOLE_PRINCIPAL_ARN only when it names an identity other than the one running the
-      deploy, which already becomes Space Admin as the space's creator. Omni rejects a grant for a
-      principal that does not exist, and a second SPACE_ADMIN grant for a principal that already
-      holds one, so leave this empty to create no console grant.
+      Workshop Studio passes the participant role ({{.ParticipantRoleArn}}). deploy-cfn.sh passes
+      nothing by default and passes OMNI_CONSOLE_PRINCIPAL_ARN when set, except that an override
+      naming the deployer is dropped while no space exists yet, because the identity that creates
+      the space becomes Space Admin through Omni's own grant. On an existing space the original
+      creator keeps that grant and a later deployer may need an explicit grant. Omni rejects a
+      grant for a principal that does not exist, and a second SPACE_ADMIN grant for a principal
+      that already holds one, so leave this empty to create no console grant.
   OmniConsolePrincipalType:
     Type: String
     Default: IAM_ROLE
@@ -2389,11 +2391,13 @@ Resources:
   # ---------------------------------------------------------------------------
   # CloudWatch Omni foundation (Module 5), pre-provisioned so participants only
   # verify it. Omni decides who may enter a space with access GRANTS, never IAM
-  # policies: the identity that creates the space is the only automatic admin.
-  # Created here by CloudFormation, the space would admit nobody, so the two
-  # participant identities are granted explicitly - WSParticipantRole below (the
-  # console identity) and the Code Editor instance role in code-editor.yaml (the
-  # terminal and notebook identity; it deploys after this stack and imports the
+  # policies. Omni automatically grants Space Admin to the identity that creates
+  # the space: WSSystemRole in a Workshop Studio event, the deployer on the
+  # self-paced path. Everyone else needs an explicit grant: the console grant
+  # below is conditional on OmniConsolePrincipalArn (Workshop Studio supplies
+  # WSParticipantRole; the default self-paced deploy leaves it empty), and the
+  # Code Editor instance role gets its grant in code-editor.yaml (the terminal
+  # and notebook identity; it deploys after this stack and imports the
   # ac-OmniDomainId / ac-OmniSpaceId exports). Lives in this stack because the
   # three roles the space assumes and the Transaction Search config it depends
   # on are defined here, and Workshop Studio allows at most five templates.
@@ -2441,10 +2445,13 @@ Resources:
   # system-managed Space Admin grant of its own (WSSystemRole in an event, the
   # deployer on the self-paced path), and CreateAccessGrant rejects both a
   # principal that does not exist ("Principal does not exist for the supplied
-  # ARN", probed live 2026-11-09) and a second SPACE_ADMIN grant for one that
-  # already holds it (409 ConflictException, probed live 2026-11-10). So the grant
-  # is conditional: deploy-cfn.sh leaves the parameter empty unless
-  # OMNI_CONSOLE_PRINCIPAL_ARN names a different console identity.
+  # ARN") and a second SPACE_ADMIN grant for one that already holds it (409
+  # ConflictException). Both are reported observations from the 2026-11 self-paced
+  # and event test runs (Module 5 live-test notes); no API response is retained in
+  # this repository. So the grant is conditional: deploy-cfn.sh passes nothing by
+  # default, drops an override naming the deployer only while no space exists yet
+  # (the creator gets Omni's grant), and otherwise passes OMNI_CONSOLE_PRINCIPAL_ARN
+  # as given.
   OmniParticipantSpaceAdminGrant:
     Type: AWS::CloudWatch::AccessGrant
     Condition: HasOmniConsolePrincipal

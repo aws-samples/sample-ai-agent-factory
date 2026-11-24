@@ -123,6 +123,7 @@ When planning a trip:
 Use IATA airport codes (e.g. LAX, LHR, SFO, TYO) for flight searches.
 Use city names (e.g. London, Tokyo, Paris) for hotel searches.
 Dates should be in YYYY-MM-DD format.
+If a tool listed above is not available to you, say so plainly and stop. Do not call an unrelated tool or write code to stand in for it.
 """
 
 
@@ -260,7 +261,7 @@ Let's break down the key parts of this agent (no code to run here — this is a 
 
 **Response projection — `project_for_client`.** The entrypoint does not hand the raw stream event to the caller. Each event is projected onto the fields the frontend renders, which drops the raw provider envelope and — on the final event — an `AgentResult` that would otherwise ship the whole conversation history and token metrics to the client. This is the same principle as the `except` clause below it, which returns `type(e).__name__` rather than the exception message: the runtime is an API boundary, so decide deliberately what crosses it instead of letting internal objects serialize themselves outward.
 
-**Agent assembly.** The Strands `Agent` is constructed with two tool sources. First, an MCP client returned by `create_gateway_mcp_client()` — this is the live connection to the AgentCore Gateway, which exposes the flight and hotel tools synced from Module 3a's Registry. Second, a Code Interpreter wrapper that lets the agent run small Python snippets for calculations. Tool discovery is dynamic: at startup the agent calls `tools/list` on the gateway, so any tool added to the Registry afterwards becomes available on the next restart without changing agent code.
+**Agent assembly.** The Strands `Agent` is constructed with two tool sources. First, an MCP client returned by `create_gateway_mcp_client()`. It connects to whatever AgentCore Gateway the `/FAST-stack/gateway_url` SSM parameter names. Right now that is FAST's own built-in gateway, which the `cdk deploy` below creates and which serves one sample tool (`text_analysis_tool`); the *Connect to Tools Gateway* pages later repoint the parameter at the Module 3a or 3b gateway that serves the flight and hotel tools. Second, a Code Interpreter wrapper that lets the agent run small Python snippets for calculations. Tool discovery is dynamic: at startup the agent calls `tools/list` on the gateway, so any tool added behind that gateway afterwards becomes available on the next restart without changing agent code.
 
 ## Update the Dockerfile
 
@@ -428,6 +429,8 @@ cd /workshop/fast-agent/infra-cdk
 npm ci
 :::
 
+::alert[**Expected npm output.** `npm ci` prints `npm warn deprecated` lines and an audit summary; both come from FAST's upstream lockfile. The lab pins FAST v0.4.1 for reproducibility, so do **not** run `npm audit fix` or `npm audit fix --force` during the lab: either one rewrites the pinned manifests and can break CDK compatibility, and `npx cdk deploy` can then fail with `Cloud assembly schema version mismatch`. Maintainers must assess build-tool and frontend advisories separately and provide tested updates. If you already ran an audit fix here, restore the pinned files with `git -C /workshop/fast-agent checkout -- infra-cdk/package.json infra-cdk/package-lock.json` and re-run the block above. `deploy-frontend.py` later prints its own npm summary for `frontend/`, and the same advice applies there: if you ran an audit fix in that directory, restore `frontend/package.json` and `frontend/package-lock.json` the same way (this discards any local edits to those manifests), run `(cd /workshop/fast-agent/frontend && npm ci --no-fund)` so the installed packages match the restored lockfile again, and re-run the **Deploy the frontend** step.]{type="info"}
+
 Verify `node_modules/` was populated and the CDK CLI is on PATH:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
@@ -475,7 +478,7 @@ You should see `Login Succeeded` on the last line. If instead you see `Error sav
 
 ::alert[If using Finch instead of Docker, run `export CDK_DOCKER=finch` in your terminal before deploying.]{type="info"}
 
-FAST's CDK stack **owns** the `/FAST-stack/gateway_url` and `/FAST-stack/gateway_credential_provider` SSM parameters, and the *Connect the Gateway* pages later overwrite them with `put-parameter`. An overwritten parameter survives `cdk destroy`, so if this account has ever deployed and torn down FAST-stack, those parameters can still be sitting there unmanaged — and CloudFormation then refuses to recreate the stack. Clear any orphans first (this is a no-op if FAST-stack already exists, because the parameters are legitimately in use then):
+FAST's CDK stack **owns** the `/FAST-stack/gateway_url` and `/FAST-stack/gateway_credential_provider` SSM parameters, and the *Connect to Tools Gateway* pages later overwrite them with `put-parameter`. An overwritten parameter survives `cdk destroy`, so if this account has ever deployed and torn down FAST-stack, those parameters can still be sitting there unmanaged — and CloudFormation then refuses to recreate the stack. Clear any orphans first (this is a no-op if FAST-stack already exists, because the parameters are legitimately in use then):
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 if ! aws cloudformation describe-stacks --stack-name FAST-stack >/dev/null 2>&1; then
@@ -617,9 +620,11 @@ Open the Amplify URL in your browser and log in. Send a test message:
 
 > Search for flights from SFO to Tokyo for 2026-09-15
 
-The agent will attempt to call `search_flights` but **fail** — it will either return an error or fall back to the Code Interpreter. This proves the travel tools are listed in the system prompt but not actually connected to the gateway yet.
+`cdk deploy` created FAST's own built-in gateway, and that is what `/FAST-stack/gateway_url` points at right now. It serves a single sample tool, `text_analysis_tool`, under the target `sample-tool-target`. The system prompt lists `search_flights` and the other travel tools, but this gateway does not serve them, so the agent cannot call them. The prompt's last rule tells the agent to say so plainly when a listed tool is unavailable, so the expected reply says that the flight tools are not available. The model may instead call the sample tool or the Code Interpreter, so the chat may also show a tool chip such as `gateway_sample-tool-target___text_analysis_tool` or `execute_python_securely`, or return an error. A `search_flights` chip would mean the model requested a tool the gateway never offered; that call would fail, typically with an unknown-tool error, so inspect its result.
 
-You will wire them in the **Connect to Tools Gateway** step.
+Read the tool chips rather than the agent's prose: each chip names a tool the agent requested, not one that ran successfully. Click a chip to expand its arguments and result (FAST collapses them by default), and read the result to tell a successful call from an unknown-tool or authentication error. This shows the travel tools are listed in the system prompt but not connected to the gateway yet.
+
+You will wire them in the **Connect to Tools Gateway** step. After that, the same request shows a chip named `gw_tg-workshop-flights-mcp___search_flights` (MCP path) or `gateway_tg-workshop-flights-mcp___search_flights` (AgentCore path): the second half of the name is the gateway target encoded in the tool name the agent requested (the expanded result or the trace shows whether it was reached and answered).
 
 ::alert[If the agent does not respond at all, check the AgentCore Runtime logs in CloudWatch under `/aws/bedrock-agentcore/runtimes/`.]{type="warning"}
 

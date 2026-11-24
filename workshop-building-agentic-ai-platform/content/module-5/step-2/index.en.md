@@ -5,7 +5,7 @@ weight: 82
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach, both achieve the same result.]{type="info"}
 
-Omni lives outside the AWS Management Console, at your domain's URL. Members normally sign in through IAM Identity Center. The workshop domain has no identity provider, so members sign in as IAM roles. You hold two of them: the browser you are reading this in is signed in to the AWS console as `WSParticipantRole`, and the Code Editor terminal runs as the instance role that created the space. `workshop-agentcore-stack` and `code-editor` granted both of them Space Admin, and step 1 verified it, so either path below works; the console path is the one your colleagues would use day to day.
+Omni lives outside the AWS Management Console, at your domain's URL. Members normally sign in through IAM Identity Center. The workshop domain has no identity provider, so members sign in as IAM roles. You hold two of them: the browser you are reading this in is signed in to the AWS console as `WSParticipantRole`, and the Code Editor terminal runs as the instance role. CloudFormation created the space when Workshop Studio ran `workshop-agentcore-stack`, and the two stacks granted your two identities Space Admin: `workshop-agentcore-stack` for `WSParticipantRole`, the `code-editor` stack for the instance role. Step 1 verified those grants, so either path below works; the console path is the one your colleagues would use day to day.
 
 ## CLI walkthrough
 
@@ -55,7 +55,21 @@ The three groups are the map for the rest of this module:
 
 ### Step 3: Confirm who you are inside the space
 
-Open **Settings** (bottom-left), then **Manage permissions** under *Space*. The table lists four principals, and their grants retell how the space was provisioned. `WSParticipantRole` holds `participant-space-admin` — *Space admin*, *Customer managed* — created by `workshop-agentcore-stack`, and the reason your console sign-in was admitted. The Code Editor instance role (`code-editor-CodeEditorInstanceBootstrapRole-…`) holds `code-editor-space-admin` at the same level, created by the `code-editor` stack so the terminal, the notebooks and the deep link are admitted too. `WSSystemRole`, the role Workshop Studio used to run CloudFormation, holds `OmniDefaults-Space-Admin` — *System managed*, the grant Omni gives whichever identity creates a space. The fourth row is the space's own agent profile (`agent-<space id>`), with a custom `OmniDefaults-AsyncAccessProfile-AgentCanAssume` grant that lets Omni's background work act inside the space. Select a principal to see its grants. **Add grant** on this screen is where a platform team adds other roles, Identity Center users or groups, each at Viewer, Editor, Space admin or a custom action list, optionally with a data scope that filters which rows they can read. (In your own account the identity that ran `./scripts/self-service-deploy.sh` created the space, so it is the one holding `OmniDefaults-Space-Admin`; there is no `WSSystemRole` row, no `participant-space-admin` row unless you deployed with `OMNI_CONSOLE_PRINCIPAL_ARN` set to another identity, and the instance role's `code-editor-space-admin` row is the same as here.)
+1. Open **Settings** (bottom-left), then **Manage permissions** under *Space*.
+2. Check that the table lists these four principals. The first four columns below are the screen's own headers; the last two add what the screen does not show.
+
+| Principal name | Type | Permission | Grants | Created by | Why it exists |
+|----------------|------|------------|--------|------------|---------------|
+| Code Editor instance role (`code-editor-CodeEditorInstanceBootstrapRole-...`) | IAM Role | Space admin | `code-editor-space-admin` | The `code-editor` stack | Admits the terminal, the notebooks and the deep link |
+| `agent-<space id>` | Agent | Custom | `OmniDefaults-AsyncAccessProfile-AgentCanAssume` | Omni | Lets Omni's background work act inside the space |
+| `WSSystemRole` | IAM Role | Space admin | `OmniDefaults-Space-Admin` | Omni, for whoever creates a space (here the role Workshop Studio ran CloudFormation as) | The space's first admin |
+| `WSParticipantRole` | IAM Role | Space admin | `participant-space-admin` | `workshop-agentcore-stack` | Admits your console sign-in |
+
+The screen does not show the grant type. The CLI grants table in [Verify your domain and space](/module-5/step-1), its Step 3, does: `CUSTOMER_MANAGED` for the two grants the stacks created, `SERVICE_MANAGED` for the two Omni created itself.
+
+Then select a principal to see its grants. **Add grant** on this screen is where a platform team adds other roles, Identity Center users or groups, each at Viewer, Editor, Space admin or a custom action list, optionally with a data scope that filters which rows they can read.
+
+**Deploying into your own account?** The table has three rows by default; admitting a distinct console identity adds a fourth, and further grants add more. The identity that first ran `./scripts/self-service-deploy.sh` created the space, so it is the row holding `OmniDefaults-Space-Admin` (a later deployer does not inherit that row), and there is no `WSSystemRole` row. There is no `participant-space-admin` row either, unless you deployed with `OMNI_CONSOLE_PRINCIPAL_ARN` set to another identity or added one with step 1's **Admit another console identity** block: Omni rejects a grant for a principal that does not exist, and a second Space Admin grant for a principal that already holds one, so the original creator keeps Omni's grant and a later deployer receives an explicit grant through `OMNI_CONSOLE_PRINCIPAL_ARN` or the admission block. The instance role's `code-editor-space-admin` row is the same as here.
 
 ![Manage permissions in the workshop space: the four principals, their highest permission and their grants, with Add grant](/static/img/module-5/omni-manage-permissions.png)
 

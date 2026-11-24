@@ -232,7 +232,7 @@ After the deployment completes, open the Amplify URL and ask:
 
 The agent should call `search_flights` and `search_hotels` through the Module 3a gateway and return **real flight and hotel results** — not a generic response. You should see tool invocations like `gw_tg-workshop-flights-mcp___search_flights` in the chat — the `gw_` prefix comes from `prefix="gw"` in the `gateway.py` you wrote above.
 
-::alert[If the agent still falls back to Code Interpreter or says it can't access tools, check the runtime logs for authentication errors. The most common issue is the IAM permission for the new OAuth2 secret.]{type="warning"}
+::alert[If the agent still behaves like the baseline on the Deploy page (calls the sample `text_analysis_tool` from FAST's built-in gateway, says the flight tools are not available, or falls back to Code Interpreter), check the runtime logs for authentication errors. The most common issue is the IAM permission for the new OAuth2 secret.]{type="warning"}
 
 ## Notebook walkthrough (optional alternative)
 

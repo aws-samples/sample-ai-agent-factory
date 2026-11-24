@@ -35,7 +35,7 @@ The agent should:
 3. Use the Code Interpreter to calculate total costs
 4. Present a structured itinerary with flight options, hotel recommendations, and pricing
 
-You should see tool invocations like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat — this confirms the tools are flowing through the gateway rather than being answered from the model's own knowledge.
+You should see tool chips like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat. A chip names the tool the agent requested and the gateway target encoded in its name; click it and check that the expanded result is real flight data, not an error, before concluding the call went through the gateway rather than being answered from the model's own knowledge.
 
 The name has two halves, and both are evidence. The prefix is the `prefix=` argument you gave `MCPClient` in `tools/gateway.py`, so it depends on which connect page you followed:
 
@@ -44,7 +44,7 @@ The name has two halves, and both are evidence. The prefix is the `prefix=` argu
 | **Module 3a** — [Connect to Tools Gateway (MCP)](../connect-gateway-mcp/) | `prefix="gw"` | `gw_tg-workshop-flights-mcp___search_flights` |
 | **Module 3b** — [Connect to Tools Gateway (AgentCore)](../connect-gateway-agentcore/) | `prefix="gateway"` | `gateway_tg-workshop-flights-mcp___search_flights` |
 
-The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** that served the call — so the tool name tells you which Lambda behind which gateway produced the answer.
+The second half, `tg-workshop-flights-mcp`, is the **gateway target** encoded in the tool name the agent requested — so the tool name tells you which Lambda behind which gateway the agent asked for, and only the expanded result (or the trace in Module 5) shows whether the request reached it and succeeded.
 
 ## Test 2: budget comparison
 
@@ -54,13 +54,15 @@ Try a follow-up that tests multi-turn memory:
 
 The agent should remember the Tokyo trip context from the previous turn and call `search_hotels_by_budget` with the budget constraint.
 
-## Test 3: different route
+## Test 3: different date
 
 Test a different date to verify the mock data coverage:
 
 > Search for flights from SFO to Tokyo for 2026-09-20
 
 The agent should call `search_flights` and return results from the Flights MCP Lambda's mock data.
+
+Remember this request: [Module 5](/module-5) is where it is traced end to end in CloudWatch Omni, from the prompt you typed down to the model call and the gateway tool call that answered it.
 
 ## Test 4: Code Interpreter
 
@@ -116,9 +118,9 @@ echo "LLM Gateway spend before: $SPEND_BEFORE"
 
 # The session ID must be at least 33 characters. The entrypoint reads the prompt
 # and the session ID from the JSON body, so both are sent in the payload too.
-# The prompt carries a one-off marker: the LLM Gateway caches identical requests
-# (Module 2 turned caching on), and a cache hit adds no spend, which would make a
-# repeat run of this block report a false FAIL.
+# The prompt carries a one-off marker so every run is a distinct request. The
+# workshop's LLM Gateway does not enable LiteLLM response caching, but on a gateway
+# that does, a cache hit adds no spend and a repeat run would report a false FAIL.
 SESSION_ID="smoke-$(openssl rand -hex 16)-session"
 PROMPT="Search for flights from SFO to TYO on 2026-09-15 (request $(openssl rand -hex 3))"
 ENCODED_ARN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$RUNTIME_ARN")
@@ -132,7 +134,7 @@ HTTP=$(curl -s -o /tmp/smoke-response.txt -w '%{http_code}' -X POST \
 echo "Runtime invocation: HTTP $HTTP"
 
 # Match both prefixes: `gw_` on the Module 3a path, `gateway_` on the Module 3b path.
-echo "Gateway tools the agent called for this prompt:"
+echo "Gateway tools the agent requested for this prompt:"
 grep -oE '"name": *"(gw|gateway)_tg-[A-Za-z0-9_-]+"' /tmp/smoke-response.txt | sort -u
 
 sleep 8
@@ -157,7 +159,7 @@ aws cognito-idp admin-delete-user --user-pool-id $USER_POOL_ID \
   --username "$SMOKE_USER" --region $REGION && echo "Removed the throwaway user."
 :::
 
-Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent actually called for this flight search, typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it invoked.
+Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent requested for this flight search (a name shows that the agent requested a Gateway tool; inspect its result, or its trace in Module 5, to confirm routing and successful execution), typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it requested.
 
 ::alert[`HTTP 403` with `Claim 'client_id' value mismatch with configuration.` means an IdToken was used instead of an AccessToken. `Failed to start MCP client` in the response body means `/FAST-stack/gateway_url` points at a Gateway that no longer exists — re-run the SSM step on the *Connect the Gateway* page.]{type="info"}
 

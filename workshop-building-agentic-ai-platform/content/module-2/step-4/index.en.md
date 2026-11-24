@@ -45,7 +45,7 @@ curl -s "${LLM_GATEWAY_URL}/chat/completions" \
 
 Notice the model name is `claude-sonnet` (the friendly alias), not the full Bedrock model ID. LiteLLM maps it to `bedrock/global.anthropic.claude-sonnet-4-6` automatically via the model registry.
 
-::alert[**Prompt Caching via the LLM Gateway.** When you send identical requests through the gateway (same model, messages, and parameters), LiteLLM caches the response. For Claude Sonnet and Opus models on Bedrock, prompt caching goes deeper — the Bedrock Converse API natively caches the prompt tokens themselves, reducing latency and cost for subsequent requests with the same context. In this workshop, the gateway's cache is per-container, so you may not always see a hit; in production, add a Redis backend (`cache_params:` in litellm-config.yaml) to share cache hits across all gateway tasks. To use it, just make identical API calls — no code changes needed.]{type="info"}
+::alert[**Response caching at the LLM Gateway.** LiteLLM can cache the response to identical requests (same model, messages and parameters) and serve repeats without calling the model. The workshop's task definition and setup scripts do not configure response caching (the proxy runs without a config file; models live in Postgres through `STORE_MODEL_IN_DB`). `reference/litellm-config.yaml` in `source/module-2-llm-gateway` illustrates one way to enable it (`litellm_settings: cache: true`, ideally with a Redis backend so hits are shared across all gateway tasks); LiteLLM also exposes a cache settings API. Separately, Bedrock prompt caching for Claude models caches prompt tokens inside Bedrock itself and is independent of the gateway.]{type="info"}
 
 ## 4.2 Test with the OpenAI Python SDK
 
@@ -147,7 +147,7 @@ PYEOF
 
 ## 4.5 Run the full test script
 
-For a comprehensive test covering health checks, model listing, completions, caching, multi-model routing, spend tracking, and Strands Agent integration:
+For a comprehensive test covering health checks, model listing, completions, a response-cache check, multi-model routing, spend tracking, and Strands Agent integration:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 cd /workshop/source/module-2-llm-gateway
@@ -175,7 +175,7 @@ Open **`step-4-test-models.ipynb`**. This notebook walks through eight sections 
 3. **Chat completion via `requests`** — A plain HTTP POST showing the raw request/response cycle.
 4. **OpenAI SDK compatibility** — Demonstrates that the standard `openai` Python package works unchanged against the gateway. Pay attention to how only `base_url` and `api_key` differ from a standard OpenAI setup.
 5. **Multi-model routing** — Sends the same prompt to the three aliases the `workshop-dev-key` is allowed to call: Claude Sonnet, Claude Haiku, and Nova 2 Lite. Compare the responses to see how different models handle identical prompts.
-6. **Caching demonstration** — Sends two identical requests with `temperature=0` and measures latency. The proxy runs with `cache: true` but no shared backend, so cache hits are per-ECS-task — if both requests land on different tasks, expect similar latency. The exercise is here to show the API contract, not to produce a reliable speedup in this workshop environment.
+6. **Caching demonstration** — Sends two identical requests with `temperature=0` and measures latency. The workshop deployment does not configure LiteLLM response caching, so both calls reach Bedrock; any difference is timing variance, not a cache hit. The exercise shows the timing method you would use against a cache-enabled gateway.
 7. **Strands Agent integration** — Creates a Strands `Agent` using `LiteLLMModel` pointed at the gateway. This is the pattern Module 4 agents will use in production.
 8. **Workshop client library** — Shows the `LLMGatewayClient` convenience wrapper for quick interactions.
 

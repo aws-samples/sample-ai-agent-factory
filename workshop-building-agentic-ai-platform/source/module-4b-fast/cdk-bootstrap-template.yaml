@@ -248,9 +248,17 @@ Resources:
     # Retained on stack delete/replace: this bucket holds the file assets (Lambda
     # bundles, nested templates) that already-deployed CDK stacks still reference,
     # so dropping it during a bootstrap teardown or replacement would orphan those
-    # live stacks. The LifecycleConfiguration above expires old versions, so the
-    # retained bucket does not grow without bound. When you decommission the
-    # bootstrap for good, empty and remove it by hand (aws s3 rm / rb).
+    # live stacks. The LifecycleConfiguration above only expires noncurrent
+    # versions and aborts incomplete multipart uploads. Current assets are not
+    # expired: CDK writes each asset under a key derived from its content hash, so
+    # every deploy that changes an asset adds a new object, and those objects stay
+    # until you clean up. Growth is therefore not bounded by the lifecycle rules.
+    # Do that cleanup only once every stack that references these assets has been
+    # deleted. The bucket is versioned, so `aws s3 rm` and `aws s3 rb --force` are
+    # not enough (they leave object versions and delete markers behind, and the
+    # bucket delete then fails): remove every object version and delete marker
+    # (for example from `aws s3api list-object-versions` fed into
+    # `aws s3api delete-objects`), then `aws s3api delete-bucket`.
     UpdateReplacePolicy: Retain
     DeletionPolicy: Retain
   StagingBucketPolicy:

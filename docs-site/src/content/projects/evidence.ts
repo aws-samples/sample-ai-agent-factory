@@ -89,9 +89,9 @@ export const evidence: Record<ProjectId, ProjectEvidence> = {
         id: 'ide-policy-parity',
         what: 'Participant IAM policy parity (scripts/verify-ide-policy-parity.py)',
         proves:
-          'The five participant IAM policy files match the copies embedded in code-editor.yaml, and each stays under the IAM managed-policy size quota.',
+          'The seven participant IAM policy files match the copies embedded in code-editor.yaml, and each stays under the IAM managed-policy size quota.',
         sources: [
-          { file: WORKSHOP_IDE_POLICY_PARITY, quote: 'Guard the five participant IAM policies against drift.' },
+          { file: WORKSHOP_IDE_POLICY_PARITY, quote: 'Guard the seven participant IAM policies against drift.' },
           {
             file: WORKSHOP_IDE_POLICY_PARITY,
             quote: 'It also re-checks the IAM managed-policy size quota (6144 chars minified)',
