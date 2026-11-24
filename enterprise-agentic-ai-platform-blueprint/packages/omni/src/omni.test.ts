@@ -418,11 +418,17 @@ describe('OmniGoldenGateRunnerRoleConstruct', () => {
 
   it('pins the batch-evaluation actions to the Region, PutMetricData to the namespace and KMS to the Logs service', () => {
     const statements = runnerPolicy(synthRunner({ metricsNamespace: 'agenticai/acme-gate' }));
+    // StartBatchEvaluation and ListBatchEvaluations have no resource type (Service
+    // Authorization Reference): only a "*" grant ever matches them.
+    const start = statements.find((s) => s.Sid === 'BatchEvaluationStartAndList')!;
+    expect(start.Action).toEqual(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:ListBatchEvaluations']);
+    expect(start.Resource).toBe('*');
     const batch = statements.find((s) => s.Sid === 'BatchEvaluationLifecycle')!;
     expect(batch.Action).toEqual(
-      expect.arrayContaining(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:GetBatchEvaluation', 'bedrock-agentcore:StopBatchEvaluation']),
+      expect.arrayContaining(['bedrock-agentcore:GetBatchEvaluation', 'bedrock-agentcore:StopBatchEvaluation', 'bedrock-agentcore:DeleteBatchEvaluation']),
     );
-    // The documented minimum policy scopes batch evaluations to batch-evaluate/* in the account and Region.
+    expect(batch.Action).not.toContain('bedrock-agentcore:StartBatchEvaluation');
+    // Get, Stop and Delete take the batch-evaluate/* ARN in the account and Region.
     expect(JSON.stringify(batch.Resource)).toContain(':bedrock-agentcore:eu-west-1:333333333333:batch-evaluate/*');
     expect(batch.Resource).not.toBe('*');
     const metrics = statements.find((s) => s.Sid === 'ResultMetrics')!;

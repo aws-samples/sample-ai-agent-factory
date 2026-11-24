@@ -70,7 +70,10 @@ describe('EvaluationExecutionRoleConstruct', () => {
     const policy = JSON.stringify((role.Properties as any).Policies);
     expect(policy).toContain('logs:StartQuery');
     expect(policy).toContain('log-group:/aws/bedrock-agentcore/evaluations/*');
-    expect(policy).toContain('log-group:aws/spans');
+    // Field-index policy actions have no resource type (Service Authorization
+    // Reference), so that statement takes "*"; an ARN-pinned grant never matched.
+    const statements = (role.Properties as any).Policies[0].PolicyDocument.Statement as Array<{ Sid?: string; Resource: unknown }>;
+    expect(statements.find((statement) => statement.Sid === 'CloudWatchIndexPolicyStatement')?.Resource).toBe('*');
     expect(policy).not.toContain('bedrock:InvokeModel');
     expect(policy).not.toContain('lambda:InvokeFunction');
   });

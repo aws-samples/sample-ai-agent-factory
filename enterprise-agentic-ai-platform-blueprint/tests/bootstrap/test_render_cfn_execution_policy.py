@@ -523,14 +523,23 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
     # foundation models being global, the rest to the Region).
     resourceless = sids["HubResourcelessTelemetry"]
     assert resourceless["Resource"] == "*"
+    # Service Authorization Reference: these have no resource type, so a grant
+    # pinned to an ARN would silently deny them (StartBatchEvaluation and the
+    # field-index policy calls included).
     assert set(resourceless["Action"]) == {
+        "bedrock-agentcore:ListBatchEvaluations",
+        "bedrock-agentcore:StartBatchEvaluation",
         "cloudwatch:PutMetricData",
         "cloudwatch:PutRecords",
+        "logs:DescribeIndexPolicies",
         "logs:DescribeLogGroups",
         "logs:DescribeQueries",
         "logs:GetQueryResults",
+        "logs:PutIndexPolicy",
         "logs:StopQuery",
     }
+    assert not {"bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations"} & set(sids["HubEvaluations"]["Action"])
+    assert not {"logs:PutIndexPolicy", "logs:DescribeIndexPolicies"} & set(sids["HubLogGroups"]["Action"])
     for sid, statement in sids.items():
         if sid == "HubResourcelessTelemetry":
             continue

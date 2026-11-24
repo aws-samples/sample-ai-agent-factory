@@ -41,9 +41,11 @@ export interface EvaluationExecutionRoleConstructProps {
   readonly nameSuffix: string;
 
   /**
-   * Log groups holding the agent spans this role may read and index. Defaults
-   * to the account's `aws/spans` group. For a CloudWatch Omni hub fed by
-   * centralization rules, pass the centralized span group ARNs as well.
+   * Log groups holding the agent spans this role indexes. Kept for
+   * compatibility: the field-index policy actions have no resource type in the
+   * Service Authorization Reference, so the statement takes `*` whatever is
+   * passed here (an ARN-scoped grant never matched; IAM policy simulator,
+   * 2026-11-24).
    */
   readonly spanLogGroupArns?: readonly string[];
 
@@ -84,10 +86,6 @@ export class EvaluationExecutionRoleConstruct extends Construct {
     }
 
     const stack = Stack.of(this);
-    const spanLogGroupArns = props.spanLogGroupArns ?? [
-      `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:aws/spans`,
-      `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:aws/spans:*`,
-    ];
 
     const resultLogGroupArns = [
       `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*`,
@@ -113,8 +111,13 @@ export class EvaluationExecutionRoleConstruct extends Construct {
       new PolicyStatement({
         sid: 'CloudWatchIndexPolicyStatement',
         effect: Effect.ALLOW,
+        // Field-index policy calls have no resource type in the Service
+        // Authorization Reference: IAM authorizes them against "*" only, and a
+        // grant pinned to the span log-group ARNs never matches (IAM policy
+        // simulator, 2026-11-24). The span groups the service indexes are the
+        // ones its log-read statement can see.
         actions: ['logs:DescribeIndexPolicies', 'logs:PutIndexPolicy'],
-        resources: [...spanLogGroupArns],
+        resources: ['*'],
       }),
     ];
 
@@ -171,7 +174,7 @@ export class EvaluationExecutionRoleConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'SEC-030: logs:DescribeLogGroups/StartQuery/GetQueryResults have no resource-level scoping that the AgentCore Evaluations service accepts (documented prerequisite shape); result writes are scoped to /aws/bedrock-agentcore/evaluations/* and explicitly named groups; index-policy actions are scoped to the span log groups; judge and Lambda grants are exact ARNs and absent by default.',
+            'SEC-030: logs:DescribeLogGroups/StartQuery/GetQueryResults have no resource-level scoping that the AgentCore Evaluations service accepts (documented prerequisite shape); result writes are scoped to /aws/bedrock-agentcore/evaluations/* and explicitly named groups; logs:PutIndexPolicy/DescribeIndexPolicies have no resource type in the Service Authorization Reference and take "*"; judge and Lambda grants are exact ARNs and absent by default.',
         },
         {
           id: 'NIST.800.53.R5-IAMNoInlinePolicy',

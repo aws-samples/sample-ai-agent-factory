@@ -930,41 +930,47 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
 
 # What the hub roles' own policies use (OmniHubSpaceConstruct, the evaluation
 # execution role, the centralization tag-propagation role and the golden-gate
-# runner), and nothing more: the boundary below is their ceiling.
+# runner), and nothing more: the boundary below is their ceiling. Each action is
+# placed by the resource type the Service Authorization Reference gives it: an
+# action with no resource type is authorized against "*" only, so pinning it to
+# an ARN would silently deny it (IAM policy simulator, 2026-11-24).
 HUB_ROLE_LOG_GROUP_ACTIONS = [
     "logs:AssociateKmsKey",
     "logs:CreateLogGroup",
     "logs:CreateLogStream",
-    "logs:DescribeIndexPolicies",
     "logs:DescribeLogStreams",
     "logs:FilterLogEvents",
     "logs:GetLogEvents",
     "logs:IntegrateWithDataset",
     "logs:ListTagsForResource",
-    "logs:PutIndexPolicy",
     "logs:PutLogEvents",
     "logs:PutRetentionPolicy",
     "logs:StartQuery",
     "logs:TagResource",
     "logs:UntagResource",
 ]
-# Actions with no resource type in the Service Authorization Reference.
+# No resource type in the Service Authorization Reference: StartBatchEvaluation
+# and ListBatchEvaluations (the batch-evaluate ARN applies only to Get, Stop and
+# Delete), the field-index policy calls, the query lifecycle calls, PutRecords
+# and PutMetricData.
 HUB_ROLE_RESOURCELESS_ACTIONS = [
+    "bedrock-agentcore:ListBatchEvaluations",
+    "bedrock-agentcore:StartBatchEvaluation",
     "cloudwatch:PutMetricData",
     "cloudwatch:PutRecords",
+    "logs:DescribeIndexPolicies",
     "logs:DescribeLogGroups",
     "logs:DescribeQueries",
     "logs:GetQueryResults",
+    "logs:PutIndexPolicy",
     "logs:StopQuery",
 ]
 HUB_ROLE_EVALUATION_ACTIONS = [
     "bedrock-agentcore:DeleteBatchEvaluation",
     "bedrock-agentcore:GetBatchEvaluation",
     "bedrock-agentcore:GetDataset",
-    "bedrock-agentcore:ListBatchEvaluations",
     "bedrock-agentcore:ListDatasetExamples",
     "bedrock-agentcore:ListDatasetVersions",
-    "bedrock-agentcore:StartBatchEvaluation",
     "bedrock-agentcore:StopBatchEvaluation",
 ]
 

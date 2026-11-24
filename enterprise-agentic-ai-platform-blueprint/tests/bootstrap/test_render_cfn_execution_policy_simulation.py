@@ -73,17 +73,35 @@ def context(*pairs: tuple[str, str]) -> list[dict]:
     return [{"ContextKeyName": key, "ContextKeyValues": [value], "ContextKeyType": "string"} for key, value in pairs]
 
 
-def decisions(document: str, actions: list[str], resources: list[str], ctx: list[dict] | None = None) -> dict[str, str]:
+def decisions(
+    document: str,
+    actions: list[str],
+    resources: list[str],
+    ctx: list[dict] | None = None,
+    boundary: str | None = None,
+) -> dict[str, str]:
     iam = boto3.client("iam", region_name="us-east-1")
     params = {"PolicyInputList": [document], "ActionNames": actions, "ResourceArns": resources}
     if ctx:
         params["ContextEntries"] = ctx
+    if boundary:
+        params["PermissionsBoundaryPolicyInputList"] = [boundary]
     return {r["EvalActionName"]: r["EvalDecision"] for r in iam.simulate_custom_policy(**params)["EvaluationResults"]}
+
+
+ADMINISTRATOR_DOCUMENT = json.dumps(
+    {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}]}
+)
 
 
 @pytest.fixture(scope="module")
 def audit_document() -> str:
     return render("audit", "--account-id", AUDIT, "--region", REGION)
+
+
+@pytest.fixture(scope="module")
+def boundary_document() -> str:
+    return render("hub-role-boundary", "--account-id", AUDIT, "--region", REGION)
 
 
 @pytest.fixture(scope="module")
@@ -154,6 +172,37 @@ def test_audit_role_creates_hub_roles_only_within_the_blueprint_boundary(audit_d
     # The boundary can never be removed, and no other role name is in reach.
     assert decisions(audit_document, ["iam:DeleteRolePermissionsBoundary"], [EVALUATION_ROLE]) == {"iam:DeleteRolePermissionsBoundary": "implicitDeny"}
     assert decisions(audit_document, ["iam:CreateRole"], [f"arn:aws:iam::{AUDIT}:role/SomethingElse"], bounded) == {"iam:CreateRole": "implicitDeny"}
+
+
+def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(boundary_document: str) -> None:
+    """An administrator identity policy under the boundary keeps only what the hub roles do."""
+    log_group = f"arn:aws:logs:{REGION}:{AUDIT}:log-group:/centralized/555555555555/{REGION}/aws/spans"
+    allowed = decisions(
+        ADMINISTRATOR_DOCUMENT,
+        ["logs:GetLogEvents", "logs:StartQuery", "logs:PutLogEvents", "logs:IntegrateWithDataset"],
+        [log_group],
+        boundary=boundary_document,
+    )
+    assert set(allowed.values()) == {"allowed"}
+    # Actions without a resource type are authorized against "*"; the Service
+    # Authorization Reference lists these four that way, so the ceiling must too.
+    resourceless = decisions(
+        ADMINISTRATOR_DOCUMENT,
+        ["bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations", "logs:PutIndexPolicy", "logs:DescribeIndexPolicies"],
+        ["*"],
+        boundary=boundary_document,
+    )
+    assert set(resourceless.values()) == {"allowed"}
+    denied = decisions(
+        ADMINISTRATOR_DOCUMENT,
+        ["logs:DeleteLogGroup", "logs:PutResourcePolicy", "iam:CreateRole", "sts:AssumeRole", "kms:PutKeyPolicy"],
+        ["*"],
+        boundary=boundary_document,
+    )
+    assert set(denied.values()) == {"implicitDeny"}
+    assert decisions(ADMINISTRATOR_DOCUMENT, ["logs:GetLogEvents"], [f"arn:aws:logs:{REGION}:999999999999:log-group:other"], boundary=boundary_document) == {"logs:GetLogEvents": "implicitDeny"}
+    assert decisions(ADMINISTRATOR_DOCUMENT, ["kms:Decrypt"], [KEY], context((f"aws:ResourceTag/{OWNER_TAG}", "true")), boundary=boundary_document) == {"kms:Decrypt": "allowed"}
+    assert decisions(ADMINISTRATOR_DOCUMENT, ["kms:Decrypt"], [KEY], context((f"aws:ResourceTag/{OWNER_TAG}", "false")), boundary=boundary_document) == {"kms:Decrypt": "implicitDeny"}
 
 
 def test_management_role_changes_only_the_org_stacks_scps(management_document: str) -> None:
