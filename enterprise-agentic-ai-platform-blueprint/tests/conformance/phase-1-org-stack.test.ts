@@ -145,6 +145,44 @@ describe('Phase 1 — Organization resource', () => {
   });
 });
 
+describe('Phase 1 — Adopting an existing Organization', () => {
+  function synthImported() {
+    const app = new App();
+    const stack = new OrgStack(app, 'TestOrgStackImported', {
+      env: { account: '222222222222', region: 'us-west-2' },
+      platformGuardrailAdminRoleArn: ADMIN_ROLE,
+      importExistingOrganization: true,
+      existingRootId: 'r-abcd',
+    });
+    return Template.fromStack(stack);
+  }
+
+  it('does not emit AWS::Organizations::Organization when importing an existing one', () => {
+    synthImported().resourceCountIs('AWS::Organizations::Organization', 0);
+  });
+
+  it('parents every OU under the supplied existing root id', () => {
+    const t = synthImported();
+    t.resourceCountIs('AWS::Organizations::OrganizationalUnit', 5);
+    const ous = t.findResources('AWS::Organizations::OrganizationalUnit');
+    for (const ou of Object.values(ous)) {
+      expect(ou.Properties.ParentId).toBe('r-abcd');
+    }
+  });
+
+  it('refuses to import without the existing root id', () => {
+    const app = new App();
+    expect(
+      () =>
+        new OrgStack(app, 'TestOrgStackNoRoot', {
+          env: { account: '222222222222', region: 'us-west-2' },
+          platformGuardrailAdminRoleArn: ADMIN_ROLE,
+          importExistingOrganization: true,
+        }),
+    ).toThrow(/existingRootId is required/);
+  });
+});
+
 describe('Phase 1 — SCP-01 model allow-list comes from the SSOT', () => {
   it('embeds Claude Sonnet 4.5 + Claude Haiku 4.5 foundation-model ARNs', () => {
     const t = synth();

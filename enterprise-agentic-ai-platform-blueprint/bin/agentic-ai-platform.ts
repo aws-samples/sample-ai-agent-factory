@@ -435,6 +435,22 @@ switch (stage) {
     const attachToWorkloadsOu: boolean =
       app.node.tryGetContext("agenticai/attachScpsToWorkloadsOu") === true;
     const breakGlassRaw = app.node.tryGetContext("agenticai/omniBreakGlassRoleNames");
+    // Adopt an existing AWS Organization (Control Tower or a hand-made org):
+    // skip the AWS::Organizations::Organization resource and parent the OUs
+    // under the supplied root. Both OrgStack props already exist; this wires
+    // them to context so the stage can land in a pre-existing organization.
+    const importExistingOrganization: boolean =
+      app.node.tryGetContext("agenticai/importExistingOrganization") === true ||
+      app.node.tryGetContext("agenticai/importExistingOrganization") === "true";
+    const existingRootIdRaw = app.node.tryGetContext("agenticai/existingRootId");
+    if (
+      importExistingOrganization &&
+      (typeof existingRootIdRaw !== "string" || !/^r-[0-9a-z]{4,32}$/.test(existingRootIdRaw))
+    ) {
+      throw new Error(
+        "management stage: agenticai/importExistingOrganization=true requires context 'agenticai/existingRootId' (r-xxxx).",
+      );
+    }
     new OrgStack(app, "AgenticAI-Management-OrgStack", {
       env: {
         account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -442,6 +458,8 @@ switch (stage) {
       },
       platformGuardrailAdminRoleArn: guardrailAdminRoleArn(),
       attachToWorkloadsOu,
+      importExistingOrganization,
+      existingRootId: importExistingOrganization ? (existingRootIdRaw as string) : undefined,
       // ADR-15: SCP-13 keeps cells from switching off the telemetry the Omni hub depends on.
       enableOmniTelemetryLockdown:
         app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === true ||

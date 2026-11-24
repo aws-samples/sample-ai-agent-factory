@@ -405,6 +405,11 @@ Core Workload context:
 
 Pin `agenticai/githubBranch` when deploying an unmerged branch. If omitted, the pipeline can silently source the repository's default branch instead of the revision under review.
 
+Management stage context:
+
+- `agenticai/importExistingOrganization=true` with `agenticai/existingRootId=<r-xxxx>` adopts an AWS Organization that already exists (Control Tower, or one created by hand): the stage skips the `AWS::Organizations::Organization` resource and parents its OUs under the supplied root. Without these keys the stage creates a new Organization, which fails in an account that already manages one.
+- The stage creates OUs named `Security`, `SharedServices`, `AgenticAI-Platform`, `AgenticAI-Workloads` and `AgenticAI-Sandbox` directly under the root. Rename or remove an existing OU with one of those names first (CloudFormation otherwise fails with `DuplicateOrganizationalUnitException`), and enable the SCP policy type on the root (`aws organizations enable-policy-type --root-id <r-xxxx> --policy-type SERVICE_CONTROL_POLICY`).
+
 ### 6.3 Bootstrap with scoped policies
 
 Generate one CloudFormation execution policy per account and Region:
@@ -543,6 +548,7 @@ Live mode fails closed. Missing credentials, probes, resources, or expected deni
 | Runtime returns a configuration error               | Generated-agent environment is incomplete                        | Populate the full tenant, agent, environment, Guardrail, model, and Gateway URL contract.                                     |
 | Teardown stalls on Registry deletion                | AgentCore Registry deletion is asynchronous                      | Retry conflicts while records settle, then poll Registry absence before handling its KMS key.                                 |
 | CloudFormation delete is denied after an IAM update | New policy version has not propagated                            | Wait and verify effective permission with IAM simulation before retrying.                                                     |
+| Management stage fails on the Organization or an OU   | The account already manages an Organization, or an OU with a blueprint name exists | Deploy with `agenticai/importExistingOrganization=true` and `agenticai/existingRootId`; rename or remove the colliding OU first. |
 
 ---
 
