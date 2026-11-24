@@ -12,7 +12,7 @@
 import { Stack, StackProps } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 
-import { OrganizationConstruct } from '@agenticai/organizations';
+import { OrganizationConstruct, type OrganizationalUnitKey } from '@agenticai/organizations';
 
 export interface OrgStackProps extends StackProps {
   /**
@@ -33,6 +33,13 @@ export interface OrgStackProps extends StackProps {
 
   /** Existing Organization root id (required when importExistingOrganization). */
   readonly existingRootId?: string;
+
+  /**
+   * OU names by key (security, sharedServices, agenticaiPlatform,
+   * agenticaiWorkloads, sandbox) when the root already holds an OU of a
+   * default name, such as Control Tower's `Security` OU.
+   */
+  readonly organizationalUnitNames?: Partial<Record<OrganizationalUnitKey, string>>;
 
   /** Approved guardrail ARNs for SCP-02's positive allow-list. */
   readonly approvedGuardrailIds?: readonly string[];
@@ -60,6 +67,7 @@ export class OrgStack extends Stack {
       attachToWorkloadsOu: props.attachToWorkloadsOu ?? false,
       importExistingOrganization: props.importExistingOrganization,
       existingRootId: props.existingRootId,
+      organizationalUnitNames: props.organizationalUnitNames,
       primaryRegion: this.region,
       approvedGuardrailIds: props.approvedGuardrailIds,
       approvedAgentCoreVpceIds: props.approvedAgentCoreVpceIds,

@@ -408,7 +408,9 @@ Pin `agenticai/githubBranch` when deploying an unmerged branch. If omitted, the 
 Management stage context:
 
 - `agenticai/importExistingOrganization=true` with `agenticai/existingRootId=<r-xxxx>` adopts an AWS Organization that already exists (Control Tower, or one created by hand): the stage skips the `AWS::Organizations::Organization` resource and parents its OUs under the supplied root. Without these keys the stage creates a new Organization, which fails in an account that already manages one.
-- The stage creates OUs named `Security`, `SharedServices`, `AgenticAI-Platform`, `AgenticAI-Workloads` and `AgenticAI-Sandbox` directly under the root. Rename or remove an existing OU with one of those names first (CloudFormation otherwise fails with `DuplicateOrganizationalUnitException`), and enable the SCP policy type on the root (`aws organizations enable-policy-type --root-id <r-xxxx> --policy-type SERVICE_CONTROL_POLICY`).
+- The stage creates five OUs directly under the root, named `Security`, `SharedServices`, `AgenticAI-Platform`, `AgenticAI-Workloads` and `AgenticAI-Sandbox` by default. AWS Organizations rejects two sibling OUs with the same name (`DuplicateOrganizationalUnitException`), so when the root already holds an OU with one of those names, rename the blueprint's OU rather than the existing one: `agenticai/organizationalUnitNames` takes a JSON object keyed by `security`, `sharedServices`, `agenticaiPlatform`, `agenticaiWorkloads` or `sandbox`, for example `-c 'agenticai/organizationalUnitNames={"security":"AgenticAI-Security"}'`.
+- In an AWS Control Tower landing zone the `Security` OU is Control Tower's. Never delete it: Control Tower refuses every further action until a landing-zone reset, and logging and controls can lapse in between. Renaming it outside Control Tower also requires a landing-zone reset when accounts come from Account Factory, so use the override above instead.
+- Enable the SCP policy type on the root before deploying (`aws organizations enable-policy-type --root-id <r-xxxx> --policy-type SERVICE_CONTROL_POLICY`); Control Tower landing zones already have it enabled.
 
 ### 6.3 Bootstrap with scoped policies
 
@@ -548,7 +550,7 @@ Live mode fails closed. Missing credentials, probes, resources, or expected deni
 | Runtime returns a configuration error               | Generated-agent environment is incomplete                        | Populate the full tenant, agent, environment, Guardrail, model, and Gateway URL contract.                                     |
 | Teardown stalls on Registry deletion                | AgentCore Registry deletion is asynchronous                      | Retry conflicts while records settle, then poll Registry absence before handling its KMS key.                                 |
 | CloudFormation delete is denied after an IAM update | New policy version has not propagated                            | Wait and verify effective permission with IAM simulation before retrying.                                                     |
-| Management stage fails on the Organization or an OU   | The account already manages an Organization, or an OU with a blueprint name exists | Deploy with `agenticai/importExistingOrganization=true` and `agenticai/existingRootId`; rename or remove the colliding OU first. |
+| Management stage fails on the Organization or an OU   | The account already manages an Organization, or an OU with a blueprint name exists | Deploy with `agenticai/importExistingOrganization=true` and `agenticai/existingRootId`; give the blueprint's OU another name with `agenticai/organizationalUnitNames` (never delete or rename a Control Tower OU). |
 
 ---
 

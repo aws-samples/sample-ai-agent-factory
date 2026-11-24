@@ -9,8 +9,18 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { App } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
+
+import {
+  DEFAULT_ORGANIZATIONAL_UNIT_NAMES,
+  type OrganizationalUnitKey,
+} from '@agenticai/organizations';
 
 import { OrgStack } from '../../apps/management-account/lib/org-stack';
 
@@ -181,6 +191,136 @@ describe('Phase 1 — Adopting an existing Organization', () => {
         }),
     ).toThrow(/existingRootId is required/);
   });
+});
+
+describe('Phase 1 — OU name overrides for roots that already hold a same-named OU', () => {
+  function synthNamed(names: Record<string, string>) {
+    const app = new App();
+    const stack = new OrgStack(app, 'TestOrgStackNamed', {
+      env: { account: '222222222222', region: 'us-west-2' },
+      platformGuardrailAdminRoleArn: ADMIN_ROLE,
+      importExistingOrganization: true,
+      existingRootId: 'r-abcd',
+      organizationalUnitNames: names as Partial<Record<OrganizationalUnitKey, string>>,
+    });
+    return Template.fromStack(stack);
+  }
+
+  const ouNames = (t: Template) =>
+    Object.values(t.findResources('AWS::Organizations::OrganizationalUnit'))
+      .map((r: Record<string, unknown>) => (r.Properties as Record<string, unknown>).Name as string)
+      .sort();
+
+  it('renames only the overridden OU and keeps the other four defaults', () => {
+    const t = synthNamed({ security: 'AgenticAI-Security' });
+    t.resourceCountIs('AWS::Organizations::OrganizationalUnit', 5);
+    expect(ouNames(t)).toEqual([
+      'AgenticAI-Platform',
+      'AgenticAI-Sandbox',
+      'AgenticAI-Security',
+      'AgenticAI-Workloads',
+      'SharedServices',
+    ]);
+    expect(DEFAULT_ORGANIZATIONAL_UNIT_NAMES.security).toBe('Security');
+  });
+
+  it('keeps every SCP attached to the renamed Sandbox OU', () => {
+    const t = synthNamed({ sandbox: 'AgenticAI-Soak' });
+    const [sandboxLogicalId] = Object.keys(
+      t.findResources('AWS::Organizations::OrganizationalUnit', { Properties: { Name: 'AgenticAI-Soak' } }),
+    );
+    expect(sandboxLogicalId).toBeDefined();
+    const policies = Object.values(t.findResources('AWS::Organizations::Policy'));
+    expect(policies.length).toBeGreaterThan(0);
+    for (const policy of policies) {
+      expect((policy.Properties as Record<string, unknown>).TargetIds).toEqual([
+        { 'Fn::GetAtt': [sandboxLogicalId, 'Id'] },
+      ]);
+    }
+  });
+
+  it('rejects unknown keys, blank names and two OUs sharing a name', () => {
+    expect(() => synthNamed({ securityOu: 'AgenticAI-Security' })).toThrow(/unknown OU key 'securityOu'/);
+    expect(() => synthNamed({ security: '   ' })).toThrow(/non-empty string/);
+    expect(() => synthNamed({ security: 'SharedServices' })).toThrow(/distinct names/);
+  });
+});
+
+describe('Phase 1 — management stage entrypoint (bin/agentic-ai-platform.ts)', () => {
+  const REPO = path.resolve(__dirname, '..', '..');
+  const STACK = 'AgenticAI-Management-OrgStack';
+  type Resource = { Type: string; Properties: Record<string, unknown> };
+
+  // Runs the real app the way an operator does, so the context keys, their
+  // validation and the OrgStack prop forwarding are exercised end to end.
+  function synthEntrypoint(context: Record<string, string>) {
+    const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phase-1-management-'));
+    const args = [
+      'cdk',
+      'synth',
+      STACK,
+      '--quiet',
+      '--no-staging',
+      '--no-notices',
+      '--output',
+      outDir,
+      '--context',
+      'stage=management',
+      '--context',
+      'agenticai/defaultRegion=us-west-2',
+    ];
+    for (const [key, value] of Object.entries(context)) {
+      args.push('--context', `${key}=${value}`);
+    }
+    const result = spawnSync('npx', args, { cwd: REPO, encoding: 'utf8' });
+    const templatePath = path.join(outDir, `${STACK}.template.json`);
+    const template = fs.existsSync(templatePath)
+      ? (JSON.parse(fs.readFileSync(templatePath, 'utf8')) as { Resources: Record<string, Resource> })
+      : undefined;
+    fs.rmSync(outDir, { recursive: true, force: true });
+    return { status: result.status, stderr: result.stderr, template };
+  }
+
+  const ofType = (template: { Resources: Record<string, Resource> }, type: string) =>
+    Object.values(template.Resources).filter((r) => r.Type === type);
+
+  it('adopts an existing organization and applies OU name overrides from context', () => {
+    const run = synthEntrypoint({
+      'agenticai/importExistingOrganization': 'true',
+      'agenticai/existingRootId': 'r-abcd',
+      'agenticai/organizationalUnitNames': '{"security":"AgenticAI-Security"}',
+    });
+    expect(run.stderr).not.toMatch(/Error:/);
+    expect(run.status).toBe(0);
+    expect(run.template).toBeDefined();
+    expect(ofType(run.template!, 'AWS::Organizations::Organization')).toHaveLength(0);
+    const ous = ofType(run.template!, 'AWS::Organizations::OrganizationalUnit');
+    expect(ous).toHaveLength(5);
+    expect(ous.every((ou) => ou.Properties.ParentId === 'r-abcd')).toBe(true);
+    expect(ous.map((ou) => ou.Properties.Name).sort()).toEqual([
+      'AgenticAI-Platform',
+      'AgenticAI-Sandbox',
+      'AgenticAI-Security',
+      'AgenticAI-Workloads',
+      'SharedServices',
+    ]);
+  }, 180_000);
+
+  it('creates the Organization by default and refuses to import without a root id', () => {
+    const created = synthEntrypoint({});
+    expect(created.status).toBe(0);
+    expect(created.template).toBeDefined();
+    expect(ofType(created.template!, 'AWS::Organizations::Organization')).toHaveLength(1);
+    const ous = ofType(created.template!, 'AWS::Organizations::OrganizationalUnit');
+    expect(ous.map((ou) => ou.Properties.Name).sort()).toEqual(
+      Object.values(DEFAULT_ORGANIZATIONAL_UNIT_NAMES).sort(),
+    );
+
+    const refused = synthEntrypoint({ 'agenticai/importExistingOrganization': 'true' });
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain("requires context 'agenticai/existingRootId'");
+    expect(refused.template).toBeUndefined();
+  }, 240_000);
 });
 
 describe('Phase 1 — SCP-01 model allow-list comes from the SSOT', () => {

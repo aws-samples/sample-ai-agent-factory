@@ -21,5 +21,10 @@
  * SPDX-License-Identifier: MIT-0
  */
 
-export { OrganizationConstruct, type OrganizationConstructProps } from './organization-construct';
+export {
+  DEFAULT_ORGANIZATIONAL_UNIT_NAMES,
+  OrganizationConstruct,
+  type OrganizationConstructProps,
+  type OrganizationalUnitKey,
+} from './organization-construct';
 export { buildScpSet, type ScpDefinition } from './scps';

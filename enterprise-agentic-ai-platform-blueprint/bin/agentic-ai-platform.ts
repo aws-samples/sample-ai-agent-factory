@@ -63,6 +63,7 @@ import {
 import { GapClosureStack } from "../apps/workload-account/lib/gap-closure-stack";
 import type { InferenceModelRateLimit } from "@agenticai/platform-inference-gateway";
 import { resolveDeploymentRegion } from "@agenticai/platform-baselines";
+import type { OrganizationalUnitKey } from "@agenticai/organizations";
 
 const app = new App();
 
@@ -119,6 +120,39 @@ function stringArrayContext(key: string): readonly string[] {
     );
   }
   return parsed;
+}
+
+/**
+ * Parse `agenticai/organizationalUnitNames`: a JSON object (or the JSON string a
+ * `-c` flag carries) mapping OU keys to names, for a root that already holds an
+ * OU of a default name. OrganizationConstruct validates keys and values.
+ */
+function organizationalUnitNamesContext():
+  | Partial<Record<OrganizationalUnitKey, string>>
+  | undefined {
+  const key = "agenticai/organizationalUnitNames";
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return undefined;
+
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Context '${key}' must be a JSON object mapping OU keys to names.`, {
+        cause: error,
+      });
+    }
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    Object.values(parsed).some((value) => typeof value !== "string")
+  ) {
+    throw new Error(`Context '${key}' must be a JSON object mapping OU keys to names.`);
+  }
+  return parsed as Partial<Record<OrganizationalUnitKey, string>>;
 }
 
 /**
@@ -460,6 +494,7 @@ switch (stage) {
       attachToWorkloadsOu,
       importExistingOrganization,
       existingRootId: importExistingOrganization ? (existingRootIdRaw as string) : undefined,
+      organizationalUnitNames: organizationalUnitNamesContext(),
       // ADR-15: SCP-13 keeps cells from switching off the telemetry the Omni hub depends on.
       enableOmniTelemetryLockdown:
         app.node.tryGetContext("agenticai/enableOmniTelemetryLockdown") === true ||
