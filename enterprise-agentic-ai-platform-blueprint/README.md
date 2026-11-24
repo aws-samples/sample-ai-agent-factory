@@ -449,8 +449,8 @@ Upgrading a hub that was deployed before the tag existed: the role can never tag
 
 ```bash
 for alias in alias/agenticai/omni-space-<REGION> alias/agenticai/omni-centralized-logs-<REGION>; do
-  key_id=$(aws kms describe-key --key-id "$alias" --query KeyMetadata.KeyId --output text)
-  aws kms tag-resource --key-id "$key_id" --tags TagKey=agenticai:omni-hub,TagValue=true
+  key_id=$(aws kms describe-key --region <REGION> --key-id "$alias" --query KeyMetadata.KeyId --output text)
+  aws kms tag-resource --region <REGION> --key-id "$key_id" --tags TagKey=agenticai:omni-hub,TagValue=true
 done
 ```
 
