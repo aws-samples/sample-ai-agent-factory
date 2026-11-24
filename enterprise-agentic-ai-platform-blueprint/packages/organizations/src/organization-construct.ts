@@ -48,6 +48,53 @@ import {
   SCP_MAX_ATTACHED_PER_TARGET,
 } from './scps';
 
+/** The five OUs the construct creates directly under the root, by key. */
+export type OrganizationalUnitKey =
+  | 'security'
+  | 'sharedServices'
+  | 'agenticaiPlatform'
+  | 'agenticaiWorkloads'
+  | 'sandbox';
+
+/** OU names from spec §2.1.2. Override per key with `organizationalUnitNames`. */
+export const DEFAULT_ORGANIZATIONAL_UNIT_NAMES: Readonly<Record<OrganizationalUnitKey, string>> = {
+  security: 'Security',
+  sharedServices: 'SharedServices',
+  agenticaiPlatform: 'AgenticAI-Platform',
+  agenticaiWorkloads: 'AgenticAI-Workloads',
+  sandbox: 'AgenticAI-Sandbox',
+};
+
+/** AWS Organizations caps an OU name at 128 characters. */
+const OU_NAME_MAX_LENGTH = 128;
+
+function resolveOrganizationalUnitNames(
+  overrides: Partial<Record<OrganizationalUnitKey, string>> | undefined,
+): Record<OrganizationalUnitKey, string> {
+  const names: Record<OrganizationalUnitKey, string> = { ...DEFAULT_ORGANIZATIONAL_UNIT_NAMES };
+  for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (value === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(DEFAULT_ORGANIZATIONAL_UNIT_NAMES, key)) {
+      throw new Error(
+        `organizationalUnitNames: unknown OU key '${key}' (expected one of ` +
+          `${Object.keys(DEFAULT_ORGANIZATIONAL_UNIT_NAMES).join(', ')}).`,
+      );
+    }
+    if (typeof value !== 'string' || value.trim().length === 0 || value.length > OU_NAME_MAX_LENGTH) {
+      throw new Error(
+        `organizationalUnitNames.${key} must be a non-empty string of at most ${OU_NAME_MAX_LENGTH} characters.`,
+      );
+    }
+    names[key as OrganizationalUnitKey] = value;
+  }
+  if (new Set(Object.values(names)).size !== Object.keys(names).length) {
+    throw new Error(
+      'organizationalUnitNames must give the five OUs distinct names; sibling OUs cannot share one.',
+    );
+  }
+  return names;
+}
+
 export interface OrganizationConstructProps {
   /**
    * Region used to render foundation-model ARNs in SCP-01 (the platform
@@ -81,6 +128,15 @@ export interface OrganizationConstructProps {
    * (e.g. 'r-xxxx'). Used as the parent for the OUs we create.
    */
   readonly existingRootId?: string;
+
+  /**
+   * Names for the five OUs, keyed by OU; defaults to
+   * `DEFAULT_ORGANIZATIONAL_UNIT_NAMES`. AWS Organizations rejects two sibling
+   * OUs with one name, so override a key when the root already holds an OU of
+   * the default name (AWS Control Tower's `Security` OU, for example) instead
+   * of renaming or deleting the existing OU.
+   */
+  readonly organizationalUnitNames?: Partial<Record<OrganizationalUnitKey, string>>;
 
   /**
    * Approved Bedrock Guardrail identifiers (ids or ARNs) passed into SCP-02's
@@ -138,25 +194,26 @@ export class OrganizationConstruct extends Construct {
     }
 
     // ------ OU hierarchy (spec §2.1.2) ------
+    const ouNames = resolveOrganizationalUnitNames(props.organizationalUnitNames);
     this.ous = {
       security: new CfnOrganizationalUnit(this, 'SecurityOu', {
-        name: 'Security',
+        name: ouNames.security,
         parentId: rootId,
       }),
       sharedServices: new CfnOrganizationalUnit(this, 'SharedServicesOu', {
-        name: 'SharedServices',
+        name: ouNames.sharedServices,
         parentId: rootId,
       }),
       agenticaiPlatform: new CfnOrganizationalUnit(this, 'AgenticAiPlatformOu', {
-        name: 'AgenticAI-Platform',
+        name: ouNames.agenticaiPlatform,
         parentId: rootId,
       }),
       agenticaiWorkloads: new CfnOrganizationalUnit(this, 'AgenticAiWorkloadsOu', {
-        name: 'AgenticAI-Workloads',
+        name: ouNames.agenticaiWorkloads,
         parentId: rootId,
       }),
       sandbox: new CfnOrganizationalUnit(this, 'SandboxOu', {
-        name: 'AgenticAI-Sandbox',
+        name: ouNames.sandbox,
         parentId: rootId,
       }),
     };
