@@ -355,13 +355,13 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     # No service-wide or wildcard action anywhere in the audit document.
     assert not any(action.endswith(":*") or "*" in action for action in granted)
 
-    wildcard_only = by_sid(policy, "CreateGovernanceTelemetryResources")
+    wildcard_only = by_sid(policy, "ListTelemetryAndStartDiscovery")
     assert wildcard_only["Resource"] == "*"
+    assert "Condition" not in wildcard_only
     assert set(wildcard_only["Action"]) == {
         "application-signals:StartDiscovery",
         "kms:ListAliases",
         "kms:ListKeys",
-        "oam:CreateSink",
         "oam:ListSinks",
     }
 
@@ -419,18 +419,29 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     # alias can only point at a hub key.
     assert {"kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"} <= set(change["Action"])
 
-    # The sink: tagging unconditioned (tag-on-create), everything else pinned to
-    # the two AuditStack deployments through CloudFormation's reserved tag.
-    tags = by_sid(policy, "TagAuditOamSink")
-    assert "Condition" not in tags
-    assert set(tags["Action"]) == {"oam:ListTagsForResource", "oam:TagResource", "oam:UntagResource"}
+    # The sink: created (and tagged on create) only in a CloudFormation request
+    # for the two AuditStack deployments, everything on an existing sink pinned
+    # to those deployments through CloudFormation's reserved tag.
+    audit_stacks = {"AgenticAI-Platform-AuditStack", "Nonprod-Audit"}
+    create_sink = by_sid(policy, "CreateAuditStackOamSink")
+    assert set(create_sink["Action"]) == {"oam:CreateSink", "oam:TagResource"}
+    assert create_sink["Resource"] == "*"
+    assert set(create_sink["Condition"]["StringEquals"][f"aws:RequestTag/{STACK_TAG}"]) == audit_stacks
     sink = by_sid(policy, "ManageAuditStackOamSink")
     assert sink["Resource"] == f"arn:aws:oam:{REGION}:{AUDIT}:sink/*"
-    assert set(sink["Action"]) == {"oam:DeleteSink", "oam:GetSink", "oam:GetSinkPolicy", "oam:PutSinkPolicy"}
-    assert set(sink["Condition"]["StringEquals"]["aws:ResourceTag/aws:cloudformation:stack-name"]) == {
-        "AgenticAI-Platform-AuditStack",
-        "Nonprod-Audit",
+    assert set(sink["Action"]) == {
+        "oam:DeleteSink",
+        "oam:GetSink",
+        "oam:GetSinkPolicy",
+        "oam:ListTagsForResource",
+        "oam:PutSinkPolicy",
+        "oam:TagResource",
+        "oam:UntagResource",
     }
+    assert set(sink["Condition"]["StringEquals"][f"aws:ResourceTag/{STACK_TAG}"]) == audit_stacks
+    for statement in policy["Statement"]:
+        if {a for a in actions(statement) if a.startswith("oam:")} - {"oam:ListSinks"}:
+            assert statement["Sid"] in {"CreateAuditStackOamSink", "ManageAuditStackOamSink"}, statement["Sid"]
     assert "oam:CreateLink" not in granted
     # Those pins must follow the names the code gives the AuditStack.
     assert '"AgenticAI-Platform-AuditStack"' in (ROOT / "bin" / "agentic-ai-platform.ts").read_text()
@@ -452,8 +463,16 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         "logs:DeleteLogGroup",
         "logs:DescribeLogGroups",
     } & granted
-    slr = by_sid(policy, "CreateApplicationSignalsServiceLinkedRole")
-    assert slr["Resource"].endswith("/AWSServiceRoleForCloudWatchApplicationSignals")
+    prerequisites = by_sid(policy, "CreateApplicationSignalsPrerequisites")
+    assert set(prerequisites["Action"]) == {
+        "cloudtrail:CreateServiceLinkedChannel",
+        "iam:CreateServiceLinkedRole",
+        "iam:GetRole",
+    }
+    assert set(prerequisites["Resource"]) == {
+        f"arn:aws:iam::{AUDIT}:role/aws-service-role/application-signals.cloudwatch.amazonaws.com/AWSServiceRoleForCloudWatchApplicationSignals",
+        f"arn:aws:cloudtrail:{REGION}:{AUDIT}:channel/aws-service-channel/application-signals/*",
+    }
     runner = by_sid(policy, "ManageOmniGoldenGateRunnerRole")
     assert runner["Resource"] == f"arn:aws:iam::{AUDIT}:role/AgenticAIGoldenGateRunner-{REGION}"
 

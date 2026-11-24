@@ -790,13 +790,12 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
     return [
         {
             # Actions with no resource type in the Service Authorization Reference.
-            "Sid": "CreateGovernanceTelemetryResources",
+            "Sid": "ListTelemetryAndStartDiscovery",
             "Effect": "Allow",
             "Action": [
                 "application-signals:StartDiscovery",
                 "kms:ListAliases",
                 "kms:ListKeys",
-                "oam:CreateSink",
                 "oam:ListSinks",
             ],
             "Resource": "*",
@@ -841,17 +840,31 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
             ],
         },
         {
-            # The sink id is generated and the tag-on-create TagResource cannot see
-            # resource tags yet, so the tagging trio stays unconditioned.
-            "Sid": "TagAuditOamSink",
+            # Tag-on-create: CloudFormation puts its reserved stack-name tag in the
+            # CreateSink request, which nothing else can, so the dependent
+            # TagResource is granted only for that request.
+            "Sid": "CreateAuditStackOamSink",
             "Effect": "Allow",
-            "Action": ["oam:ListTagsForResource", "oam:TagResource", "oam:UntagResource"],
-            "Resource": sink_any,
+            "Action": ["oam:CreateSink", "oam:TagResource"],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {f"aws:RequestTag/{CFN_STACK_NAME_TAG}": AUDIT_STACK_NAMES}
+            },
         },
         {
+            # Everything on an existing sink, pinned to the sinks the two AuditStack
+            # deployments created.
             "Sid": "ManageAuditStackOamSink",
             "Effect": "Allow",
-            "Action": ["oam:DeleteSink", "oam:GetSink", "oam:GetSinkPolicy", "oam:PutSinkPolicy"],
+            "Action": [
+                "oam:DeleteSink",
+                "oam:GetSink",
+                "oam:GetSinkPolicy",
+                "oam:ListTagsForResource",
+                "oam:PutSinkPolicy",
+                "oam:TagResource",
+                "oam:UntagResource",
+            ],
             "Resource": sink_any,
             "Condition": {
                 "StringEquals": {f"aws:ResourceTag/{CFN_STACK_NAME_TAG}": AUDIT_STACK_NAMES}
@@ -869,19 +882,24 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
         },
         {
             # Transaction Search prerequisites: application-signals:StartDiscovery
-            # creates and reads this service-linked role and a CloudTrail channel.
-            "Sid": "CreateApplicationSignalsServiceLinkedRole",
+            # creates and reads this service-linked role and a CloudTrail channel
+            # (each action only matches its own service's ARN).
+            "Sid": "CreateApplicationSignalsPrerequisites",
             "Effect": "Allow",
-            "Action": ["iam:CreateServiceLinkedRole", "iam:GetRole"],
-            "Resource": iam_arn(account, APPLICATION_SIGNALS_SLR),
-        },
-        {
-            "Sid": "CreateApplicationSignalsCloudTrailChannel",
-            "Effect": "Allow",
-            "Action": "cloudtrail:CreateServiceLinkedChannel",
-            "Resource": arn(
-                "cloudtrail", region, account, "channel/aws-service-channel/application-signals/*"
-            ),
+            "Action": [
+                "cloudtrail:CreateServiceLinkedChannel",
+                "iam:CreateServiceLinkedRole",
+                "iam:GetRole",
+            ],
+            "Resource": [
+                iam_arn(account, APPLICATION_SIGNALS_SLR),
+                arn(
+                    "cloudtrail",
+                    region,
+                    account,
+                    "channel/aws-service-channel/application-signals/*",
+                ),
+            ],
         },
         {
             # OmniGoldenGateRunnerRoleConstruct (agenticai/omniGoldenGateRunnerPrincipalArns)

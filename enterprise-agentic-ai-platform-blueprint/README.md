@@ -452,7 +452,9 @@ for alias in alias/agenticai/omni-space-<REGION> alias/agenticai/omni-centralize
   key_id=$(aws kms describe-key --key-id "$alias" --query KeyMetadata.KeyId --output text)
   aws kms tag-resource --key-id "$key_id" --tags TagKey=agenticai:omni-hub,TagValue=true
 done
-``` Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
+```
+
+Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
 
 Validate every generated identity policy:
 
