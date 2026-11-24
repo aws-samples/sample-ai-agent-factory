@@ -133,6 +133,16 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
     expect(roles).toContain(`AgentCoreEvaluationRole-omni-${REGION}`);
   });
 
+  it("tags every hub key agenticai:omni-hub=true so the Audit execution policy can pin key administration to the hub's keys", () => {
+    const keys = Object.values(hubTemplate().findResources("AWS::KMS::Key"));
+    expect(keys).toHaveLength(2);
+    for (const key of keys) {
+      expect((key.Properties as any).Tags).toEqual(
+        expect.arrayContaining([{ Key: "agenticai:omni-hub", Value: "true" }]),
+      );
+    }
+  });
+
   it("points the centralization rule at this account and encrypts every destination group under the hub key", () => {
     const t = hubTemplate();
     const rule = Object.values(

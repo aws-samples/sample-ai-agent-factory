@@ -734,19 +734,31 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
 # sink lifecycle is pinned to those stacks the way the management document pins
 # OUs and SCPs. Extend the list when the AuditStack is deployed under another name.
 AUDIT_STACK_NAMES = ["AgenticAI-Platform-AuditStack", "Nonprod-Audit"]
-# AWS::KMS::Key create/read/update/delete handler actions, minus CreateKey and
-# ListKeys which take no resource. Key ids are generated, so key/* in the hub
-# account and Region is the tightest ARN, and KMS needs the tag-on-create
-# TagResource grant unrestricted by key, so the statement carries no condition.
-KMS_KEY_ACTIONS = [
+# OmniHubStack tags everything it creates agenticai:omni-hub=true. CloudFormation
+# applies no system tags to KMS keys (the live AWS::KMS::Key schema sets
+# cloudFormationSystemTags false), so that tag is the ownership signal for the
+# hub's keys: the role creates keys only with the tag in the request, changes or
+# uses only keys that carry it, and can never add it to an existing key because
+# the tag-on-create grant excludes every key ARN.
+OMNI_HUB_OWNERSHIP_TAG = "agenticai:omni-hub"
+# AWS::KMS::Key read handler plus EnableKeyRotation, which the create handler
+# calls right after CreateKey. KMS can take minutes before a key's tags count for
+# authorization, so these stay unconditioned on the account's keys.
+KMS_KEY_READ_ACTIONS = [
     "kms:DescribeKey",
-    "kms:DisableKey",
-    "kms:DisableKeyRotation",
-    "kms:EnableKey",
     "kms:EnableKeyRotation",
     "kms:GetKeyPolicy",
     "kms:GetKeyRotationStatus",
     "kms:ListResourceTags",
+]
+# AWS::KMS::Key update and delete handler actions, plus the space key's use that
+# the AWS::CloudWatch::Space handler checks on the caller's behalf.
+KMS_KEY_CHANGE_ACTIONS = [
+    "kms:Decrypt",
+    "kms:DisableKey",
+    "kms:DisableKeyRotation",
+    "kms:EnableKey",
+    "kms:GenerateDataKey",
     "kms:PutKeyPolicy",
     "kms:ScheduleKeyDeletion",
     "kms:TagResource",
@@ -765,8 +777,8 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
     Every action is one the CloudFormation handlers for AWS::KMS::Key,
     AWS::KMS::Alias, AWS::Oam::Sink, AWS::CloudWatch::Space and
     AWS::XRay::TransactionSearchConfig call (registry schemas plus the
-    Transaction Search prerequisites), pinned to the hub's keys and aliases, the
-    AuditStack's sink and the two Transaction Search log groups.
+    Transaction Search prerequisites), pinned to the hub's keys (ownership tag)
+    and aliases, the AuditStack's sink and the two Transaction Search log groups.
     """
     key_any = arn("kms", region, account, "key/*")
     sink_any = arn("oam", region, account, "sink/*")
@@ -777,7 +789,6 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
             "Effect": "Allow",
             "Action": [
                 "application-signals:StartDiscovery",
-                "kms:CreateKey",
                 "kms:ListAliases",
                 "kms:ListKeys",
                 "oam:CreateSink",
@@ -786,19 +797,31 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
             "Resource": "*",
         },
         {
-            "Sid": "ManageOmniHubKeys",
+            # Tag-on-create: KMS authorizes CreateKey and its dependent TagResource
+            # without a key ARN, so excluding every key ARN leaves exactly that
+            # path, and a TagResource on an existing key never matches here.
+            "Sid": "CreateOmniHubKeys",
             "Effect": "Allow",
-            "Action": KMS_KEY_ACTIONS,
+            "Action": ["kms:CreateKey", "kms:TagResource"],
+            "NotResource": "arn:aws:kms:*:*:key/*",
+            "Condition": {
+                "StringEquals": {f"aws:RequestTag/{OMNI_HUB_OWNERSHIP_TAG}": "true"}
+            },
+        },
+        {
+            "Sid": "ReadKeysAndEnableRotation",
+            "Effect": "Allow",
+            "Action": KMS_KEY_READ_ACTIONS,
             "Resource": key_any,
         },
         {
-            # AWS::CloudWatch::Space create/update use the space key on the
-            # caller's behalf; OmniHubSpaceConstruct tags that key cw-omni=true.
-            "Sid": "UseOmniSpaceKey",
+            "Sid": "ChangeAndUseOmniHubKeys",
             "Effect": "Allow",
-            "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+            "Action": KMS_KEY_CHANGE_ACTIONS,
             "Resource": key_any,
-            "Condition": {"StringEquals": {"aws:ResourceTag/cw-omni": "true"}},
+            "Condition": {
+                "StringEquals": {f"aws:ResourceTag/{OMNI_HUB_OWNERSHIP_TAG}": "true"}
+            },
         },
         {
             # Alias operations authorize against the alias and the target key, and

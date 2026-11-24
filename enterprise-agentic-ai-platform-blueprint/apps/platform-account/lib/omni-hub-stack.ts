@@ -31,7 +31,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { CfnOutput, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, RemovalPolicy, Stack, Tags, type StackProps } from "aws-cdk-lib";
 import type { Key } from "aws-cdk-lib/aws-kms";
 import { Construct } from "constructs";
 
@@ -128,6 +128,12 @@ export class OmniHubStack extends Stack {
       ...stackProps
     } = props;
     super(scope, id, stackProps);
+
+    // Ownership marker for the Audit account's scoped CloudFormation execution
+    // policy (render-cfn-execution-policy.py audit): CloudFormation applies no
+    // system tags to KMS keys, so the policy pins key administration and use to
+    // this tag, which the hub stack puts on everything it creates.
+    Tags.of(this).add("agenticai:omni-hub", "true");
 
     if (existingSpaceId !== undefined) {
       if (!SPACE_ID_PATTERN.test(existingSpaceId)) {

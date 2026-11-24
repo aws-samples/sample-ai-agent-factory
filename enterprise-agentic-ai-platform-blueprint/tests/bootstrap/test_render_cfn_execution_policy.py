@@ -359,20 +359,54 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     assert wildcard_only["Resource"] == "*"
     assert set(wildcard_only["Action"]) == {
         "application-signals:StartDiscovery",
-        "kms:CreateKey",
         "kms:ListAliases",
         "kms:ListKeys",
         "oam:CreateSink",
         "oam:ListSinks",
     }
 
-    keys = by_sid(policy, "ManageOmniHubKeys")
-    assert keys["Resource"] == f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
-    assert {"kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:TagResource", "kms:EnableKeyRotation"} <= set(keys["Action"])
+    # Keys: created only with the ownership tag in the request (the grant excludes
+    # every key ARN, so it can never tag an existing key), changed and used only
+    # when they carry it; reads and EnableKeyRotation, which the create handler
+    # calls before a new key's tags count for authorization, stay unconditioned.
+    key_any = f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
+    owner = "agenticai:omni-hub"
+    create_keys = by_sid(policy, "CreateOmniHubKeys")
+    assert set(create_keys["Action"]) == {"kms:CreateKey", "kms:TagResource"}
+    assert "Resource" not in create_keys
+    assert create_keys["NotResource"] == "arn:aws:kms:*:*:key/*"
+    assert create_keys["Condition"] == {"StringEquals": {f"aws:RequestTag/{owner}": "true"}}
+    reads = by_sid(policy, "ReadKeysAndEnableRotation")
+    assert reads["Resource"] == key_any and "Condition" not in reads
+    assert set(reads["Action"]) == {
+        "kms:DescribeKey",
+        "kms:EnableKeyRotation",
+        "kms:GetKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:ListResourceTags",
+    }
+    change = by_sid(policy, "ChangeAndUseOmniHubKeys")
+    assert change["Resource"] == key_any
+    assert change["Condition"] == {"StringEquals": {f"aws:ResourceTag/{owner}": "true"}}
+    assert {
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+    } <= set(change["Action"])
+    unpinned_kms = set(reads["Action"]) | {
+        "kms:ListAliases", "kms:ListKeys", "kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias",
+    }
+    for statement in policy["Statement"]:
+        kms_actions = {action for action in actions(statement) if action.startswith("kms:")}
+        if kms_actions - unpinned_kms:
+            assert statement["Sid"] in {"CreateOmniHubKeys", "ChangeAndUseOmniHubKeys"}, statement["Sid"]
     assert not {"kms:Encrypt", "kms:CreateGrant", "kms:ReEncryptFrom", "kms:Sign"} & granted
-    space_key = by_sid(policy, "UseOmniSpaceKey")
-    assert set(space_key["Action"]) == {"kms:Decrypt", "kms:GenerateDataKey"}
-    assert space_key["Condition"] == {"StringEquals": {"aws:ResourceTag/cw-omni": "true"}}
+    # The tag the policy keys on is the one OmniHubStack puts on everything it creates.
+    assert f'"{owner}"' in (ROOT / "apps" / "platform-account" / "lib" / "omni-hub-stack.ts").read_text()
     aliases = by_sid(policy, "ManageOmniHubKeyAliases")
     assert set(aliases["Resource"]) == {
         f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-space-{REGION}",
