@@ -67,7 +67,7 @@ python3 scripts/setup_keys.py --stack-name workshop-llm-gateway-stack
 
 This script will:
 1. Read the proxy URL and admin key from CloudFormation / Secrets Manager
-2. Register 12 of the most commonly used Bedrock models in LiteLLM's database (Claude, Nova, Mistral, and DeepSeek) — `reference/litellm-config.yaml` lists 24 aliases you could add, but the script registers this curated subset with friendly aliases
+2. Register 12 of the most commonly used Bedrock models in LiteLLM's database (Claude, Nova, Mistral, and DeepSeek) — `reference/litellm-config.yaml` lists 23 aliases you could add, but the script registers this curated subset with friendly aliases
 3. Create two teams: `platform-team` ($10 budget) and `workload-team` ($5 budget)
 4. Create virtual keys for each team
 5. Test a chat completion with the virtual key
@@ -264,7 +264,7 @@ This means the platform can answer: **"The LLM call that cost $0.50 was made by 
 Open **`step-3-virtual-keys.ipynb`**. This notebook performs the same operations as the `setup_keys.py` script but breaks them into individual cells so you can inspect results at each stage:
 
 1. **Load state** — Reads the gateway URL and admin key from `.state.json` (saved by the Step 2 notebook).
-2. **Register Bedrock models** — Registers 8 models covering the Anthropic Claude, Amazon Nova, and DeepSeek families — a smaller set than the 13 `setup_keys.py` registers, because the notebook keeps the cell readable. Each model gets a friendly alias (e.g., `claude-sonnet`) mapped to its full Bedrock model ID.
+2. **Register Bedrock models** — Registers 8 models covering the Anthropic Claude, Amazon Nova, and DeepSeek families — a smaller set than the 12 `setup_keys.py` registers, because the notebook keeps the cell readable. Each model gets a friendly alias (e.g., `claude-sonnet`) mapped to its full Bedrock model ID.
 3. **Create teams** — Creates `platform-team` ($10 budget) and `workload-team` ($5 budget) with scoped model access. Pay attention to how team budgets provide an outer spending boundary.
 4. **Create virtual keys** — Issues `workshop-admin-key` and `workshop-dev-key`, each scoped to a team. Notice how the key budget and team budget work together for layered cost control.
 5. **Test chat completion** — Sends a request through the gateway using the new virtual key to verify end-to-end connectivity.
