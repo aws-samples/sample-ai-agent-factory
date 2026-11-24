@@ -265,6 +265,25 @@ def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(bound
     assert set(decisions(ADMINISTRATOR_DOCUMENT, ["lambda:InvokeFunction", "lambda:GetFunction"], [function], boundary=boundary_document).values()) == {"implicitDeny"}
 
 
+def test_audit_role_touches_only_the_hubs_own_space_dashboards_and_rule(audit_document: str) -> None:
+    space = f"arn:aws:cloudwatch:{REGION}:{AUDIT}:space/2e98b6d1-0ebb-4359-a608-12a1147dc089"
+    other_region_space = f"arn:aws:cloudwatch:us-east-1:{AUDIT}:space/2e98b6d1-0ebb-4359-a608-12a1147dc089"
+    lifecycle = ["cloudwatch:GetSpace", "cloudwatch:UpdateSpace", "cloudwatch:DeleteSpace", "cloudwatch:TagResource"]
+    assert set(decisions(audit_document, lifecycle, [space]).values()) == {"allowed"}
+    assert set(decisions(audit_document, lifecycle, [other_region_space]).values()) == {"implicitDeny"}
+    # Tagging is pinned to spaces and dashboards: an alarm is out of reach.
+    assert decisions(audit_document, ["cloudwatch:TagResource"], [f"arn:aws:cloudwatch:{REGION}:{AUDIT}:alarm:anything"]) == {"cloudwatch:TagResource": "implicitDeny"}
+    # Resource-less creation only in the hub Region.
+    assert decisions(audit_document, ["cloudwatch:CreateSpace"], ["*"], context(("aws:RequestedRegion", REGION))) == {"cloudwatch:CreateSpace": "allowed"}
+    assert decisions(audit_document, ["cloudwatch:CreateSpace"], ["*"], context(("aws:RequestedRegion", "us-east-1"))) == {"cloudwatch:CreateSpace": "implicitDeny"}
+    # The centralization rule: only the one OmniHubStack names.
+    rule = f"arn:aws:observabilityadmin:{REGION}:{AUDIT}:organization-centralization-rule/agenticai-fleet-{REGION}"
+    other_rule = f"arn:aws:observabilityadmin:{REGION}:{AUDIT}:organization-centralization-rule/someone-elses-rule"
+    rule_actions = ["observabilityadmin:CreateCentralizationRuleForOrganization", "observabilityadmin:UpdateCentralizationRuleForOrganization", "observabilityadmin:DeleteCentralizationRuleForOrganization"]
+    assert set(decisions(audit_document, rule_actions, [rule]).values()) == {"allowed"}
+    assert set(decisions(audit_document, rule_actions, [other_rule]).values()) == {"implicitDeny"}
+
+
 def test_management_role_changes_only_the_org_stacks_scps(management_document: str) -> None:
     mutations = ["organizations:UpdatePolicy", "organizations:DeletePolicy", "organizations:DetachPolicy"]
     owned = decisions(management_document, mutations, [SCP], context((f"aws:ResourceTag/{STACK_TAG}", "AgenticAI-Management-OrgStack")))

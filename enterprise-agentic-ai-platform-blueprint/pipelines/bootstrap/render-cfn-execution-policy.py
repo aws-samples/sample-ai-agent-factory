@@ -211,15 +211,40 @@ TRANSACTION_SEARCH_ACTIONS = [
 # Dataset integration and the delegated-administrator path need. Access grants
 # and the Dataset integration are applied post-deploy by
 # scripts/omni/omni_space_bootstrap.py with the operator's own credentials.
+# Centralization-rule actions take the rule ARN (Service Authorization
+# Reference); OmniHubStack names its rule agenticai-fleet-<region>, so the audit
+# document pins them to exactly that rule. Listing rules has no resource type.
 OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS = [
     "observabilityadmin:CreateCentralizationRuleForOrganization",
     "observabilityadmin:UpdateCentralizationRuleForOrganization",
     "observabilityadmin:DeleteCentralizationRuleForOrganization",
     "observabilityadmin:GetCentralizationRuleForOrganization",
-    "observabilityadmin:ListCentralizationRulesForOrganization",
     "observabilityadmin:ListTagsForResource",
     "observabilityadmin:TagResource",
     "observabilityadmin:UntagResource",
+]
+OMNI_CENTRALIZATION_RULE_NAME_PREFIX = "agenticai-fleet"
+# Space and dashboard lifecycle and tagging take the space / dashboard ARN;
+# reading the organization domain takes the domain ARN, which belongs to the
+# management account and lives in the Identity Center Region.
+OMNI_HUB_SPACE_ACTIONS = [
+    "cloudwatch:GetSpace",
+    "cloudwatch:UpdateSpace",
+    "cloudwatch:DeleteSpace",
+    "cloudwatch:GetOmniDashboard",
+    "cloudwatch:UpdateOmniDashboard",
+    "cloudwatch:DeleteOmniDashboard",
+    "cloudwatch:TagResource",
+    "cloudwatch:UntagResource",
+    "cloudwatch:ListTagsForResource",
+]
+# No resource type: authorized against "*", kept to the hub Region by request.
+OMNI_HUB_RESOURCELESS_ACTIONS = [
+    "application-signals:StartDiscovery",
+    "cloudwatch:CreateSpace",
+    "cloudwatch:ListSpaces",
+    "cloudwatch:CreateOmniDashboard",
+    "observabilityadmin:ListCentralizationRulesForOrganization",
 ]
 
 
@@ -752,37 +777,46 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     hub_boundary = iam_arn(account, f"policy/{hub_role_boundary_name(region)}")
     return [
         {
-            # Actions with no resource type: the space, its dashboards, the
-            # centralization rule, Transaction Search and its Application Signals
-            # discovery.
-            "Sid": "ProvisionOmniHubUnscoped",
+            # Actions with no resource type (Service Authorization Reference):
+            # creating the space and its dashboards, listing, Application Signals
+            # discovery and Transaction Search; "*" is the only resource they
+            # accept, so the request Region keeps them to the hub Region.
+            "Sid": "OmniHubUnscoped",
             "Effect": "Allow",
-            "Action": [
-                "application-signals:StartDiscovery",
-                "cloudwatch:GetDomainForOrganization",
-                "cloudwatch:CreateSpace",
-                "cloudwatch:GetSpace",
-                "cloudwatch:UpdateSpace",
-                "cloudwatch:DeleteSpace",
-                "cloudwatch:ListSpaces",
-                "cloudwatch:CreateOmniDashboard",
-                "cloudwatch:GetOmniDashboard",
-                "cloudwatch:UpdateOmniDashboard",
-                "cloudwatch:DeleteOmniDashboard",
-                "cloudwatch:TagResource",
-                "cloudwatch:UntagResource",
-                "cloudwatch:ListTagsForResource",
-                *OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS,
-                *TRANSACTION_SEARCH_ACTIONS,
-            ],
+            "Action": [*OMNI_HUB_RESOURCELESS_ACTIONS, *TRANSACTION_SEARCH_ACTIONS],
             "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": region}},
+        },
+        {
+            # Space and dashboard lifecycle and tags: this account's and Region's
+            # spaces and dashboards only. The organization domain the space joins
+            # is the management account's, read-only.
+            "Sid": "ManageOmniHubSpace",
+            "Effect": "Allow",
+            "Action": [*OMNI_HUB_SPACE_ACTIONS, "cloudwatch:GetDomainForOrganization"],
+            "Resource": [
+                arn("cloudwatch", region, account, "space/*"),
+                arn("cloudwatch", region, account, "omni-dashboard/*"),
+                "arn:aws:cloudwatch:*:*:organization-domain/*",
+            ],
+        },
+        {
+            "Sid": "OmniCentralizationRule",
+            "Effect": "Allow",
+            "Action": OMNI_HUB_OBSERVABILITY_ADMIN_ACTIONS,
+            "Resource": arn(
+                "observabilityadmin",
+                region,
+                account,
+                f"organization-centralization-rule/{OMNI_CENTRALIZATION_RULE_NAME_PREFIX}-{region}",
+            ),
         },
         {
             # The operator role: created, changed and deleted only while it
             # carries the AWS-managed Omni boundary, and given only the documented
             # AWS-managed Omni policies; it has no inline policy, so
             # iam:PutRolePolicy is not granted on it.
-            "Sid": "ChangeBoundedOperatorRole",
+            "Sid": "BoundedOperatorRole",
             "Effect": "Allow",
             "Action": OPERATOR_ROLE_GATED_ACTIONS,
             "Resource": operator_role,
@@ -796,20 +830,20 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             # description) and deleted only while it carries this Region's
             # blueprint boundary (CreateRole checks the requested boundary, the
             # other actions the one the role carries).
-            "Sid": "ChangeBoundedHubRoles",
+            "Sid": "BoundedHubRoles",
             "Effect": "Allow",
             "Action": ROLE_BOUNDARY_GATED_ACTIONS,
             "Resource": bounded_roles,
             "Condition": {"StringEquals": {"iam:PermissionsBoundary": hub_boundary}},
         },
         {
-            "Sid": "ReadAndTagOmniHubRoles",
+            "Sid": "ReadTagHubRoles",
             "Effect": "Allow",
             "Action": ROLE_READ_AND_TAG_ACTIONS,
             "Resource": managed_roles,
         },
         {
-            "Sid": "PassOmniHubRolesToServices",
+            "Sid": "PassHubRoles",
             "Effect": "Allow",
             "Action": "iam:PassRole",
             "Resource": omni_roles,
@@ -825,7 +859,7 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             },
         },
         {
-            "Sid": "CreateOmniServiceLinkedRoles",
+            "Sid": "OmniServiceLinkedRoles",
             "Effect": "Allow",
             "Action": "iam:CreateServiceLinkedRole",
             "Resource": "*",
@@ -930,7 +964,7 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
         },
         {
             # AWS::XRay::TransactionSearchConfig creates exactly these two log groups.
-            "Sid": "CreateTransactionSearchLogGroups",
+            "Sid": "TransactionSearchGroups",
             "Effect": "Allow",
             "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutRetentionPolicy"],
             "Resource": [
@@ -942,7 +976,7 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
             # Transaction Search prerequisites: application-signals:StartDiscovery
             # creates and reads this service-linked role and a CloudTrail channel
             # (each action only matches its own service's ARN).
-            "Sid": "ApplicationSignalsPrerequisites",
+            "Sid": "AppSignalsPrereqs",
             "Effect": "Allow",
             "Action": [
                 "cloudtrail:CreateServiceLinkedChannel",

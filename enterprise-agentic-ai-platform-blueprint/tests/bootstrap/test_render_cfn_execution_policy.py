@@ -326,7 +326,7 @@ def test_bootstrap_refuses_application_work_directory(tmp_path: Path) -> None:
 def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     policy = render("audit")
     by_sid = {statement["Sid"]: statement for statement in policy["Statement"]}
-    manage = by_sid["ReadAndTagOmniHubRoles"]
+    manage = by_sid["ReadTagHubRoles"]
     assert all(":role/" in resource for resource in manage["Resource"])
     assert all(f"::{AUDIT}:" in resource for resource in manage["Resource"])
     assert any(resource.endswith("role/CloudWatchOmniOperatorRole") for resource in manage["Resource"])
@@ -371,7 +371,7 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     }
     # The operator role: only with the AWS-managed Omni boundary, only the
     # AWS-managed Omni policies attached, and never an inline policy.
-    operator_gate = by_sid["ChangeBoundedOperatorRole"]
+    operator_gate = by_sid["BoundedOperatorRole"]
     assert set(operator_gate["Action"]) == gating - {"iam:PutRolePolicy", "iam:DeleteRolePolicy"}
     assert operator_gate["Resource"] == operator
     assert set(operator_gate["Condition"]) == {"StringEquals", "StringEqualsIfExists"}
@@ -380,7 +380,7 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     }
     assert set(operator_gate["Condition"]["StringEqualsIfExists"]["iam:PolicyARN"]) == omni_policies
     # Every other hub role: only while it carries this Region's blueprint boundary.
-    hub_gate = by_sid["ChangeBoundedHubRoles"]
+    hub_gate = by_sid["BoundedHubRoles"]
     assert set(hub_gate["Action"]) == gating
     assert set(hub_gate["Resource"]) == set(manage["Resource"]) - {operator}
     assert hub_gate["Condition"] == {
@@ -389,20 +389,34 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     assert "iam:DeleteRolePermissionsBoundary" not in all_actions(policy)
     for statement in policy["Statement"]:
         if gating & actions(statement) and any(":role/" in resource and "AgenticAI-LogArchive" not in resource for resource in resources(statement)):
-            assert statement["Sid"] in {"ChangeBoundedOperatorRole", "ChangeBoundedHubRoles", "ApplicationSignalsPrerequisites"}, statement["Sid"]
+            assert statement["Sid"] in {"BoundedOperatorRole", "BoundedHubRoles", "AppSignalsPrereqs"}, statement["Sid"]
         if "iam:PutRolePolicy" in actions(statement):
             assert operator not in resources(statement), statement["Sid"]
-    pass_role = by_sid["PassOmniHubRolesToServices"]
+    pass_role = by_sid["PassHubRoles"]
     assert pass_role["Action"] == "iam:PassRole"
     assert not any("GoldenGateRunner" in resource for resource in pass_role["Resource"])
     services = set(pass_role["Condition"]["StringEquals"]["iam:PassedToService"])
     assert {"cloudwatch.amazonaws.com", "logs.amazonaws.com", "bedrock-agentcore.amazonaws.com"} <= services
-    provision = by_sid["ProvisionOmniHubUnscoped"]
+    provision = by_sid["OmniHubUnscoped"]
     assert "cloudwatch:CreateSpace" in provision["Action"]
-    assert "cloudwatch:GetDomainForOrganization" in provision["Action"]
-    assert "cloudwatch:CreateDomainForOrganization" not in provision["Action"]
-    assert "observabilityadmin:CreateCentralizationRuleForOrganization" in provision["Action"]
     assert "xray:UpdateTraceSegmentDestination" in provision["Action"]
+    assert provision["Condition"] == {"StringEquals": {"aws:RequestedRegion": REGION}}
+    assert "cloudwatch:CreateDomainForOrganization" not in all_actions(policy)
+    # Typed actions are pinned: the Region's spaces and dashboards, the
+    # organization domain (management account, read only) and the one
+    # centralization rule OmniHubStack names.
+    space = by_sid["ManageOmniHubSpace"]
+    assert {"cloudwatch:GetSpace", "cloudwatch:UpdateSpace", "cloudwatch:DeleteSpace", "cloudwatch:TagResource", "cloudwatch:GetDomainForOrganization"} <= set(space["Action"])
+    assert set(space["Resource"]) == {
+        f"arn:aws:cloudwatch:{REGION}:{AUDIT}:space/*",
+        f"arn:aws:cloudwatch:{REGION}:{AUDIT}:omni-dashboard/*",
+        "arn:aws:cloudwatch:*:*:organization-domain/*",
+    }
+    rule = by_sid["OmniCentralizationRule"]
+    assert "observabilityadmin:CreateCentralizationRuleForOrganization" in rule["Action"]
+    assert rule["Resource"] == f"arn:aws:observabilityadmin:{REGION}:{AUDIT}:organization-centralization-rule/agenticai-fleet-{REGION}"
+    hub_stack = (ROOT / "apps" / "platform-account" / "lib" / "omni-hub-stack.ts").read_text()
+    assert "ruleName: `agenticai-fleet-${this.region}`" in hub_stack
     # Never a bare cloudwatch:* or observabilityadmin:* in the hub statement.
     assert "cloudwatch:*" not in provision["Action"]
     assert "observabilityadmin:*" not in provision["Action"]
@@ -418,9 +432,24 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
 
     # Resource-less actions share the hub's unscoped statement; list-handler-only
     # calls CloudFormation never makes during stack operations are absent.
-    unscoped = by_sid(policy, "ProvisionOmniHubUnscoped")
-    assert unscoped["Resource"] == "*" and "Condition" not in unscoped
+    unscoped = by_sid(policy, "OmniHubUnscoped")
+    assert unscoped["Resource"] == "*" and unscoped["Condition"] == {"StringEquals": {"aws:RequestedRegion": REGION}}
     assert "application-signals:StartDiscovery" in unscoped["Action"]
+    # Only actions without a resource type live here (Service Authorization Reference).
+    assert set(unscoped["Action"]) == {
+        "application-signals:StartDiscovery",
+        "cloudwatch:CreateSpace",
+        "cloudwatch:ListSpaces",
+        "cloudwatch:CreateOmniDashboard",
+        "observabilityadmin:ListCentralizationRulesForOrganization",
+        "xray:GetTraceSegmentDestination",
+        "xray:UpdateTraceSegmentDestination",
+        "xray:GetIndexingRules",
+        "xray:UpdateIndexingRule",
+        "logs:PutResourcePolicy",
+        "logs:DescribeResourcePolicies",
+        "logs:DeleteResourcePolicy",
+    }
     assert not any(action.startswith("kms:") for action in unscoped["Action"])
     assert not {"kms:ListKeys", "oam:ListSinks", "oam:CreateSink", "kms:CreateKey"} & set(unscoped["Action"])
 
@@ -495,7 +524,7 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     pipeline = (ROOT / "pipelines" / "platform-pipeline-stack.ts").read_text()
     assert re.search(r"""["']Nonprod["']""", pipeline) and re.search(r"""["']Audit["']""", pipeline)
 
-    log_groups = by_sid(policy, "CreateTransactionSearchLogGroups")
+    log_groups = by_sid(policy, "TransactionSearchGroups")
     assert set(log_groups["Action"]) == {"logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutRetentionPolicy"}
     assert set(log_groups["Resource"]) == {
         f"arn:aws:logs:{REGION}:{AUDIT}:log-group:aws/spans:*",
@@ -510,7 +539,7 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         "logs:DeleteLogGroup",
         "logs:DescribeLogGroups",
     } & granted
-    prerequisites = by_sid(policy, "ApplicationSignalsPrerequisites")
+    prerequisites = by_sid(policy, "AppSignalsPrereqs")
     assert set(prerequisites["Action"]) == {
         "cloudtrail:CreateServiceLinkedChannel",
         "iam:CreateServiceLinkedRole",
@@ -623,7 +652,7 @@ def test_hub_role_boundary_is_rendered_and_gated_per_hub_region() -> None:
                 cwd=ROOT, check=True, capture_output=True, text=True,
             ).stdout
         )
-        gate = by_sid(audit, "ChangeBoundedHubRoles")
+        gate = by_sid(audit, "BoundedHubRoles")
         names[region] = gate["Condition"]["StringEquals"]["iam:PermissionsBoundary"]
         assert names[region] == f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary-{region}"
         # The Regional statements of the boundary name only that Region.
