@@ -272,13 +272,20 @@ describe('Phase 1 — management stage entrypoint (bin/agentic-ai-platform.ts)',
     for (const [key, value] of Object.entries(context)) {
       args.push('--context', `${key}=${value}`);
     }
-    const result = spawnSync('npx', args, { cwd: REPO, encoding: 'utf8' });
-    const templatePath = path.join(outDir, `${STACK}.template.json`);
-    const template = fs.existsSync(templatePath)
-      ? (JSON.parse(fs.readFileSync(templatePath, 'utf8')) as { Resources: Record<string, Resource> })
-      : undefined;
-    fs.rmSync(outDir, { recursive: true, force: true });
-    return { status: result.status, stderr: result.stderr, template };
+    try {
+      // Synchronous, so Jest's own timeout cannot interrupt it: bound the child.
+      const result = spawnSync('npx', args, { cwd: REPO, encoding: 'utf8', timeout: 150_000 });
+      if (result.error) {
+        throw result.error;
+      }
+      const templatePath = path.join(outDir, `${STACK}.template.json`);
+      const template = fs.existsSync(templatePath)
+        ? (JSON.parse(fs.readFileSync(templatePath, 'utf8')) as { Resources: Record<string, Resource> })
+        : undefined;
+      return { status: result.status, stderr: result.stderr, template };
+    } finally {
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
   }
 
   const ofType = (template: { Resources: Record<string, Resource> }, type: string) =>
@@ -320,7 +327,7 @@ describe('Phase 1 — management stage entrypoint (bin/agentic-ai-platform.ts)',
     expect(refused.status).not.toBe(0);
     expect(refused.stderr).toContain("requires context 'agenticai/existingRootId'");
     expect(refused.template).toBeUndefined();
-  }, 240_000);
+  }, 330_000);
 });
 
 describe('Phase 1 — SCP-01 model allow-list comes from the SSOT', () => {
