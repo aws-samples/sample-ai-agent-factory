@@ -2391,11 +2391,13 @@ Resources:
   # ---------------------------------------------------------------------------
   # CloudWatch Omni foundation (Module 5), pre-provisioned so participants only
   # verify it. Omni decides who may enter a space with access GRANTS, never IAM
-  # policies: the identity that creates the space is the only automatic admin.
-  # Created here by CloudFormation, the space would admit nobody, so the two
-  # participant identities are granted explicitly - WSParticipantRole below (the
-  # console identity) and the Code Editor instance role in code-editor.yaml (the
-  # terminal and notebook identity; it deploys after this stack and imports the
+  # policies. Omni automatically grants Space Admin to the identity that creates
+  # the space: WSSystemRole in a Workshop Studio event, the deployer on the
+  # self-paced path. Everyone else needs an explicit grant: the console grant
+  # below is conditional on OmniConsolePrincipalArn (Workshop Studio supplies
+  # WSParticipantRole; the default self-paced deploy leaves it empty), and the
+  # Code Editor instance role gets its grant in code-editor.yaml (the terminal
+  # and notebook identity; it deploys after this stack and imports the
   # ac-OmniDomainId / ac-OmniSpaceId exports). Lives in this stack because the
   # three roles the space assumes and the Transaction Search config it depends
   # on are defined here, and Workshop Studio allows at most five templates.

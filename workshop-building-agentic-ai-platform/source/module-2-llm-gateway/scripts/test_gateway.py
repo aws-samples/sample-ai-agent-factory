@@ -124,10 +124,11 @@ def test_caching(client: LLMGatewayClient) -> None:
         return
 
     if t2 < t1 * 0.5:
-        print(f"\n  Second request was {t1/t2:.1f}x faster. With no response cache configured,"
-              " this is timing variance, not a cache hit.")
+        print(f"\n  Second request was {t1/t2:.1f}x faster. Timing alone does not establish a cache"
+              " hit; the default workshop deployment does not configure response caching.")
     else:
-        print("\n  Both requests took similar time: expected, no response cache is configured on this deployment.")
+        print("\n  Both requests took similar time. Timing alone does not establish a cache hit; the"
+              " default workshop deployment does not configure response caching, so both reached the model.")
 
 
 def test_multi_model(client: LLMGatewayClient) -> None:

@@ -4653,9 +4653,12 @@ Resources:
   # Module 5: admit the IDE instance role to the CloudWatch Omni space that
   # workshop-agentcore-stack created. Every terminal command and notebook cell
   # runs as this role (it mints the deep link and runs the Omni CLI steps), and
-  # Omni admits only principals with a grant - CloudFormation created the space,
-  # so no identity was admitted automatically. The console identity,
-  # WSParticipantRole, gets its grant in the agentcore stack.
+  # Omni admits only principals with a grant. Omni grants Space Admin
+  # automatically to the identity that creates the space (WSSystemRole in an
+  # event, the deployer on the self-paced path); this role is not that identity,
+  # so it gets an explicit grant here. The console grant is conditional on
+  # OmniConsolePrincipalArn in the agentcore stack: Workshop Studio supplies
+  # WSParticipantRole, the default self-paced deploy leaves it empty.
   OmniCodeEditorSpaceAdminGrant:
     Type: AWS::CloudWatch::AccessGrant
     Properties:

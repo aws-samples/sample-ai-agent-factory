@@ -54,7 +54,7 @@ Try a follow-up that tests multi-turn memory:
 
 The agent should remember the Tokyo trip context from the previous turn and call `search_hotels_by_budget` with the budget constraint.
 
-## Test 3: different route
+## Test 3: different date
 
 Test a different date to verify the mock data coverage:
 
@@ -134,7 +134,7 @@ HTTP=$(curl -s -o /tmp/smoke-response.txt -w '%{http_code}' -X POST \
 echo "Runtime invocation: HTTP $HTTP"
 
 # Match both prefixes: `gw_` on the Module 3a path, `gateway_` on the Module 3b path.
-echo "Gateway tools the agent called for this prompt:"
+echo "Gateway tools the agent requested for this prompt:"
 grep -oE '"name": *"(gw|gateway)_tg-[A-Za-z0-9_-]+"' /tmp/smoke-response.txt | sort -u
 
 sleep 8
@@ -159,7 +159,7 @@ aws cognito-idp admin-delete-user --user-pool-id $USER_POOL_ID \
   --username "$SMOKE_USER" --region $REGION && echo "Removed the throwaway user."
 :::
 
-Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent actually called for this flight search, typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it invoked.
+Expected output: `HTTP 200`, at least one `tg-workshop-*` tool name — the tools the agent requested for this flight search (a name shows the request was routed to the Gateway; whether the call succeeded is in the tool result, which Test 1 showed under the tool chip), typically `search_flights`, prefixed `gw_` (Module 3a path) or `gateway_` (Module 3b path) — and a `PASS:` line showing the spend increased. The agent loads all seven gateway tools, but the response only names the ones it invoked.
 
 ::alert[`HTTP 403` with `Claim 'client_id' value mismatch with configuration.` means an IdToken was used instead of an AccessToken. `Failed to start MCP client` in the response body means `/FAST-stack/gateway_url` points at a Gateway that no longer exists — re-run the SSM step on the *Connect the Gateway* page.]{type="info"}
 

@@ -75,7 +75,7 @@ Current minified sizes (headroom in parentheses):
 
 | File | Chars (IAM count) | Headroom to 6,144 |
 |------|-------|----------|
-| `workshop-iam-policy-core.json`       | 4,458 | 1686 |
+| `workshop-iam-policy-core.json`       | 4,549 | 1595 |
 | `workshop-iam-policy-core-2.json`     | 5,668 | 476 |
 | `workshop-iam-policy-core-3.json`     | 6,010 | 134 |
 | `workshop-iam-policy-infra.json`      | 5,761 | 383 |
@@ -448,7 +448,7 @@ content runs changes `--environment` only), so the function cannot be re-pointed
 role at all. Second, the five functions run under `workshop-*`/`ac-*` roles that carry
 `workshop-permissions-boundary`, so code that reaches one of them gains nothing a participant
 does not already have. Accepted as the documented residual of a grant the content needs. Since 2026-11-10 the
-statement also carries the `aws:RequestedRegion` fence the other statements use (Holmes scan `48f9df48`: the
+statement also carries the `aws:RequestedRegion` fence the other statements use (a November 2026 rubric scan: the
 five function ARNs have `*` in the region segment, so without the fence the write was valid in every Region);
 core-3 is now at 6,010 characters by IAM's count, the tightest file.
 `DeleteFunction`, `RemovePermission` and `GetPolicy` left at the same time; see the
@@ -760,7 +760,7 @@ implicitly (`network-interface`, `volume`, `launch-template`).
 that tag is the Code Editor, whose role is a Space Admin on the Omni space and runs the notebooks.
 A deployer who can stop it, rewrite its user data with `ModifyInstanceAttribute` and start it
 again runs code under the instance role from a terminal — a PE4-style path the rubric flagged
-(build `d3255266`).
+(a November 2026 rubric scan).
 
 The six actions now live in `self-service-deploy-policy-8.json`
 (`Ec2IdeInstanceMutationOnlyThroughCloudFormation`), still Workshop-tag scoped, plus
@@ -774,7 +774,7 @@ and `TerminateInstances` stay in `-policy-1.json`: they cannot run code under th
 
 ## `self-service-deploy-policy-8.json`: the account-level statements are CloudFormation-only (2026-11-10)
 
-Holmes scan `f1a5fb55` flagged two things in `-policy-8.json`: `logs:PutResourcePolicy`/`DeleteResourcePolicy`
+A November 2026 rubric scan flagged two things in `-policy-8.json`: `logs:PutResourcePolicy`/`DeleteResourcePolicy`
 on `*` (no resource type exists, so the grant covered every Logs resource policy in the account), and the
 API Gateway v2 child-resource and `TagResource`/`UntagResource` statements, which cannot carry the Workshop
 tag fence (children are not taggable) and so let a deployer tag any API and then edit it. The deployer never
@@ -897,8 +897,7 @@ The participant policy touches Secrets Manager for two unrelated reasons, so `SM
 An earlier revision (`f189e91`) kept the broad `workshop*` write and layered a two-name
 `SMNoWriteOnPlatformSecrets` Deny on top; the rubric correctly pointed out the Deny named only
 two of several platform secrets under the prefix. Removing `workshop*` from the write actions
-altogether closes the whole class and makes the Deny unnecessary. (Build rubric findings on
-`1cae77f9` and `b30cda7b`, 2026-11-09.)
+altogether closes the whole class and makes the Deny unnecessary. (Rubric findings, 2026-11-09.)
 
 ## CloudWatch Omni is pre-provisioned; the participant has no Create/Delete on domains, spaces or Dataset integrations (2026-11)
 
@@ -958,15 +957,14 @@ canned ACL value; it now carries `aws:ResourceAccount = ${aws:PrincipalAccount}`
 `StringNotEqualsIfExists s3:x-amz-acl ∉ {public-read, public-read-write, authenticated-read}` (a public
 canned ACL is refused; a request without the header, which is what a service-side grant looks like, is
 untouched). The FAST staging bucket itself (`fast-stack-…-stagingbucket…`, CDK default) is `BucketOwnerEnforced` with all four
-Block Public Access flags on (read live on event 17, 2026-11-10): ACLs are disabled there, so the only `PutObjectAcl`
+Block Public Access flags on (read live during the November 2026 workshop validation): ACLs are disabled there, so the only `PutObjectAcl`
 that can ever succeed is `bucket-owner-full-control` in the owning account — exactly what the two conditions allow.
-Rubric build `58ebf369`.
+Flagged by the November 2026 rubric scan.
 
 ## SSM: reads stay broad, writes name the exact paths (2026-11)
 
 `SSM` in `-core-5.json` used to grant `PutParameter`/`DeleteParameter` on `parameter/workshop*`
-and the whole `parameter/cdk-bootstrap/*` tree with no Region fence. The rubric (build
-`0af9b045`) pointed out that write access to the bootstrap tree lets a participant change
+and the whole `parameter/cdk-bootstrap/*` tree with no Region fence. The rubric scan pointed out that write access to the bootstrap tree lets a participant change
 account-wide CDK bootstrap state. The statement is now two: `SSMRead` keeps `GetParameter` /
 `GetParametersByPath` on the four prefixes, and `SSMWriteWorkshopPathsAndBootstrapVersionOnly`
 grants `PutParameter`/`DeleteParameter` only on `/workshop/*`, `/FAST-stack/*`,
@@ -1230,8 +1228,8 @@ stay on `"*"`: `route53:CreateHostedZone`, which has no resource type at all.
 > against the real API under a role holding nothing but `CloudFrontCreateScoped`:
 >
 > ```
-> CreateCachePolicy          -> created 24a43da6-…      AUTHORIZED
-> CreateOriginAccessControl  -> created E2X6U6OMBJEC67  AUTHORIZED
+> CreateCachePolicy          -> created <cache-policy-id>      AUTHORIZED
+> CreateOriginAccessControl  -> created <origin-access-control-id>  AUTHORIZED
 > CreateDistribution         -> NoSuchCachePolicy       AUTHORIZED (failed after authz)
 > ```
 >
@@ -1606,8 +1604,8 @@ dispositions, so nobody re-widens them by accident:
 | `-core.json`, `-core-4.json`, `-core-5.json` | `STSAssume` → `STSAssumePersonaRolesAndBoundaryCappedCdkRoles`, `OmniWriteNoResourceLevel` → `OmniWriteNoResourceTypesInServiceReference`, `ACTokenVaultLazyCreate` → `ACTokenVaultLazyCreateExactActionUnknownToAccessAnalyzer` | Sid renames only; no action, resource or condition changed | The three statements that stay at their documented ceiling now carry the reason in the Sid, where a reader of the JSON (or a policy scanner) sees it without this file: the CloudWatch service reference defines no resource type for the Omni write actions (only the `cloudwatch:HasAccessGrant` key); IAM Access Analyzer, which the Workshop Studio build runs over every `iamPolicies` file, rejects `bedrock-agentcore:CreateTokenVault` as a non-existent action (re-checked 2026-11-08); the CDK execution role the deploy role passes is capped by the shipped bounded bootstrap template. Sizes at the time of this change: core 3,997, core-4 5,785, core-5 3,087 by IAM's count (see the table at the top for current values). |
 | `-core-5.json` | new `Deny` `ACTokenVaultDenyUnusedCreateActionsTheWildcardWouldAllow` | `bedrock-agentcore:CreateApiKeyCredentialProvider`, `CreatePaymentCredentialProvider` denied on `token-vault/default*` | The service reference lists exactly three `Create*` actions with the `token-vault` resource type (OAuth2, API-key and payment credential providers) and no `CreateTokenVault`; the workshop calls only `CreateOauth2CredentialProvider` (already allowed by `ACIdentityScoped`). Denying the two unused siblings pins what the unavoidable `Create*` wildcard can reach inside the policy document: the OAuth2 create and the unpublished `CreateTokenVault` the service authorizes on it. Zero effect on any page or notebook (`grep` of `content/` and `source/`: no API-key or payment provider call). |
 | `-core-5.json` → `code-editor.yaml` (IDE role inline policy `TokenVaultLazyCreate`) | `ACTokenVaultLazyCreateExactActionUnknownToAccessAnalyzer` and the `Deny` removed; new inline Sid `ACTokenVaultLazyCreateExactAction` | `bedrock-agentcore:Create*` on `token-vault/default` → exact `bedrock-agentcore:CreateTokenVault` on `arn:aws:bedrock-agentcore:*:<account>:token-vault/default`, three Regions | The build's Access Analyzer gate only covers the `iamPolicies` files, so the exact action can be named in the template (as the agentcore stack's TokenVaultInit role already does). The IDE role is the only identity that runs `CreateOauth2CredentialProvider`; it now holds both actions by name and no write wildcard. The WSParticipantRole loses the undocumented `CreateTokenVault` — not a content path. core-5 is 2,808 by IAM's count. |
-| `-core.json` | new `ACGatewaySyncAuthorizedOnWildcardArnByCreateGateway` (restores the `ACGatewaySyncOnCreate` statement removed on 2026-11-08 as "redundant") | `bedrock-agentcore:SynchronizeGatewayTargets` on `gateway/*`, region-fenced | Event 11 (build bc5bb7dc): `create_gateway.py` failed with `not authorized to perform: bedrock-agentcore:SynchronizeGatewayTargets on resource: …:gateway/*` and every Module 3a block after it failed downstream (no gateway id). `CreateGateway` authorizes the sync action against the wildcard ARN because no id exists yet; `ACGatewayManage` grants the same action only on `gateway/tools-gateway-*` / `gateway/ac-tools-gateway-*`, which cannot match. The two statements are not duplicates: same action, different resource the service checks. |
-| `-core-5.json` | `IAMCdkRoleTags` → `IAMCdkRoleTagsBootstrapKeysOnly` | `ForAllValues:StringEquals aws:TagKeys = Workshop` → `ForAllValues:StringLike aws:TagKeys = [Workshop, aws-cdk:bootstrap-role, aws:cloudformation:*]` | Event 11 (build bc5bb7dc): `npx cdk bootstrap` failed with `not authorized to perform: iam:TagRole on resource: …:role/cdk-hnb659fds-file-publishing-role-…` and both Module 4 `cdk deploy` blocks and everything after them failed downstream. The bootstrap template tags every role `aws-cdk:bootstrap-role` (grep `Tags:` in `source/module-4b-fast/cdk-bootstrap-template.yaml`) and CloudFormation may add its reserved `aws:cloudformation:*` system tags; no bootstrap role ever carries `Workshop`, so the 2026-11-08 fence denied every bootstrap. The fence now names the keys the bootstrap writes plus the workshop's own `Workshop` key (the set CloudTrail showed in event 7); `aws:`-prefixed keys cannot be set by callers, so the pattern adds no reach. Resource stays `role/cdk-hnb659fds-*`. |
+| `-core.json` | new `ACGatewaySyncAuthorizedOnWildcardArnByCreateGateway` (restores the `ACGatewaySyncOnCreate` statement removed on 2026-11-08 as "redundant") | `bedrock-agentcore:SynchronizeGatewayTargets` on `gateway/*`, region-fenced | The November 2026 workshop validation: `create_gateway.py` failed with `not authorized to perform: bedrock-agentcore:SynchronizeGatewayTargets on resource: …:gateway/*` and every Module 3a block after it failed downstream (no gateway id). `CreateGateway` authorizes the sync action against the wildcard ARN because no id exists yet; `ACGatewayManage` grants the same action only on `gateway/tools-gateway-*` / `gateway/ac-tools-gateway-*`, which cannot match. The two statements are not duplicates: same action, different resource the service checks. |
+| `-core-5.json` | `IAMCdkRoleTags` → `IAMCdkRoleTagsBootstrapKeysOnly` | `ForAllValues:StringEquals aws:TagKeys = Workshop` → `ForAllValues:StringLike aws:TagKeys = [Workshop, aws-cdk:bootstrap-role, aws:cloudformation:*]` | The November 2026 workshop validation: `npx cdk bootstrap` failed with `not authorized to perform: iam:TagRole on resource: …:role/cdk-hnb659fds-file-publishing-role-…` and both Module 4 `cdk deploy` blocks and everything after them failed downstream. The bootstrap template tags every role `aws-cdk:bootstrap-role` (grep `Tags:` in `source/module-4b-fast/cdk-bootstrap-template.yaml`) and CloudFormation may add its reserved `aws:cloudformation:*` system tags; no bootstrap role ever carries `Workshop`, so the 2026-11-08 fence denied every bootstrap. The fence now names the keys the bootstrap writes plus the workshop's own `Workshop` key (the set CloudTrail showed in event 7); `aws:`-prefixed keys cannot be set by callers, so the pattern adds no reach. Resource stays `role/cdk-hnb659fds-*`. |
 
 Not changed on purpose: `ecs:DeregisterTaskDefinition` (`EcsDeregisterTaskDefinitionNoResourceLevel`,
 `policy-6`) — the two probe sections above show IAM evaluating it against `*`. A scoped

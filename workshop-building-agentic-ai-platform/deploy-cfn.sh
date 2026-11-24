@@ -61,9 +61,74 @@ record_stack_failure() {
 # not for a state CloudFormation refuses to update (those print `cleanup` instead).
 retry_in_place_hint() {
   echo "Rollback is disabled, so stack '$1' keeps every resource it did provision. Fix the"
-  echo "cause and run deploy again (the stack is updated in place and only what failed is"
-  echo "re-attempted), or run './deploy-cfn.sh cleanup' to delete every failed stack and"
-  echo "start over."
+  echo "cause and run deploy again: the stack is updated in place, which keeps the successful"
+  echo "resources the new template leaves unchanged, retries the failed ones and applies every"
+  echo "other template or parameter change. Or run './deploy-cfn.sh cleanup' to delete every"
+  echo "failed stack and start over."
+}
+
+# stack_is_healthy <status>: the three stable states with outputs. Shared by the
+# FINAL STATUS CHECK after a deploy and by `cleanup`, so cleanup can never delete
+# a stack that deploy accepts as healthy.
+stack_is_healthy() {
+  case "$1" in
+    CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# current_stack_status <stack>: the stack's status, DOES_NOT_EXIST, or UNKNOWN when
+# the read itself failed (access, network, throttling), so that no message guesses
+# what CloudFormation did from the failure of an API call alone.
+current_stack_status() {
+  local out
+  if out=$(aws cloudformation describe-stacks --stack-name "$1" \
+      --query "Stacks[0].StackStatus" --output text 2>&1); then
+    echo "$out"
+  elif grep -q "does not exist" <<<"$out"; then
+    echo "DOES_NOT_EXIST"
+  else
+    echo "UNKNOWN"
+  fi
+}
+
+# advise_after_failure <stack> <state>: recovery advice chosen from the state read
+# back, never from the failing call alone. A call can return an error after
+# CloudFormation accepted the request (a response timeout), and a waiter can give
+# up while the work continues.
+advise_after_failure() {
+  case "$2" in
+    DOES_NOT_EXIST)
+      echo "No stack '$1' exists, so nothing was created. Fix the cause reported above and run"
+      echo "deploy again." ;;
+    UNKNOWN)
+      echo "The current state of '$1' could not be read, so the outcome of the call is unknown."
+      echo "Check the stack in the CloudFormation console or with"
+      echo "  aws cloudformation describe-stacks --stack-name $1"
+      echo "before running deploy again." ;;
+    *_IN_PROGRESS)
+      echo "CloudFormation is still working on '$1' (state $2): the call returned before it"
+      echo "finished. Wait for a terminal state (the console, or"
+      echo "  aws cloudformation describe-stacks --stack-name $1"
+      echo "), then run deploy again; a healthy stack is picked up unchanged." ;;
+    CREATE_FAILED|UPDATE_FAILED)
+      retry_in_place_hint "$1" ;;
+    ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED)
+      echo "Stack '$1' is in state $2, which CloudFormation does not update; remove it, then run"
+      echo "deploy again:"
+      echo "  ./deploy-cfn.sh cleanup" ;;
+    UPDATE_ROLLBACK_FAILED)
+      echo "Stack '$1' is in state $2. Run"
+      echo "  aws cloudformation continue-update-rollback --stack-name $1"
+      echo "and deploy again, or remove the stack with ./deploy-cfn.sh cleanup." ;;
+    CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE)
+      echo "Stack '$1' is in the healthy state $2 despite the error above (for example the call"
+      echo "timed out after CloudFormation had finished). Run deploy again; it is picked up"
+      echo "unchanged." ;;
+    *)
+      echo "Stack '$1' is in state $2. Fix the cause reported above and run deploy again, or"
+      echo "remove the stack with ./deploy-cfn.sh cleanup." ;;
+  esac
 }
 
 # Resolve the target region. Order: AWS_REGION > AWS_DEFAULT_REGION >
@@ -160,21 +225,50 @@ override_names_caller() {
 # the normal case on a first deploy. Read for every deploy so the summary below
 # says whether this run creates the space or updates an existing one; destroy
 # and cleanup never use it.
+# Both reads distinguish "the stack (or resource) does not exist" from "the read
+# failed": only the first means no space. Treating a failed read as absence would
+# clear a caller-naming OMNI_CONSOLE_PRINCIPAL_ARN and, on an existing space, a
+# later successful update would then remove the grant that admits the caller. So
+# a read that fails for any other reason stops the run before any parameter is
+# changed, and shows the error.
+omni_probe_failed() {
+  cat "$OMNI_PROBE_ERR"
+  echo "Error: could not read workshop-agentcore-stack to tell whether a CloudWatch Omni space"
+  echo "       already exists ($1 failed for a reason other than a missing stack or resource)."
+  echo "       Nothing was changed. Fix the access or network problem above and run deploy again."
+  rm -f "$OMNI_PROBE_ERR"
+  exit 1
+}
 EXISTING_OMNI_SPACE_ID=""
 if [[ "$OPERATION" == "deploy" ]]; then
-  EXISTING_OMNI_SPACE_ID=$(aws cloudformation describe-stacks \
-    --stack-name workshop-agentcore-stack \
-    --query "Stacks[0].Outputs[?OutputKey=='OmniSpaceId'].OutputValue" \
-    --output text 2>/dev/null || true)
-  [[ "$EXISTING_OMNI_SPACE_ID" != "None" ]] || EXISTING_OMNI_SPACE_ID=""
-  if [[ -z "$EXISTING_OMNI_SPACE_ID" ]]; then
-    # A resource a rollback already deleted keeps its physical ID, so skip it.
-    EXISTING_OMNI_SPACE_ID=$(aws cloudformation describe-stack-resource \
-      --stack-name workshop-agentcore-stack --logical-resource-id OmniSpace \
-      --query "[StackResourceDetail][?ResourceStatus!='DELETE_COMPLETE'].PhysicalResourceId | [0]" \
-      --output text 2>/dev/null || true)
-    [[ "$EXISTING_OMNI_SPACE_ID" != "None" ]] || EXISTING_OMNI_SPACE_ID=""
+  OMNI_PROBE_ERR=$(mktemp)
+  AGENTCORE_STACK_ABSENT=0
+  if OMNI_PROBE_OUT=$(aws cloudformation describe-stacks \
+      --stack-name workshop-agentcore-stack \
+      --query "Stacks[0].Outputs[?OutputKey=='OmniSpaceId'].OutputValue" \
+      --output text 2>"$OMNI_PROBE_ERR"); then
+    [[ "$OMNI_PROBE_OUT" == "None" || -z "$OMNI_PROBE_OUT" ]] || EXISTING_OMNI_SPACE_ID="$OMNI_PROBE_OUT"
+  elif grep -q "does not exist" "$OMNI_PROBE_ERR"; then
+    AGENTCORE_STACK_ABSENT=1   # no stack yet: the normal first deploy
+  else
+    omni_probe_failed "describe-stacks"
   fi
+  if [[ -z "$EXISTING_OMNI_SPACE_ID" && "$AGENTCORE_STACK_ABSENT" == "0" ]]; then
+    # The stack exists but exports no OmniSpaceId (a failed create has no
+    # outputs). A resource a rollback already deleted keeps its physical ID, so
+    # that status is skipped.
+    if OMNI_PROBE_OUT=$(aws cloudformation describe-stack-resource \
+        --stack-name workshop-agentcore-stack --logical-resource-id OmniSpace \
+        --query "[StackResourceDetail][?ResourceStatus!='DELETE_COMPLETE'].PhysicalResourceId | [0]" \
+        --output text 2>"$OMNI_PROBE_ERR"); then
+      [[ "$OMNI_PROBE_OUT" == "None" || -z "$OMNI_PROBE_OUT" ]] || EXISTING_OMNI_SPACE_ID="$OMNI_PROBE_OUT"
+    elif grep -q "does not exist" "$OMNI_PROBE_ERR"; then
+      :   # the stack never created an OmniSpace resource
+    else
+      omni_probe_failed "describe-stack-resource"
+    fi
+  fi
+  rm -f "$OMNI_PROBE_ERR"
 fi
 if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]] && override_names_caller "$OMNI_CONSOLE_PRINCIPAL_ARN"; then
   if [[ -z "$EXISTING_OMNI_SPACE_ID" ]]; then
@@ -309,7 +403,7 @@ if [[ "$OPERATION" == "deploy" && -f scripts/verify-images.py ]]; then
   echo ""
 fi
 
-# The five participant IAM policies exist twice: as the JSON files contentspec
+# The seven participant IAM policies exist twice: as the JSON files contentspec
 # attaches to WSParticipantRole, and embedded as managed policies inside
 # code-editor.yaml (CloudFormation cannot read a sibling file). Nothing on the
 # IDE assumes WSParticipantRole, so the embedded copies are the ones actually
@@ -423,7 +517,9 @@ if [[ "$OPERATION" == "deploy" ]]; then
       # Resolve magic variables ({{.Something}}) — substitute known ones, skip unknown
       PARAM_VALUE="${PARAM_VALUE//\{\{.AssetsBucketName\}\}/$S3_BUCKET}"
       PARAM_VALUE="${PARAM_VALUE//\{\{.AssetsBucketPrefix\}\}/assets/}"
-      PARAM_VALUE="${PARAM_VALUE//\{\{.TeamId\}\}/${TEAM_ID:-d30035ed-7bef-405a-8741-6144faa15e17}}"
+      # {{.TeamId}} is not used by the current contentspec. If a template adds it,
+      # export TEAM_ID; the fallback is a documented synthetic value, not an event's.
+      PARAM_VALUE="${PARAM_VALUE//\{\{.TeamId\}\}/${TEAM_ID:-00000000-0000-4000-8000-000000000000}}"
       PARAM_VALUE="${PARAM_VALUE//\{\{.TeamIndex\}\}/0}"
       PARAM_VALUE="${PARAM_VALUE//\{\{.ParticipantRoleArn\}\}/$OMNI_CONSOLE_PRINCIPAL_ARN}"
 
@@ -501,8 +597,10 @@ if [[ "$OPERATION" == "deploy" ]]; then
     # deploys with --disable-rollback) and DELETE_FAILED (a delete that got
     # stuck). A CREATE_FAILED or UPDATE_FAILED stack is different: rollback was
     # disabled, so the stack keeps every resource that did provision, and
-    # CloudFormation lets the fixed template be applied as an update that
-    # re-attempts only what failed. Sending those through `cleanup` would delete
+    # CloudFormation lets the fixed template be applied as an update that keeps
+    # the successful resources the new template leaves unchanged, retries the
+    # failed ones and applies every other template or parameter change. Sending
+    # those through `cleanup` would delete
     # the healthy resources too, so they proceed. UPDATE_ROLLBACK_FAILED (again
     # only after a manual rollback) also proceeds; if CloudFormation rejects the
     # update, the failure path names `continue-update-rollback` and `cleanup` as
@@ -529,8 +627,10 @@ if [[ "$OPERATION" == "deploy" ]]; then
         continue ;;
       CREATE_FAILED|UPDATE_FAILED)
         echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. Rollback was"
-        echo "disabled, so the resources it did provision are still there; the update below"
-        echo "re-attempts only what failed. Its final state is checked before this run moves on." ;;
+        echo "disabled, so the resources it did provision are still there. The update below keeps"
+        echo "the successful resources the template leaves unchanged, retries the failed ones and"
+        echo "applies every other template or parameter change. Its final state is checked before"
+        echo "this run moves on." ;;
       UPDATE_ROLLBACK_FAILED)
         echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. An update is"
         echo "attempted; if CloudFormation rejects it, run"
@@ -582,21 +682,27 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
       if [[ "$EXISTING_STATUS" == "DOES_NOT_EXIST" ]]; then
         if ! aws cloudformation create-stack "${CREATE_ARGS[@]}"; then
-          echo "Create failed for '$STACK_NAME': CloudFormation rejected the create-stack call, so"
-          echo "no stack was created. Fix the cause reported above and run deploy again."
-          record_stack_failure "$STACK_NAME" "create-stack call rejected"
+          echo "The create-stack call for '$STACK_NAME' returned an error (details above). That"
+          echo "alone does not say whether CloudFormation accepted it, so the state is read back."
+          STATE_NOW=$(current_stack_status "$STACK_NAME")
+          echo "Current state of '$STACK_NAME': $STATE_NOW"
+          advise_after_failure "$STACK_NAME" "$STATE_NOW"
+          record_stack_failure "$STACK_NAME" "create-stack call failed (state $STATE_NOW)"
           continue
         fi
         echo "Waiting for stack creation..."
         if ! aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"; then
           echo ""
-          echo "Stack creation failed for '$STACK_NAME'. Fetching failure details ..."
+          echo "Waiting for '$STACK_NAME' ended with an error: either the create failed or the"
+          echo "waiter gave up while CloudFormation was still working. Reading the outcome ..."
           aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
             --output table || true
-          retry_in_place_hint "$STACK_NAME"
-          record_stack_failure "$STACK_NAME" "create"
+          STATE_NOW=$(current_stack_status "$STACK_NAME")
+          echo "Current state of '$STACK_NAME': $STATE_NOW"
+          advise_after_failure "$STACK_NAME" "$STATE_NOW"
+          record_stack_failure "$STACK_NAME" "create (state $STATE_NOW)"
           continue
         fi
       else
@@ -609,25 +715,28 @@ if [[ "$OPERATION" == "deploy" ]]; then
           echo "Waiting for stack update..."
           if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"; then
             echo ""
-            echo "Stack update failed for '$STACK_NAME'. Fetching failure details ..."
+            echo "Waiting for '$STACK_NAME' ended with an error: either the update failed or the"
+            echo "waiter gave up while CloudFormation was still working. Reading the outcome ..."
             aws cloudformation describe-stack-events \
               --stack-name "$STACK_NAME" \
               --query "StackEvents[?ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
               --output table || true
-            retry_in_place_hint "$STACK_NAME"
-            record_stack_failure "$STACK_NAME" "update"
+            STATE_NOW=$(current_stack_status "$STACK_NAME")
+            echo "Current state of '$STACK_NAME': $STATE_NOW"
+            advise_after_failure "$STACK_NAME" "$STATE_NOW"
+            record_stack_failure "$STACK_NAME" "update (state $STATE_NOW)"
             continue
           fi
         elif grep -q "No updates are to be performed" <<<"$UPDATE_OUT"; then
           echo "No changes to apply to '$STACK_NAME'; checking its current state."
         else
           echo "$UPDATE_OUT"
-          echo "Update failed for '$STACK_NAME': CloudFormation rejected the update-stack call, so"
-          echo "the stack is unchanged (state $PRIOR_STATUS). Fix the cause reported above and run"
-          echo "deploy again. If CloudFormation refuses to update a stack in that state, run"
-          echo "  aws cloudformation continue-update-rollback --stack-name $STACK_NAME"
-          echo "(for UPDATE_ROLLBACK_FAILED) or remove the stack with ./deploy-cfn.sh cleanup."
-          record_stack_failure "$STACK_NAME" "update-stack call rejected"
+          echo "The update-stack call for '$STACK_NAME' returned an error (details above). That"
+          echo "alone does not say whether CloudFormation accepted it, so the state is read back."
+          STATE_NOW=$(current_stack_status "$STACK_NAME")
+          echo "Current state of '$STACK_NAME': $STATE_NOW"
+          advise_after_failure "$STACK_NAME" "$STATE_NOW"
+          record_stack_failure "$STACK_NAME" "update-stack call failed (state $STATE_NOW)"
           continue
         fi
       fi
@@ -654,7 +763,8 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
       if ! aws cloudformation deploy "${DEPLOY_ARGS[@]}"; then
         echo ""
-        echo "Deploy failed for stack '$STACK_NAME'. Fetching failure details ..."
+        echo "The deploy call for '$STACK_NAME' returned an error: the stack failed, or the call"
+        echo "gave up while CloudFormation was still working. Reading the outcome ..."
         echo ""
         # `|| true`: the stack may not exist (a rejected create) or the events read
         # may be refused; neither should stop the failure from being recorded.
@@ -662,8 +772,10 @@ if [[ "$OPERATION" == "deploy" ]]; then
           --stack-name "$STACK_NAME" \
           --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
           --output table || true
-        retry_in_place_hint "$STACK_NAME"
-        record_stack_failure "$STACK_NAME" "deploy"
+        STATE_NOW=$(current_stack_status "$STACK_NAME")
+        echo "Current state of '$STACK_NAME': $STATE_NOW"
+        advise_after_failure "$STACK_NAME" "$STATE_NOW"
+        record_stack_failure "$STACK_NAME" "deploy (state $STATE_NOW)"
         continue
       fi
     fi
@@ -678,22 +790,22 @@ if [[ "$OPERATION" == "deploy" ]]; then
     # the stable state with outputs that `continue-update-rollback` (which the
     # UPDATE_ROLLBACK_FAILED note above asks for) lands in, and a re-run whose
     # template is unchanged must not report it as a failure.
-    FINAL_STATUS=$(aws cloudformation describe-stacks \
-      --stack-name "$STACK_NAME" \
-      --query "Stacks[0].StackStatus" \
-      --output text 2>/dev/null || echo "UNKNOWN")
-    case "$FINAL_STATUS" in
-      CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
-      *)
-        echo ""
+    FINAL_STATUS=$(current_stack_status "$STACK_NAME")
+    if ! stack_is_healthy "$FINAL_STATUS"; then
+      echo ""
+      if [[ "$FINAL_STATUS" == "UNKNOWN" ]]; then
+        echo "The state of '$STACK_NAME' could not be read after the deploy call, so its outcome"
+        echo "is not confirmed."
+      else
         echo "Stack '$STACK_NAME' finished in state $FINAL_STATUS, not CREATE_COMPLETE,"
         echo "UPDATE_COMPLETE or UPDATE_ROLLBACK_COMPLETE. The deploy call reported no error,"
         echo "which happens when nothing in the template changed: an unchanged failed stack"
         echo "stays failed and exports nothing."
-        retry_in_place_hint "$STACK_NAME"
-        record_stack_failure "$STACK_NAME" "final status $FINAL_STATUS"
-        continue ;;
-    esac
+      fi
+      advise_after_failure "$STACK_NAME" "$FINAL_STATUS"
+      record_stack_failure "$STACK_NAME" "final status $FINAL_STATUS"
+      continue
+    fi
 
     echo "Stack '$STACK_NAME' deployed successfully."
 
@@ -812,13 +924,19 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
 
     # For cleanup, only target stacks not in a healthy state
     if [[ "$OPERATION" == "cleanup" ]]; then
-      STATUS=$(aws cloudformation describe-stacks \
-        --stack-name "$STACK_NAME" \
-        --query "Stacks[0].StackStatus" \
-        --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+      STATUS=$(current_stack_status "$STACK_NAME")
 
-      if [[ "$STATUS" == "CREATE_COMPLETE" || "$STATUS" == "UPDATE_COMPLETE" || "$STATUS" == "DOES_NOT_EXIST" ]]; then
+      # The healthy set is the one the deploy's FINAL STATUS CHECK accepts
+      # (stack_is_healthy), so cleanup can never delete a stack that deploy
+      # reported as fine. UNKNOWN means the read failed; deleting on a guess is
+      # the wrong default, so that stack is skipped and named.
+      if stack_is_healthy "$STATUS" || [[ "$STATUS" == "DOES_NOT_EXIST" ]]; then
         echo "Skipping '$STACK_NAME' (status: $STATUS)"
+        continue
+      fi
+      if [[ "$STATUS" == "UNKNOWN" ]]; then
+        echo "Skipping '$STACK_NAME': its state could not be read, so it is not deleted. Check it"
+        echo "in the CloudFormation console and run cleanup again."
         continue
       fi
 

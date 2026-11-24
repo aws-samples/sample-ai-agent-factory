@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Guard the five participant IAM policies against drift.
+"""Guard the seven participant IAM policies against drift.
 
-The same five documents are consumed in two places:
+The same seven documents are consumed in two places:
 
   1. static/cfn/workshop-iam-policy-{network,infra,core,core-2,core-3,core-4,core-5}.json
      -- attached to WSParticipantRole by contentspec.yaml.
@@ -19,7 +19,7 @@ twin.
   verify-ide-policy-parity.py --sync   rewrite the embedded copies from source
 
 It also re-checks the IAM managed-policy size quota (6144 chars minified), which
-is the constraint that forced these into five files in the first place.
+is the constraint that forced these into seven files in the first place.
 """
 
 import argparse

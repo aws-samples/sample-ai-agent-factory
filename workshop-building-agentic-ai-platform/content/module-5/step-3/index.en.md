@@ -7,7 +7,7 @@ weight: 83
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach, both achieve the same result.]{type="info"}
 
-Modules 2, 3a and 3b each left a trail: LiteLLM request logs on ECS, the interceptor Lambdas' audit records, the AgentCore Gateway's own spans. Until now each trail lived in its own log group with its own query. The Dataset integration you created in step 1 forwards all of them into one table, `default`, that you query with SQL, and Omni backfilled up to seven days of history when the space was created, so the gateway tests you ran in Module 3b are already there.
+Modules 2, 3a and 3b each left a trail: LiteLLM request logs on ECS, the interceptor Lambdas' audit records, the AgentCore Gateway's own spans. Until now each trail lived in its own log group with its own query. The Dataset integration the stack pre-provisioned (step 1 verified it) forwards all of them into one table, `default`, that you query with SQL, and Omni backfilled up to seven days of history when the space was created, so the gateway tests you ran in Module 3b are already there.
 
 ## CLI walkthrough
 
@@ -60,7 +60,7 @@ log_group=/aws/lambda/ac-gateway-response-interceptor  records=57
 log_group=/aws/lambda/workshop-flights-mcp  records=21
 :::
 
-The Dataset backfills for a few minutes after you create the integration in step 1, so a list that stops at the platform's own ECS and Lambda logs (no `aws/spans`, no interceptor groups) is not wrong, only early: wait five minutes and run the query again.
+The Dataset backfills for a few minutes after provisioning, so a list that stops at the platform's own ECS and Lambda logs (no `aws/spans`, no interceptor groups) is not wrong, only early: wait five minutes and run the query again.
 
 Each line is one platform layer: the LLM Gateway (Module 2), the AgentCore Gateway's spans (Module 3b), the interceptors' audit trail, the tool Lambdas. The exact names and counts depend on which modules you completed. If `aws/spans` is missing, run the gateway test from [Module 3b step 6](/module-3b/step-6) once and query again; the Gateway emits a span per `tools/call` only when Transaction Search is on, which it is.
 
@@ -94,7 +94,7 @@ Omni inspects the raw rows first, writes the SQL, runs it over the same `default
 Open **Application map** in the left navigation. Omni discovers services from the account's logs and spans (the space home page counts them: *Your space includes N services and 1 agent*) and, where span metrics exist, shows request rate, errors and duration. In the workshop account two components contribute spans: the AgentCore Gateway and, after Part B, the FAST runtime. The interceptor and tool Lambdas and the LLM Gateway contribute logs only, because none of them emits traces. The LLM Gateway is the component a platform team would instrument first, and the gap is small enough to describe exactly.
 
 ::::expand{header="Why LiteLLM is missing from the map, and how a platform team would add it"}
-The LLM Gateway task in `static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml` runs two containers: `litellm` (image `docker.litellm.ai/berriai/litellm-database`, tag pinned by the `LiteLLMImageTag` parameter) and `postgres`. Neither exports OpenTelemetry. LiteLLM also runs without a config file: the task definition passes it no command-line arguments and mounts nothing into it, and models live in Postgres (`STORE_MODEL_IN_DB`); `source/module-2-llm-gateway/reference/litellm-config.yaml` is documentation, not mounted. So Omni knows LiteLLM only from the `/ecs/workshop-llm-gateway-stack` log group.
+The LLM Gateway task in `static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml` runs two containers: `litellm` (image `ghcr.io/berriai/litellm-database`, tag pinned by the `LiteLLMImageTag` parameter) and `postgres`. Neither exports OpenTelemetry. LiteLLM also runs without a config file: the task definition passes it no command-line arguments and mounts nothing into it, and models live in Postgres (`STORE_MODEL_IN_DB`); `source/module-2-llm-gateway/reference/litellm-config.yaml` is documentation, not mounted. So Omni knows LiteLLM only from the `/ecs/workshop-llm-gateway-stack` log group.
 
 Closing the gap is two task-definition changes and one task-role change, with no application code:
 
