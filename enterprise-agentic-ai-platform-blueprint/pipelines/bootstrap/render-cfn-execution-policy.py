@@ -524,30 +524,46 @@ OPERATOR_ROLE_POLICY_ARNS = [
     "arn:aws:iam::aws:policy/CloudWatchOmniModelInferencePolicy",
     "arn:aws:iam::aws:policy/CloudWatchOmniAWSIntegrationPolicy",
 ]
+# Every role mutation IAM lets a policy condition on iam:PermissionsBoundary
+# (Service Authorization Reference) is gated on the boundary the role must
+# carry: creating a role and setting or widening its permissions, but also
+# changing its trust policy, description or session duration, detaching or
+# deleting policies and deleting the role. A role that predates the boundary
+# (created with operator credentials) therefore cannot be re-trusted or
+# otherwise touched through the execution role until an operator puts the
+# boundary on it. The operator role has no inline policy, so it gets no
+# PutRolePolicy / DeleteRolePolicy.
 OPERATOR_ROLE_GATED_ACTIONS = [
     "iam:AttachRolePolicy",
     "iam:CreateRole",
+    "iam:DeleteRole",
+    "iam:DetachRolePolicy",
     "iam:PutRolePermissionsBoundary",
+    "iam:UpdateAssumeRolePolicy",
+    "iam:UpdateRole",
+    "iam:UpdateRoleDescription",
 ]
 ROLE_BOUNDARY_GATED_ACTIONS = [
     "iam:AttachRolePolicy",
     "iam:CreateRole",
-    "iam:PutRolePermissionsBoundary",
-    "iam:PutRolePolicy",
-]
-ROLE_LIFECYCLE_ACTIONS = [
     "iam:DeleteRole",
     "iam:DeleteRolePolicy",
     "iam:DetachRolePolicy",
+    "iam:PutRolePermissionsBoundary",
+    "iam:PutRolePolicy",
+    "iam:UpdateAssumeRolePolicy",
+    "iam:UpdateRole",
+    "iam:UpdateRoleDescription",
+]
+# Reads and tags: no permissions change, and TagRole/UntagRole accept no
+# boundary condition key.
+ROLE_READ_AND_TAG_ACTIONS = [
     "iam:GetRole",
     "iam:GetRolePolicy",
     "iam:ListAttachedRolePolicies",
     "iam:ListRolePolicies",
     "iam:TagRole",
     "iam:UntagRole",
-    "iam:UpdateAssumeRolePolicy",
-    "iam:UpdateRole",
-    "iam:UpdateRoleDescription",
 ]
 
 # LogArchiveStack roles (CloudWatch Logs destination, S3 auto-delete provider):
@@ -717,10 +733,13 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     account's (`omni_domain_statements`).
     """
     operator_role = iam_arn(account, "role/CloudWatchOmniOperatorRole")
+    # The Region's hub roles only: the evaluation role is named for the Region,
+    # and the stack's generated role names start with the stack name, which
+    # carries the Region (AgenticAI-Omni-HubStack-<region>-...).
     hub_roles = [
         iam_arn(account, f"role/CloudWatchOmniDatasetIntegrationRole-{region}"),
-        iam_arn(account, "role/service-role/AgentCoreEvaluationRole-omni-*"),
-        iam_arn(account, "role/AgenticAI-Omni-HubStack-*"),
+        iam_arn(account, f"role/service-role/AgentCoreEvaluationRole-omni-{region}"),
+        iam_arn(account, f"role/AgenticAI-Omni-HubStack-{region}-*"),
     ]
     # The golden-gate runner (agenticai/omniGoldenGateRunnerPrincipalArns) is
     # assumed by the workload pipeline, never passed to a service.
@@ -757,10 +776,11 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             "Resource": "*",
         },
         {
-            # The operator role: created only with the AWS-managed Omni boundary
-            # and given only the documented AWS-managed Omni policies; it has no
-            # inline policy, so iam:PutRolePolicy is not granted on it.
-            "Sid": "CreateBoundedOperatorRole",
+            # The operator role: created, changed and deleted only while it
+            # carries the AWS-managed Omni boundary, and given only the documented
+            # AWS-managed Omni policies; it has no inline policy, so
+            # iam:PutRolePolicy is not granted on it.
+            "Sid": "ChangeBoundedOperatorRole",
             "Effect": "Allow",
             "Action": OPERATOR_ROLE_GATED_ACTIONS,
             "Resource": operator_role,
@@ -770,19 +790,20 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             },
         },
         {
-            # Every other hub role: created, or given or widened permissions, only
-            # while it carries the blueprint boundary (CreateRole checks the
-            # requested boundary, the other actions the one the role carries).
-            "Sid": "CreateBoundedHubRoles",
+            # Every other hub role: created, changed (permissions, trust,
+            # description) and deleted only while it carries this Region's
+            # blueprint boundary (CreateRole checks the requested boundary, the
+            # other actions the one the role carries).
+            "Sid": "ChangeBoundedHubRoles",
             "Effect": "Allow",
             "Action": ROLE_BOUNDARY_GATED_ACTIONS,
             "Resource": bounded_roles,
             "Condition": {"StringEquals": {"iam:PermissionsBoundary": hub_boundary}},
         },
         {
-            "Sid": "ManageOmniHubRoles",
+            "Sid": "ReadAndTagOmniHubRoles",
             "Effect": "Allow",
-            "Action": ROLE_LIFECYCLE_ACTIONS,
+            "Action": ROLE_READ_AND_TAG_ACTIONS,
             "Resource": managed_roles,
         },
         {

@@ -326,20 +326,41 @@ def test_bootstrap_refuses_application_work_directory(tmp_path: Path) -> None:
 def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     policy = render("audit")
     by_sid = {statement["Sid"]: statement for statement in policy["Statement"]}
-    manage = by_sid["ManageOmniHubRoles"]
+    manage = by_sid["ReadAndTagOmniHubRoles"]
     assert all(":role/" in resource for resource in manage["Resource"])
     assert all(f"::{AUDIT}:" in resource for resource in manage["Resource"])
     assert any(resource.endswith("role/CloudWatchOmniOperatorRole") for resource in manage["Resource"])
-    assert any("AgentCoreEvaluationRole-omni-" in resource for resource in manage["Resource"])
+    # Role names are pinned to the Region: no cross-Region wildcard families.
+    assert f"arn:aws:iam::{AUDIT}:role/service-role/AgentCoreEvaluationRole-omni-{REGION}" in manage["Resource"]
+    assert f"arn:aws:iam::{AUDIT}:role/AgenticAI-Omni-HubStack-{REGION}-*" in manage["Resource"]
+    assert not any(resource.endswith("AgentCoreEvaluationRole-omni-*") or resource.endswith("AgenticAI-Omni-HubStack-*") for resource in manage["Resource"])
     # The organization domain and its access role are the management account's.
     assert not any("CloudWatchOmniDomainAccessRole" in resource for resource in manage["Resource"])
     # The golden-gate runner is managed here but never passed to a service.
     assert any(resource.endswith(f"role/AgenticAIGoldenGateRunner-{REGION}") for resource in manage["Resource"])
-    # Creating a role, or setting or widening its permissions, is gated on one of
-    # the two boundaries; the lifecycle statement carries none of those actions
-    # and the boundary can never be removed.
-    gating = {"iam:AttachRolePolicy", "iam:CreateRole", "iam:PutRolePermissionsBoundary", "iam:PutRolePolicy"}
-    assert not gating & set(manage["Action"])
+    # Only reads and tags are unconditioned; every mutation IAM can condition on a
+    # boundary is gated (trust policy and deletion included), and the boundary
+    # can never be removed.
+    assert set(manage["Action"]) == {
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole",
+    }
+    gating = {
+        "iam:AttachRolePolicy",
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+    }
     operator = f"arn:aws:iam::{AUDIT}:role/CloudWatchOmniOperatorRole"
     omni_policies = {
         "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy",
@@ -348,16 +369,16 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     }
     # The operator role: only with the AWS-managed Omni boundary, only the
     # AWS-managed Omni policies attached, and never an inline policy.
-    operator_gate = by_sid["CreateBoundedOperatorRole"]
-    assert set(operator_gate["Action"]) == gating - {"iam:PutRolePolicy"}
+    operator_gate = by_sid["ChangeBoundedOperatorRole"]
+    assert set(operator_gate["Action"]) == gating - {"iam:PutRolePolicy", "iam:DeleteRolePolicy"}
     assert operator_gate["Resource"] == operator
     assert set(operator_gate["Condition"]) == {"StringEquals", "StringEqualsIfExists"}
     assert operator_gate["Condition"]["StringEquals"] == {
         "iam:PermissionsBoundary": "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy"
     }
     assert set(operator_gate["Condition"]["StringEqualsIfExists"]["iam:PolicyARN"]) == omni_policies
-    # Every other hub role: only while it carries the blueprint boundary.
-    hub_gate = by_sid["CreateBoundedHubRoles"]
+    # Every other hub role: only while it carries this Region's blueprint boundary.
+    hub_gate = by_sid["ChangeBoundedHubRoles"]
     assert set(hub_gate["Action"]) == gating
     assert set(hub_gate["Resource"]) == set(manage["Resource"]) - {operator}
     assert hub_gate["Condition"] == {
@@ -365,8 +386,8 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     }
     assert "iam:DeleteRolePermissionsBoundary" not in all_actions(policy)
     for statement in policy["Statement"]:
-        if gating & actions(statement):
-            assert statement["Sid"] in {"CreateBoundedOperatorRole", "CreateBoundedHubRoles"}, statement["Sid"]
+        if gating & actions(statement) and any(":role/" in resource and "AgenticAI-LogArchive" not in resource for resource in resources(statement)):
+            assert statement["Sid"] in {"ChangeBoundedOperatorRole", "ChangeBoundedHubRoles", "ApplicationSignalsPrerequisites"}, statement["Sid"]
         if "iam:PutRolePolicy" in actions(statement):
             assert operator not in resources(statement), statement["Sid"]
     pass_role = by_sid["PassOmniHubRolesToServices"]
@@ -592,7 +613,7 @@ def test_hub_role_boundary_is_rendered_and_gated_per_hub_region() -> None:
                 cwd=ROOT, check=True, capture_output=True, text=True,
             ).stdout
         )
-        gate = by_sid(audit, "CreateBoundedHubRoles")
+        gate = by_sid(audit, "ChangeBoundedHubRoles")
         names[region] = gate["Condition"]["StringEquals"]["iam:PermissionsBoundary"]
         assert names[region] == f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary-{region}"
         # The Regional statements of the boundary name only that Region.
@@ -604,6 +625,39 @@ def test_hub_role_boundary_is_rendered_and_gated_per_hub_region() -> None:
     assert names["eu-west-1"] != names["us-east-1"]
     readme = (ROOT / "README.md").read_text()
     assert "AgenticAI-OmniHubRoleBoundary-<REGION>" in readme and "once per hub Region" in readme
+
+
+def test_simulator_helper_keeps_one_decision_per_action_and_resource() -> None:
+    """IAM nests per-resource decisions under each action; the helper must not collapse them."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from test_render_cfn_execution_policy_simulation import flatten_decisions
+
+    alias = "arn:aws:kms:eu-west-1:444444444444:alias/agenticai/omni-space-eu-west-1"
+    key = "arn:aws:kms:eu-west-1:444444444444:key/11111111-2222-3333-4444-555555555555"
+    response = [
+        {
+            # Several resources: the top level is an ARN template with the aggregate.
+            "EvalActionName": "kms:CreateAlias",
+            "EvalResourceName": "arn:aws:kms:${Region}:${Account}:${ResourceType}/${Id}",
+            "EvalDecision": "implicitDeny",
+            "ResourceSpecificResults": [
+                {"EvalResourceName": alias, "EvalResourceDecision": "allowed"},
+                {"EvalResourceName": key, "EvalResourceDecision": "implicitDeny"},
+            ],
+        },
+        {
+            # One resource: the top level is that resource's decision.
+            "EvalActionName": "kms:Decrypt",
+            "EvalResourceName": key,
+            "EvalDecision": "allowed",
+            "ResourceSpecificResults": [],
+        },
+    ]
+    assert flatten_decisions(response) == {
+        ("kms:CreateAlias", alias): "allowed",
+        ("kms:CreateAlias", key): "implicitDeny",
+        ("kms:Decrypt", key): "allowed",
+    }
 
 
 def test_audit_policy_grants_no_key_creation_or_change_so_operators_own_the_hub_keys() -> None:

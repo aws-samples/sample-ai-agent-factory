@@ -73,6 +73,26 @@ def context(*pairs: tuple[str, str]) -> list[dict]:
     return [{"ContextKeyName": key, "ContextKeyValues": [value], "ContextKeyType": "string"} for key, value in pairs]
 
 
+def flatten_decisions(results: list[dict]) -> dict[tuple[str, str], str]:
+    """One decision per (action, resource) pair from a SimulateCustomPolicy response.
+
+    With several resource ARNs IAM returns one ``EvaluationResult`` per action
+    whose top-level ``EvalResourceName`` is an ARN template and whose
+    ``EvalDecision`` is the aggregate; the decision for each resource lives in
+    ``ResourceSpecificResults``. With one resource the top level is that
+    resource's decision.
+    """
+    decided: dict[tuple[str, str], str] = {}
+    for result in results:
+        specific = result.get("ResourceSpecificResults") or []
+        if specific:
+            for entry in specific:
+                decided[(result["EvalActionName"], entry["EvalResourceName"])] = entry["EvalResourceDecision"]
+        else:
+            decided[(result["EvalActionName"], result["EvalResourceName"])] = result["EvalDecision"]
+    return decided
+
+
 def decisions_per_resource(
     document: str,
     actions: list[str],
@@ -87,8 +107,7 @@ def decisions_per_resource(
         params["ContextEntries"] = ctx
     if boundary:
         params["PermissionsBoundaryPolicyInputList"] = [boundary]
-    results = iam.simulate_custom_policy(**params)["EvaluationResults"]
-    decided = {(r["EvalActionName"], r["EvalResourceName"]): r["EvalDecision"] for r in results}
+    decided = flatten_decisions(iam.simulate_custom_policy(**params)["EvaluationResults"])
     assert len(decided) == len(actions) * len(resources), decided
     return decided
 
@@ -189,6 +208,20 @@ def test_audit_role_creates_hub_roles_only_within_the_blueprint_boundary(audit_d
     # The boundary can never be removed, and no other role name is in reach.
     assert decisions(audit_document, ["iam:DeleteRolePermissionsBoundary"], [EVALUATION_ROLE]) == {"iam:DeleteRolePermissionsBoundary": "implicitDeny"}
     assert decisions(audit_document, ["iam:CreateRole"], [f"arn:aws:iam::{AUDIT}:role/SomethingElse"], bounded) == {"iam:CreateRole": "implicitDeny"}
+    # Trust, description and deletion changes are gated the same way: a role that
+    # predates the boundary cannot be re-trusted through the execution role.
+    trust = ["iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:DeleteRole", "iam:DetachRolePolicy", "iam:DeleteRolePolicy"]
+    assert set(decisions(audit_document, trust, [EVALUATION_ROLE], bounded).values()) == {"allowed"}
+    assert set(decisions(audit_document, trust, [EVALUATION_ROLE]).values()) == {"implicitDeny"}
+    assert set(decisions(audit_document, trust, [EVALUATION_ROLE], context(("iam:PermissionsBoundary", OMNI_BOUNDARY))).values()) == {"implicitDeny"}
+    operator_trust = ["iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:DeleteRole"]
+    assert set(decisions(audit_document, operator_trust, [OPERATOR_ROLE], context(("iam:PermissionsBoundary", OMNI_BOUNDARY))).values()) == {"allowed"}
+    assert set(decisions(audit_document, operator_trust, [OPERATOR_ROLE]).values()) == {"implicitDeny"}
+    # Another Region's evaluation role is out of reach even with this Region's boundary.
+    other_region_role = f"arn:aws:iam::{AUDIT}:role/service-role/AgentCoreEvaluationRole-omni-us-east-1"
+    assert decisions(audit_document, ["iam:UpdateAssumeRolePolicy"], [other_region_role], bounded) == {"iam:UpdateAssumeRolePolicy": "implicitDeny"}
+    # Reads and tags need no boundary (TagRole accepts no boundary condition key).
+    assert set(decisions(audit_document, ["iam:GetRole", "iam:TagRole"], [EVALUATION_ROLE]).values()) == {"allowed"}
 
 
 def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(boundary_document: str) -> None:
