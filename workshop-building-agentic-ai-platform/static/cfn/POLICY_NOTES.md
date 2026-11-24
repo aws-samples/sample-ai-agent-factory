@@ -643,17 +643,21 @@ nothing in the workshop calls it.
 
 `workshop-iam-policy-core.json` [`BedrockGuardrailWrite`] grants Create / Apply / Get /
 Update / Delete / CreateVersion and Tag / Untag on `guardrail/*`. It now carries the same
-`aws:RequestedRegion` fence as `BedrockCatalogNoResourceLevel`; before 2026-11 it was the
-only Bedrock statement with no condition at all. A scanner reads the open Update / Delete /
-Tag as a chance for a participant to modify a *platform-owned* guardrail — but there are
-none: no template declares `AWS::Bedrock::Guardrail`, and the only guardrails that exist are
-the three the participant creates themselves in Modules 2, 3a and 3b
-(`workshop-content-filter`, `workshop-tool-guardrail`, `workshop-tool-output-guardrail`).
-Guardrail ARNs use generated IDs, so a name prefix cannot scope them, and the create
-commands do not tag, so an `aws:ResourceTag` condition on Update / Delete would lock a
-participant out of their own guardrail unless tagging were also added to all five create
-sites — breakage for no security gain in a single-tenant workshop account. The region fence
-is the proportionate control.
+`aws:RequestedRegion` fence as `BedrockCatalogNoResourceLevel`; before 2026-11 the guardrail
+write statement had no region condition (`BedrockInvokeModelsScoped` still has no condition,
+its scope being the three model and inference-profile ARNs). A scanner reads the open Update /
+Delete / Tag as a chance for a participant to modify a *platform-owned* guardrail. The
+templates create none: no template declares `AWS::Bedrock::Guardrail`, and the only guardrails
+the workshop itself produces are the three the participant creates in Modules 2, 3a and 3b
+(`workshop-content-filter`, `workshop-tool-guardrail`, `workshop-tool-output-guardrail`). The
+`guardrail/*` resource scope does still reach any guardrail that already exists in the account
+in a permitted region, so this rationale assumes the dedicated, disposable account the
+workshop documents, not an account that also hosts platform guardrails. Guardrail ARNs use
+generated IDs, so a name prefix cannot scope them, and the create commands do not tag, so an
+`aws:ResourceTag` condition on Update / Delete would lock a participant out of their own
+guardrail unless tagging were also added to all six page/notebook creation sites — breakage
+for no security gain in a single-tenant workshop account. The region fence is the
+proportionate control.
 
 ## Assuming CDK bootstrap roles: three of five, never `cfn-exec` or `lookup`
 
@@ -899,11 +903,13 @@ altogether closes the whole class and makes the Deny unnecessary. (Build rubric 
 ## CloudWatch Omni is pre-provisioned; the participant has no Create/Delete on domains, spaces or Dataset integrations (2026-11)
 
 `workshop-agentcore-stack` (Omni resources added 2026-11-09; the instance-role grant is in
-`code-editor.yaml`, since Workshop Studio allows at most five templates) creates the Omni domain, space,
-Dataset integration and the two Space Admin access grants at provisioning — Workshop Studio events and the
-self-paced `deploy-cfn.sh` path alike — so participants only *verify* them in Module 5 step 1. Proven on a
-fresh event (16, 2026-11-09): every resource `CREATE_COMPLETE`, `WSParticipantRole` admitted from the
-console with no manual step. The trim followed the same day: `OmniDomainSpaceReadUpdate` keeps
+`code-editor.yaml`, since Workshop Studio allows at most five templates) creates the Omni domain, space and
+Dataset integration at provisioning on both paths, plus the two named Space Admin grants in a Workshop Studio
+event; a default self-paced `deploy-cfn.sh` run creates only the Code Editor grant, the deployer holding Omni's
+creator grant instead. Participants only *verify* them in Module 5 step 1. Reported from a fresh Workshop
+Studio event (2026-11-09; the Module 5 live-test notes kept outside this repository record the step 1 verify
+output with the four grant rows; no API output is retained here): every resource reached `CREATE_COMPLETE` and
+`WSParticipantRole` was admitted from the console with no manual step. The trim followed the same day: `OmniDomainSpaceReadUpdate` keeps
 `cloudwatch:Get/UpdateDomain`, `Get/UpdateSpace`, `TagResource` (no Create/Delete), and
 `OmniDatasetIntegrationRead` keeps `observabilityadmin:GetDatasetIntegration` only.
 `cloudwatch:CreateAccessGrant`/`DeleteAccessGrant` stay: step 1's "admit another console identity" block is
@@ -911,24 +917,35 @@ the self-heal for an account whose console identity differs from the deployer's.
 whose stack predates the Omni outputs to re-run `./scripts/self-service-deploy.sh` (in-place stack update);
 step 7 and notebook 08 no longer delete the resources — the stacks do. Core-4 dropped to 5,605 characters by IAM's count (5,587 as minified JSON).
 
-`CreateAccessGrant` validates that an `IAM_ROLE`/`IAM_USER` principal exists — probed live on event 16
-(`ValidationException: Principal does not exist for the supplied ARN` for a made-up role) — so a grant for
-`WSParticipantRole` would fail `workshop-agentcore-stack` in any account without that role, i.e. the whole
-self-paced path. `OmniParticipantSpaceAdminGrant` is therefore conditional on the `OmniConsolePrincipalArn`
-parameter: `contentspec.yaml` passes `{{.ParticipantRoleArn}}` (a Workshop Studio magic variable), and
-`deploy-cfn.sh` passes nothing unless `OMNI_CONSOLE_PRINCIPAL_ARN` names an identity other than the one
-running the deploy — then no console grant is created and Module 5 step 1's grant block covers it. The
-instance-role grant in `code-editor.yaml` is unconditional because the role is created in the same template.
+`CreateAccessGrant` validates that an `IAM_ROLE`/`IAM_USER` principal exists — observed during a live probe
+on a Workshop Studio event (`ValidationException: Principal does not exist for the supplied ARN` for a made-up
+role) — so a grant for `WSParticipantRole` would fail `workshop-agentcore-stack` in any account without that
+role, i.e. the whole self-paced path. `OmniParticipantSpaceAdminGrant` is therefore conditional on the
+`OmniConsolePrincipalArn` parameter: `contentspec.yaml` passes `{{.ParticipantRoleArn}}` (a Workshop Studio
+magic variable). `deploy-cfn.sh` by default passes nothing, so no explicit console grant is created; when
+`OMNI_CONSOLE_PRINCIPAL_ARN` names another identity, the script passes it and the stack creates its grant.
+When the override names the deployer itself and `workshop-agentcore-stack` has created no space so far
+(no `OmniSpaceId` output, and no live `OmniSpace` resource either, read with
+`cloudformation:DescribeStackResource` because a `CREATE_FAILED` stack has no outputs even when the space
+was created), the script drops it (the deployer becomes Space Admin as the space's creator, see below);
+when a space already exists it keeps the override, because the deploy policy has no
+`cloudwatch:ListAccessGrants` with which to check for an existing grant, and explains that a 409 on that
+grant means the identity is already Space Admin. A re-run that omits `OMNI_CONSOLE_PRINCIPAL_ARN` after an
+earlier run set it passes the parameter empty, and the conditional grant is removed; the script says so.
+Module 5 step 1's grant block covers anything added later. The instance-role grant in `code-editor.yaml`
+is unconditional because the role is created in the same template.
 
-The first version of `deploy-cfn.sh` passed the deploying identity itself, and the first self-paced deploy
-(a fresh account, as an IAM user, 2026-11-10) failed `workshop-agentcore-stack` on exactly that grant:
-`CreateAccessGrant` 409 `ConflictException: An active SPACE_ADMIN grant already exists for principal
-arn:aws:iam::<account>:user/<name> in space <space-id>`. Omni gives the identity that creates a space a system-managed Space
-Admin grant (`OmniDefaults-Space-Admin`), and on the self-paced path the deployer *is* the creator —
-CloudFormation runs as it, there is no `WSSystemRole` in between — so the stack's grant duplicated Omni's
-own. In an event the two identities differ (`WSSystemRole` creates, `WSParticipantRole` is granted), which
-is why events 16 and 17 never hit it. The script now resolves the deployer's principal only to refuse an
-override that names it.
+Reported observation (the first self-paced deploy, a fresh account as an IAM user, 2026-11-10; no captured
+API response is retained): the first version of `deploy-cfn.sh` passed the deploying identity itself, and
+`workshop-agentcore-stack` failed on exactly that grant with `CreateAccessGrant` 409 `ConflictException: An
+active SPACE_ADMIN grant already exists for principal arn:aws:iam::<account>:user/<name> in space
+<space-id>`. The mechanism is documented behaviour: Omni gives the identity that creates a space a
+system-managed Space Admin grant (`OmniDefaults-Space-Admin`), and on the self-paced path the deployer *is*
+the creator — CloudFormation runs as it, there is no `WSSystemRole` in between — so the stack's grant
+duplicated Omni's own. In a Workshop Studio event the two identities differ (`WSSystemRole` creates,
+`WSParticipantRole` is granted), which is why the event runs did not hit it. The script now recognises an
+override that names the deployer (by the role ARN when `iam get-role` is allowed, otherwise by partition,
+account and final role-name component) and handles it as described above.
 
 ## `s3:PutObjectAcl` on `fast-*/*`: own account only, never a public canned ACL (2026-11)
 

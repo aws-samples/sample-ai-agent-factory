@@ -282,25 +282,31 @@ Parameters:
       `openssl rand -hex 32`). Used by registry/auth-server to send metrics and by
       metrics-service for authentication.
 
-  # Cognito identifiers. Like the *ImageRepo / *ImageTag parameters above, these
-  # are NOT referenced by any resource: every task definition resolves the user
-  # pool, client, and domain with !ImportValue from the data stack's exports, so
-  # setting one has no effect. They are kept only so the parent
-  # workshop-registry-stack.yaml can keep passing them.
+  # Cognito identifiers. Deprecated unused parameters: like the *ImageRepo /
+  # *ImageTag parameters above, no resource references them. The auth-server and
+  # registry task definitions import the user pool, client and domain directly
+  # from the data-stack exports (${EnvironmentName}-CognitoUserPoolId,
+  # -CognitoWebAppClientId, -CognitoDomain), so setting one has no effect.
   CognitoUserPoolId:
     Type: String
     Default: ''
-    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
+    Description: >-
+      Deprecated unused parameter. The auth-server and registry task definitions
+      import the user pool ID directly from the data-stack export.
 
   CognitoWebAppClientId:
     Type: String
     Default: ''
-    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
+    Description: >-
+      Deprecated unused parameter. The auth-server and registry task definitions
+      import the web app client ID directly from the data-stack export.
 
   CognitoDomain:
     Type: String
     Default: ''
-    Description: Unused; kept for parent-stack compatibility (the value comes from ImportValue)
+    Description: >-
+      Deprecated unused parameter. The auth-server and registry task definitions
+      import the Cognito domain directly from the data-stack export.
 
 
 Conditions:

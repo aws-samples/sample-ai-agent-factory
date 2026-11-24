@@ -40,17 +40,30 @@ DEPLOY_FAILED_STACKS=""
 # Record a stack failure. Exits immediately unless CONTINUE_ON_FAILURE=1, in which
 # case the caller is expected to `continue` to the next stack. This cannot itself
 # `continue` -- a `continue` inside a function body does not affect the caller's
-# loop -- so every call site pairs it with one.
+# loop -- so every call site pairs it with one. The retry advice differs per
+# failure (an in-place update for most, `cleanup` first for a stack CloudFormation
+# refuses to update, nothing to clean for a rejected create-stack call), so every
+# call site prints its own before calling this; the line here stays neutral.
 record_stack_failure() {
   DEPLOY_FAILED_STACKS="${DEPLOY_FAILED_STACKS}$1 ($2)\n"
   if [[ "$CONTINUE_ON_FAILURE" != "1" ]]; then
     echo ""
-    echo "Rollback is disabled. Run with 'cleanup' to remove broken stacks before retrying deploy."
+    echo "Stopping here: stack '$1' failed ($2). See the message above for how to retry."
     exit 1
   fi
   echo "DEPLOY_CONTINUE_ON_FAILURE=1 -- recorded and continuing to the next stack."
   echo "Note: stacks that import this one's outputs will now fail on the missing"
   echo "      export rather than on a problem of their own."
+}
+
+# The retry advice for a stack that CloudFormation did operate on and that is now
+# CREATE_FAILED or UPDATE_FAILED. Not for a rejected API call (nothing changed) and
+# not for a state CloudFormation refuses to update (those print `cleanup` instead).
+retry_in_place_hint() {
+  echo "Rollback is disabled, so stack '$1' keeps every resource it did provision. Fix the"
+  echo "cause and run deploy again (the stack is updated in place and only what failed is"
+  echo "re-attempted), or run './deploy-cfn.sh cleanup' to delete every failed stack and"
+  echo "start over."
 }
 
 # Resolve the target region. Order: AWS_REGION > AWS_DEFAULT_REGION >
@@ -77,42 +90,126 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 # and so creates the space. On the self-paced path the identity running this
 # script is both: CloudFormation runs as it (no service role), Omni's CreateSpace
 # gives the creator a system-managed Space Admin grant (OmniDefaults-Space-Admin),
-# and a second SPACE_ADMIN grant for the same principal is rejected -- probed live
-# 2026-11-10: CreateAccessGrant 409 ConflictException "An active SPACE_ADMIN grant
-# already exists for principal", which failed workshop-agentcore-stack. So no
-# console grant is created by default; the deployer is already Space Admin. Set
-# OMNI_CONSOLE_PRINCIPAL_ARN (and OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE|IAM_USER)
-# to admit a DIFFERENT identity, the one your browser signs in to the console as
-# (Omni rejects a grant for a principal that does not exist). Module 5 step 1
-# shows how to add one later from the IDE.
+# and a second SPACE_ADMIN grant for the same principal is rejected. Observed on
+# the first self-paced deploy (2026-11-10, reported, no captured response kept):
+# CreateAccessGrant 409 ConflictException "An active SPACE_ADMIN grant already
+# exists for principal", which failed workshop-agentcore-stack. So no console
+# grant is created by default; the deployer that creates the space is already
+# Space Admin. Set OMNI_CONSOLE_PRINCIPAL_ARN (and
+# OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_ROLE|IAM_USER) to admit a DIFFERENT identity,
+# the one your browser signs in to the console as (Omni rejects a grant for a
+# principal that does not exist). Module 5 step 1 shows how to add one later from
+# the IDE.
 CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
+CALLER_PARTITION="${CALLER_ARN#arn:}"; CALLER_PARTITION="${CALLER_PARTITION%%:*}"
 OMNI_CONSOLE_PRINCIPAL_ARN="${OMNI_CONSOLE_PRINCIPAL_ARN:-}"
 OMNI_CONSOLE_PRINCIPAL_TYPE="${OMNI_CONSOLE_PRINCIPAL_TYPE:-IAM_ROLE}"
-# The deployer's own principal (a user as itself, an assumed role as its role ARN,
-# read back through iam get-role so a path such as aws-reserved/sso.amazonaws.com/
-# is kept), only to refuse an override that names it and would fail the stack.
-DEPLOYER_PRINCIPAL_ARN=""
+# The deployer's own principal, only to recognise an override that names it. A
+# user is itself. An assumed role is compared through its role ARN, read back with
+# iam get-role so a path such as aws-reserved/sso.amazonaws.com/ is kept. When
+# that read is refused (the scoped deploy policy does not grant it for SSO roles)
+# nothing is fabricated: the override is parsed as
+# arn:<partition>:iam::<account>:role/<path...>/<name> and names the deployer when
+# partition and account match the caller's and the final path component is the
+# caller's role name. The override itself is never rewritten.
+CALLER_ROLE_NAME=""
+DEPLOYER_ROLE_ARN=""
 case "$CALLER_ARN" in
-  arn:*:iam::*:user/*)
-    DEPLOYER_PRINCIPAL_ARN="$CALLER_ARN" ;;
   arn:*:sts::*:assumed-role/*/*)
     CALLER_ROLE_NAME="${CALLER_ARN#*:assumed-role/}"; CALLER_ROLE_NAME="${CALLER_ROLE_NAME%%/*}"
-    DEPLOYER_PRINCIPAL_ARN=$(aws iam get-role --role-name "$CALLER_ROLE_NAME" \
+    DEPLOYER_ROLE_ARN=$(aws iam get-role --role-name "$CALLER_ROLE_NAME" \
       --query Role.Arn --output text 2>/dev/null || true)
-    # A role this identity may not read: assume the path-less ARN.
-    if [[ -z "$DEPLOYER_PRINCIPAL_ARN" ]]; then
-      CALLER_PARTITION="${CALLER_ARN#arn:}"; CALLER_PARTITION="${CALLER_PARTITION%%:*}"
-      DEPLOYER_PRINCIPAL_ARN="arn:${CALLER_PARTITION}:iam::${ACCOUNT_ID}:role/${CALLER_ROLE_NAME}"
-    fi ;;
+    [[ "$DEPLOYER_ROLE_ARN" != "None" ]] || DEPLOYER_ROLE_ARN="" ;;
 esac
-if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" && "$OMNI_CONSOLE_PRINCIPAL_ARN" == "$DEPLOYER_PRINCIPAL_ARN" ]]; then
-  echo "CloudWatch Omni: OMNI_CONSOLE_PRINCIPAL_ARN names the identity running this deploy. It"
-  echo "                 becomes Space Admin when CloudFormation creates the space, and Omni"
-  echo "                 rejects a second grant for it, so no console grant is created."
-  OMNI_CONSOLE_PRINCIPAL_ARN=""
+# override_names_caller <arn>: succeeds when <arn> is the identity running this deploy.
+override_names_caller() {
+  local override="$1" o_partition o_account o_name
+  [[ -n "$override" ]] || return 1
+  case "$CALLER_ARN" in
+    arn:*:iam::*:user/*)
+      [[ "$override" == "$CALLER_ARN" ]] ;;
+    arn:*:sts::*:assumed-role/*/*)
+      if [[ -n "$DEPLOYER_ROLE_ARN" ]]; then
+        [[ "$override" == "$DEPLOYER_ROLE_ARN" ]]
+        return
+      fi
+      [[ "$override" == arn:*:iam::*:role/* ]] || return 1
+      o_partition="${override#arn:}"; o_partition="${o_partition%%:*}"
+      o_account="${override#arn:*:iam::}"; o_account="${o_account%%:*}"
+      o_name="${override##*/}"
+      [[ "$o_partition" == "$CALLER_PARTITION" && "$o_account" == "$ACCOUNT_ID" && "$o_name" == "$CALLER_ROLE_NAME" ]] ;;
+    *)
+      return 1 ;;
+  esac
+}
+# Whether a space already exists decides what an override naming the deployer
+# means. No space yet: this deploy creates it, the deployer becomes its creator
+# and holds Omni's own Space Admin grant, so the requested grant would be the
+# rejected duplicate and is dropped. Space already there: its creator may be a
+# different identity, and whether the deployer holds a grant could only be read
+# with cloudwatch:ListAccessGrants, which static/cfn/self-service-deploy-policy-*
+# does not grant, so the override is kept as asked and the one failure it can
+# produce is explained.
+#
+# "Already there" is read in two steps, because a failed stack has no outputs
+# even when its OmniSpace resource was created (the 2026-11-10 case: space
+# created, the grant after it failed, stack CREATE_FAILED). First the OmniSpaceId
+# output of a completed workshop-agentcore-stack; failing that, the physical ID
+# of the stack's OmniSpace resource (cloudformation:DescribeStackResource is in
+# self-service-deploy-policy-1). Both guarded with || true: a missing stack is
+# the normal case on a first deploy. Read for every deploy so the summary below
+# says whether this run creates the space or updates an existing one; destroy
+# and cleanup never use it.
+EXISTING_OMNI_SPACE_ID=""
+if [[ "$OPERATION" == "deploy" ]]; then
+  EXISTING_OMNI_SPACE_ID=$(aws cloudformation describe-stacks \
+    --stack-name workshop-agentcore-stack \
+    --query "Stacks[0].Outputs[?OutputKey=='OmniSpaceId'].OutputValue" \
+    --output text 2>/dev/null || true)
+  [[ "$EXISTING_OMNI_SPACE_ID" != "None" ]] || EXISTING_OMNI_SPACE_ID=""
+  if [[ -z "$EXISTING_OMNI_SPACE_ID" ]]; then
+    # A resource a rollback already deleted keeps its physical ID, so skip it.
+    EXISTING_OMNI_SPACE_ID=$(aws cloudformation describe-stack-resource \
+      --stack-name workshop-agentcore-stack --logical-resource-id OmniSpace \
+      --query "[StackResourceDetail][?ResourceStatus!='DELETE_COMPLETE'].PhysicalResourceId | [0]" \
+      --output text 2>/dev/null || true)
+    [[ "$EXISTING_OMNI_SPACE_ID" != "None" ]] || EXISTING_OMNI_SPACE_ID=""
+  fi
+fi
+if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]] && override_names_caller "$OMNI_CONSOLE_PRINCIPAL_ARN"; then
+  if [[ -z "$EXISTING_OMNI_SPACE_ID" ]]; then
+    echo "CloudWatch Omni: OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_ARN) names the"
+    echo "                 identity running this deploy, and workshop-agentcore-stack has created no"
+    echo "                 space so far. It becomes Space Admin when CloudFormation creates the"
+    echo "                 space, and Omni rejects a second grant for it, so no console grant is"
+    echo "                 created."
+    OMNI_CONSOLE_PRINCIPAL_ARN=""
+  else
+    echo "CloudWatch Omni: OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_ARN) names the"
+    echo "                 identity running this deploy, and space $EXISTING_OMNI_SPACE_ID already"
+    echo "                 exists. Whether this identity created it (and so already holds Omni's"
+    echo "                 Space Admin grant) cannot be read with the deploy policy, so the grant"
+    echo "                 is requested as asked. If workshop-agentcore-stack then fails on"
+    echo "                 OmniParticipantSpaceAdminGrant with a 409 ConflictException ('An active"
+    echo "                 SPACE_ADMIN grant already exists'), this identity is already Space Admin:"
+    echo "                 re-run without OMNI_CONSOLE_PRINCIPAL_ARN."
+  fi
 fi
 if [[ -n "$OMNI_CONSOLE_PRINCIPAL_ARN" ]]; then
   echo "CloudWatch Omni console grant will go to: $OMNI_CONSOLE_PRINCIPAL_ARN ($OMNI_CONSOLE_PRINCIPAL_TYPE)"
+elif [[ -n "$EXISTING_OMNI_SPACE_ID" ]]; then
+  # contentspec passes OmniConsolePrincipalArn={{.ParticipantRoleArn}}, which this
+  # script resolves to the (now empty) override, and the template's grant is
+  # conditional on a non-empty value. So an empty override is not "no change": it
+  # removes a participant-space-admin grant that an earlier run's
+  # OMNI_CONSOLE_PRINCIPAL_ARN created. Omni's own creator grant and the
+  # code-editor instance-role grant are untouched.
+  echo "CloudWatch Omni: space $EXISTING_OMNI_SPACE_ID already exists; this deploy updates it."
+  echo "                 No console grant is requested, so a participant-space-admin grant"
+  echo "                 created by an earlier run's OMNI_CONSOLE_PRINCIPAL_ARN is removed unless"
+  echo "                 you pass the same value again. Omni's own creator grant and the Code"
+  echo "                 Editor instance-role grant stay. To admit a console identity, set"
+  echo "                 OMNI_CONSOLE_PRINCIPAL_ARN, or add a grant later (Module 5 step 1)."
 else
   echo "CloudWatch Omni: $CALLER_ARN creates the space and becomes its Space Admin"
   echo "                 (Omni's own grant). To admit a different console identity, set"
@@ -396,26 +493,49 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
     echo "[$((i + 1))/$TEMPLATES] Deploying stack '$STACK_NAME' from $TEMPLATE_LOCATION ..."
 
-    # A stack left in a failed state by an earlier run is not repaired by running
-    # deploy again: ROLLBACK_COMPLETE rejects every update, and a CREATE_FAILED
-    # stack (rollback is disabled below) only moves when the update changes
-    # something. When the fix removes the failed resource instead, the change set
-    # is empty, `--no-fail-on-empty-changeset` reports success, the stack stays
-    # CREATE_FAILED with no outputs, and the next stack dies on a missing export.
-    # Observed 2026-11-10 on the first self-paced deploy: workshop-agentcore-stack
-    # "deployed successfully", then code-editor "No export named ac-OmniSpaceId
-    # found". The failure message already asks for `cleanup`; enforce it.
+    # A stack left in a failed state by an earlier run. Three states cannot be
+    # repaired by an update and are refused here: ROLLBACK_COMPLETE (a failed
+    # first create whose rollback finished; CloudFormation rejects every update
+    # and only delete is left), ROLLBACK_FAILED (that rollback got stuck; same
+    # outcome, and only reachable after a manual rollback-stack since this script
+    # deploys with --disable-rollback) and DELETE_FAILED (a delete that got
+    # stuck). A CREATE_FAILED or UPDATE_FAILED stack is different: rollback was
+    # disabled, so the stack keeps every resource that did provision, and
+    # CloudFormation lets the fixed template be applied as an update that
+    # re-attempts only what failed. Sending those through `cleanup` would delete
+    # the healthy resources too, so they proceed. UPDATE_ROLLBACK_FAILED (again
+    # only after a manual rollback) also proceeds; if CloudFormation rejects the
+    # update, the failure path names `continue-update-rollback` and `cleanup` as
+    # the ways out.
+    #
+    # Proceeding is only safe because of the FINAL STATUS CHECK after the deploy:
+    # an update that changes nothing leaves the stack exactly as failed as it was.
+    # Reported from the first self-paced deploy (2026-11-10; no captured output is
+    # kept in this repository): the fix removed the
+    # failed resource, the change set was empty, `--no-fail-on-empty-changeset`
+    # reported workshop-agentcore-stack "deployed successfully", the stack stayed
+    # CREATE_FAILED with no outputs, and code-editor died on "No export named
+    # ac-OmniSpaceId found". The check below turns that into a recorded failure.
     PRIOR_STATUS=$(aws cloudformation describe-stacks \
       --stack-name "$STACK_NAME" \
       --query "Stacks[0].StackStatus" \
       --output text 2>/dev/null || echo "DOES_NOT_EXIST")
     case "$PRIOR_STATUS" in
-      *FAILED|ROLLBACK_COMPLETE)
-        echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. Updating it"
-        echo "cannot make it healthy; remove it first, then run deploy again:"
+      ROLLBACK_COMPLETE|ROLLBACK_FAILED|DELETE_FAILED)
+        echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. CloudFormation"
+        echo "does not accept an update in this state; remove it first, then run deploy again:"
         echo "  ./deploy-cfn.sh cleanup"
         record_stack_failure "$STACK_NAME" "$PRIOR_STATUS from an earlier run"
         continue ;;
+      CREATE_FAILED|UPDATE_FAILED)
+        echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. Rollback was"
+        echo "disabled, so the resources it did provision are still there; the update below"
+        echo "re-attempts only what failed. Its final state is checked before this run moves on." ;;
+      UPDATE_ROLLBACK_FAILED)
+        echo "Stack '$STACK_NAME' is in state $PRIOR_STATUS from an earlier run. An update is"
+        echo "attempted; if CloudFormation rejects it, run"
+        echo "  aws cloudformation continue-update-rollback --stack-name $STACK_NAME"
+        echo "and deploy again, or remove the stack with ./deploy-cfn.sh cleanup." ;;
     esac
 
     # Templates with nested stacks (TemplateURL) must use create/update-stack with
@@ -462,7 +582,8 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
       if [[ "$EXISTING_STATUS" == "DOES_NOT_EXIST" ]]; then
         if ! aws cloudformation create-stack "${CREATE_ARGS[@]}"; then
-          echo "Create failed for '$STACK_NAME'."
+          echo "Create failed for '$STACK_NAME': CloudFormation rejected the create-stack call, so"
+          echo "no stack was created. Fix the cause reported above and run deploy again."
           record_stack_failure "$STACK_NAME" "create-stack call rejected"
           continue
         fi
@@ -473,25 +594,40 @@ if [[ "$OPERATION" == "deploy" ]]; then
           aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
-            --output table
+            --output table || true
+          retry_in_place_hint "$STACK_NAME"
           record_stack_failure "$STACK_NAME" "create"
           continue
         fi
       else
-        if ! aws cloudformation update-stack "${CREATE_ARGS[@]}"; then
-          echo "Update failed for '$STACK_NAME'."
+        # update-stack has no --no-fail-on-empty-changeset: an unchanged template
+        # is rejected with "No updates are to be performed." That is not a
+        # failure of the stack, so it falls through to the final status check,
+        # which is what decides whether an unchanged stack is healthy.
+        if UPDATE_OUT=$(aws cloudformation update-stack "${CREATE_ARGS[@]}" 2>&1); then
+          echo "$UPDATE_OUT"
+          echo "Waiting for stack update..."
+          if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"; then
+            echo ""
+            echo "Stack update failed for '$STACK_NAME'. Fetching failure details ..."
+            aws cloudformation describe-stack-events \
+              --stack-name "$STACK_NAME" \
+              --query "StackEvents[?ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
+              --output table || true
+            retry_in_place_hint "$STACK_NAME"
+            record_stack_failure "$STACK_NAME" "update"
+            continue
+          fi
+        elif grep -q "No updates are to be performed" <<<"$UPDATE_OUT"; then
+          echo "No changes to apply to '$STACK_NAME'; checking its current state."
+        else
+          echo "$UPDATE_OUT"
+          echo "Update failed for '$STACK_NAME': CloudFormation rejected the update-stack call, so"
+          echo "the stack is unchanged (state $PRIOR_STATUS). Fix the cause reported above and run"
+          echo "deploy again. If CloudFormation refuses to update a stack in that state, run"
+          echo "  aws cloudformation continue-update-rollback --stack-name $STACK_NAME"
+          echo "(for UPDATE_ROLLBACK_FAILED) or remove the stack with ./deploy-cfn.sh cleanup."
           record_stack_failure "$STACK_NAME" "update-stack call rejected"
-          continue
-        fi
-        echo "Waiting for stack update..."
-        if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"; then
-          echo ""
-          echo "Stack update failed for '$STACK_NAME'. Fetching failure details ..."
-          aws cloudformation describe-stack-events \
-            --stack-name "$STACK_NAME" \
-            --query "StackEvents[?ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
-            --output table
-          record_stack_failure "$STACK_NAME" "update"
           continue
         fi
       fi
@@ -520,14 +656,44 @@ if [[ "$OPERATION" == "deploy" ]]; then
         echo ""
         echo "Deploy failed for stack '$STACK_NAME'. Fetching failure details ..."
         echo ""
+        # `|| true`: the stack may not exist (a rejected create) or the events read
+        # may be refused; neither should stop the failure from being recorded.
         aws cloudformation describe-stack-events \
           --stack-name "$STACK_NAME" \
           --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
-          --output table
+          --output table || true
+        retry_in_place_hint "$STACK_NAME"
         record_stack_failure "$STACK_NAME" "deploy"
         continue
       fi
     fi
+
+    # FINAL STATUS CHECK, both paths. A successful call above only proves that
+    # CloudFormation accepted and finished the operation. An empty change set on
+    # a stack that was already failed (the `--no-fail-on-empty-changeset` case
+    # for simple templates, "No updates are to be performed" for nested ones)
+    # finishes with the stack still CREATE_FAILED or UPDATE_FAILED and with no
+    # outputs, and the next stack would die on a missing export. Success is
+    # CREATE_COMPLETE, UPDATE_COMPLETE, or UPDATE_ROLLBACK_COMPLETE: the last is
+    # the stable state with outputs that `continue-update-rollback` (which the
+    # UPDATE_ROLLBACK_FAILED note above asks for) lands in, and a re-run whose
+    # template is unchanged must not report it as a failure.
+    FINAL_STATUS=$(aws cloudformation describe-stacks \
+      --stack-name "$STACK_NAME" \
+      --query "Stacks[0].StackStatus" \
+      --output text 2>/dev/null || echo "UNKNOWN")
+    case "$FINAL_STATUS" in
+      CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+      *)
+        echo ""
+        echo "Stack '$STACK_NAME' finished in state $FINAL_STATUS, not CREATE_COMPLETE,"
+        echo "UPDATE_COMPLETE or UPDATE_ROLLBACK_COMPLETE. The deploy call reported no error,"
+        echo "which happens when nothing in the template changed: an unchanged failed stack"
+        echo "stays failed and exports nothing."
+        retry_in_place_hint "$STACK_NAME"
+        record_stack_failure "$STACK_NAME" "final status $FINAL_STATUS"
+        continue ;;
+    esac
 
     echo "Stack '$STACK_NAME' deployed successfully."
 
@@ -549,7 +715,9 @@ if [[ "$OPERATION" == "deploy" ]]; then
       [[ -n "$s" ]] && echo "  - $s"
     done
     echo ""
-    echo "Rollback is disabled. Run with 'cleanup' to remove broken stacks before retrying deploy."
+    echo "Each failure above says how to retry it: a CREATE_FAILED or UPDATE_FAILED stack keeps"
+    echo "what it provisioned and is updated in place by the next deploy; a stack CloudFormation"
+    echo "refuses to update must be removed first with './deploy-cfn.sh cleanup'."
     exit 1
   fi
 

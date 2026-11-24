@@ -138,7 +138,7 @@ The response should come through normally — the guardrail only blocks harmful 
 
 ## 5.5 Caching demonstration
 
-LiteLLM exposes a cache-hit surface for identical requests. The commands below demonstrate the API contract:
+LiteLLM can serve identical requests from a response cache when caching is configured. The workshop deployment does not enable it, so the commands below demonstrate the API contract and the timing method, not a cache hit:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 # First request — always calls Bedrock
@@ -147,14 +147,14 @@ time curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "What is 2+2?"}], "max_tokens": 10, "temperature": 0}' > /dev/null
 
-# Second identical request — may be served from cache
+# Second identical request: also calls Bedrock here (no response cache is configured)
 time curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "What is 2+2?"}], "max_tokens": 10, "temperature": 0}' > /dev/null
 :::
 
-::alert[**Expected behaviour in this workshop.** The proxy runs with `cache: true` but no shared backend (no Redis), so LiteLLM falls back to an in-memory cache that is per-container and per-process. The second call may or may not hit the cache depending on which ECS task handled it. If both calls take similar time, that is expected here — the goal of this exercise is to show the API contract. In a production deployment you would add a Redis backend (`cache_params:`) so hits are shared across tasks.]{type="info"}
+::alert[**Expected behaviour in this workshop.** Both calls take similar time. The workshop's task definition and setup scripts do not configure response caching, so the gateway never serves a cached response here. The `reference/litellm-config.yaml` file in `source/module-2-llm-gateway` illustrates one way to enable it (`litellm_settings: cache: true`); in a production deployment you would also add a Redis backend (`cache_params:`) so hits are shared across all gateway tasks instead of living in one container's memory.]{type="info"}
 
 ## 5.6 Platform governance summary
 

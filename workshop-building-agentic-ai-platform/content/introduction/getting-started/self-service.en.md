@@ -155,7 +155,7 @@ This script:
 
 The AgentCore stack also pre-provisions the CloudWatch Omni domain and space that Module 5 uses. The identity running the deploy creates the space, and Omni makes the creator its first Space Admin (an IAM user as itself, an assumed role as its role ARN), so you can open Omni from the CloudWatch console later with no extra grant; the script prints `CloudWatch Omni: … creates the space and becomes its Space Admin`. If you deploy with one identity but use the console as another, set `OMNI_CONSOLE_PRINCIPAL_ARN` to that role or user ARN (and `OMNI_CONSOLE_PRINCIPAL_TYPE=IAM_USER` for a user) before running the script, and the stack grants it Space Admin too — or add the grant later from the IDE, as Module 5 step 1 shows.
 
-::alert[The full deployment takes approximately **30–45 minutes** (the Registry stack alone is 20–30 minutes). Keep the terminal open — the script runs synchronously and reports each stack as it completes. If a stack fails, the script prints the failure reason; run `./deploy-cfn.sh cleanup` to remove broken stacks before retrying.]{type="info"}
+::alert[The full deployment takes approximately **30–45 minutes** (the Registry stack alone is 20–30 minutes). Keep the terminal open — the script runs synchronously and reports each stack as it completes. If a stack fails, the script prints the failure reason and stops. A stack left in `CREATE_FAILED` or `UPDATE_FAILED` keeps the resources it did create (rollback is disabled), so fix the cause and run the deploy again to update it in place; only a stack in `ROLLBACK_COMPLETE`, `ROLLBACK_FAILED` or `DELETE_FAILED` has to be removed first with `./deploy-cfn.sh cleanup`.]{type="info"}
 
 When the script finishes it prints a table like this — keep these values handy:
 

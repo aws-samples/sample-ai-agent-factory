@@ -4,7 +4,9 @@
 """Test the LLM Gateway (LiteLLM Proxy) with various exercises.
 
 Demonstrates: health checks, model listing, chat completions, virtual key
-spend tracking, caching, multi-model routing, and Strands Agent integration.
+spend tracking, a response-cache check, multi-model routing, and Strands Agent
+integration. The workshop gateway does not enable LiteLLM response caching (no
+config file is mounted), so the cache check is expected to report no hit.
 
 Usage:
     python scripts/test_gateway.py [--url https://...] [--api-key ...]
@@ -98,7 +100,9 @@ def test_caching(client: LLMGatewayClient) -> None:
     section("5. Caching Demonstration")
     prompt = "What is 2 + 2? Reply with just the number."
 
-    print("  Sending the same request twice to demonstrate caching...")
+    print("  Sending the same request twice. The workshop gateway does not enable LiteLLM")
+    print("  response caching, so expect similar timings; a cache-enabled gateway would")
+    print("  answer the second request without calling the model.")
     print()
 
     start = time.time()
@@ -120,9 +124,10 @@ def test_caching(client: LLMGatewayClient) -> None:
         return
 
     if t2 < t1 * 0.5:
-        print(f"\n  Cache hit! Second request was {t1/t2:.1f}x faster.")
+        print(f"\n  Second request was {t1/t2:.1f}x faster. With no response cache configured,"
+              " this is timing variance, not a cache hit.")
     else:
-        print("\n  Both requests took similar time — caching may need a moment to warm up.")
+        print("\n  Both requests took similar time: expected, no response cache is configured on this deployment.")
 
 
 def test_multi_model(client: LLMGatewayClient) -> None:

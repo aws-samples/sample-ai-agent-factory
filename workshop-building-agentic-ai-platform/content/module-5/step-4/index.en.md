@@ -9,11 +9,19 @@ weight: 84
 
 Module 4's observe page showed the agent's runtime logs and a trace in the GenAI Observability dashboard. Here you read a whole conversation the way Omni represents it: a session of traces, each trace a tree of spans for the model calls (through the LLM Gateway), the tool calls (through the AgentCore Gateway), Memory and the Code Interpreter, with the prompt and response text on the spans.
 
+## Scenario: trace a request you made in the FAST UI
+
+Start with a request of your own. In the FAST UI from [Run the agent](/module-4/run-the-agent), send the Test 3 prompt:
+
+> Search for flights from SFO to Tokyo for 2026-09-20
+
+Then open your space and choose **Agent sessions** (under *Agent observability*). The list shows each session's first input and last output, so find the row whose first input is that prompt and select it: the session shows its traces, one per turn, and the span table in Step 3 below tells you what each span proves. If you sent earlier prompts in the same browser tab, they are in the same row, because the frontend keeps one session for the life of the page; look for the first prompt you sent there. If you want this prompt to start a new session, reload the FAST page before sending it. The FAST frontend generates a random session ID when the chat loads and never displays it, so there is no ID to search for. That is why the CLI walkthrough drives a conversation with a session ID you choose: step 5 reads that session ID and the agent's service name from the file the blocks below write, and step 6 relies on the online evaluation step 5 configures with that service name, so Step 1 is required even if you traced your UI request here.
+
 ## CLI walkthrough
 
-### Step 1: Drive one conversation with a known session ID
+### Step 1: Drive one conversation with a known session ID (required for steps 5 and 6)
 
-The frontend generates its own session IDs. To find your traces quickly, send a three-turn conversation from the terminal with a session ID you choose. This is the same invocation path as Test 5 on the [Run the agent](/module-4/run-the-agent) page (throwaway Cognito user, access token, HTTPS POST):
+The frontend generates its own session IDs and never shows them. To find your traces quickly, and to give step 5 a session it can name, send a three-turn conversation from the terminal with a session ID you choose. This is the same invocation path as Test 5 on the [Run the agent](/module-4/run-the-agent) page (throwaway Cognito user, access token, HTTPS POST):
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -114,7 +122,7 @@ Read the tree top to bottom and match it to the platform you built:
 | `invoke_agent travel_agent` root | One trace per turn; the session ID and user ID from `trace_attributes` in `travel_agent.py` are on it |
 | `execute_event_loop_cycle` | One Strands reasoning cycle; a turn that calls tools has several, nested |
 | `chat` (with its `POST`) and `gen_ai.*` attributes, `server.address` = the LLM Gateway URL | Every model call went through Module 2's gateway, with the prompt and response text attached (the Module 4 patch); the token count sits on the span |
-| `execute_tool gateway_tg-workshop-…` → `mcp tools/call tg-workshop-…` | The agent's tool call and the MCP request the AgentCore Gateway received for it; latency and status per tool, and a `Fault` marker when the tool returned an error |
+| `execute_tool gateway_tg-workshop-…` → `mcp tools/call tg-workshop-…` | The agent's tool call and, nested under it, the runtime's client-side span for the MCP request it sent to the AgentCore Gateway (every span in this tree carries the runtime's service name, so this is the call as the agent saw it, not the Gateway's own span); latency and status per tool, and a `Fault` marker when the tool returned an error |
 | `Bedrock AgentCore.CreateEvent` | The session manager stored a turn in AgentCore Memory |
 | `execute_tool execute_python_securely` → `Bedrock AgentCore.StartCodeInterpreterSession` / `InvokeCodeInterpreter` (third turn) | The Code Interpreter sandbox ran; usually the longest tool span in the trace |
 

@@ -35,7 +35,7 @@ The agent should:
 3. Use the Code Interpreter to calculate total costs
 4. Present a structured itinerary with flight options, hotel recommendations, and pricing
 
-You should see tool invocations like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat — this confirms the tools are flowing through the gateway rather than being answered from the model's own knowledge.
+You should see tool chips like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat. A chip names the tool the agent requested and the gateway target it asked; click it and check that the expanded result is real flight data, not an error, before concluding the call went through the gateway rather than being answered from the model's own knowledge.
 
 The name has two halves, and both are evidence. The prefix is the `prefix=` argument you gave `MCPClient` in `tools/gateway.py`, so it depends on which connect page you followed:
 
@@ -44,7 +44,7 @@ The name has two halves, and both are evidence. The prefix is the `prefix=` argu
 | **Module 3a** — [Connect to Tools Gateway (MCP)](../connect-gateway-mcp/) | `prefix="gw"` | `gw_tg-workshop-flights-mcp___search_flights` |
 | **Module 3b** — [Connect to Tools Gateway (AgentCore)](../connect-gateway-agentcore/) | `prefix="gateway"` | `gateway_tg-workshop-flights-mcp___search_flights` |
 
-The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** that served the call — so the tool name tells you which Lambda behind which gateway produced the answer.
+The second half, `tg-workshop-flights-mcp`, is the name of the **gateway target** that served the call — so the tool name tells you which Lambda behind which gateway was asked, and the expanded result shows whether it answered.
 
 ## Test 2: budget comparison
 
@@ -61,6 +61,8 @@ Test a different date to verify the mock data coverage:
 > Search for flights from SFO to Tokyo for 2026-09-20
 
 The agent should call `search_flights` and return results from the Flights MCP Lambda's mock data.
+
+Remember this request: [Module 5](/module-5) is where it is traced end to end in CloudWatch Omni, from the prompt you typed down to the model call and the gateway tool call that answered it.
 
 ## Test 4: Code Interpreter
 
@@ -116,9 +118,9 @@ echo "LLM Gateway spend before: $SPEND_BEFORE"
 
 # The session ID must be at least 33 characters. The entrypoint reads the prompt
 # and the session ID from the JSON body, so both are sent in the payload too.
-# The prompt carries a one-off marker: the LLM Gateway caches identical requests
-# (Module 2 turned caching on), and a cache hit adds no spend, which would make a
-# repeat run of this block report a false FAIL.
+# The prompt carries a one-off marker so every run is a distinct request. The
+# workshop's LLM Gateway does not enable LiteLLM response caching, but on a gateway
+# that does, a cache hit adds no spend and a repeat run would report a false FAIL.
 SESSION_ID="smoke-$(openssl rand -hex 16)-session"
 PROMPT="Search for flights from SFO to TYO on 2026-09-15 (request $(openssl rand -hex 3))"
 ENCODED_ARN=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$RUNTIME_ARN")

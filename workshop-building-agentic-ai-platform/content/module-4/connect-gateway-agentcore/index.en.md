@@ -215,7 +215,7 @@ After redeployment, open the Amplify URL and ask:
 
 > Plan a trip from SFO to Tokyo for 2026-09-15 to 2026-09-18, 2 guests
 
-The agent should call `search_flights` and `search_hotels` through the gateway and return real results.
+The agent should call `search_flights` and `search_hotels` through the gateway and return real results. The tool chips in the chat now read `gateway_tg-workshop-flights-mcp___search_flights` and `gateway_tg-workshop-hotels-mcp___search_hotels`: the `gateway_` prefix is unchanged from the baseline, and the target segment names the Module 3b gateway target instead of FAST's `sample-tool-target`.
 
 ## Notebook walkthrough (optional alternative)
 

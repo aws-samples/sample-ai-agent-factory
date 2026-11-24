@@ -135,7 +135,7 @@ Each event represents a conversation turn stored by the `AgentCoreMemorySessionM
 
 This observability stack demonstrates the patterns needed for an enterprise solution — every layer is instrumented and auditable.
 
-Each surface answers a question about one component. [Module 5](/module-5) puts them in one CloudWatch Omni space, reads a whole conversation as a session of traces, and adds the question none of these surfaces answers: was the answer any good.
+Each surface answers a question about one component. [Module 5](/module-5) puts them in one CloudWatch Omni space, reads a whole conversation as a session of traces (step 4, *Agent traces and sessions*, is where you read the agent trace span by span), and adds the question none of these surfaces answers: was the answer any good.
 
 ## Notebook walkthrough (optional alternative)
 
