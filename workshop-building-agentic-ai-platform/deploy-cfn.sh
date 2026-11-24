@@ -720,8 +720,8 @@ if [[ "$OPERATION" == "deploy" ]]; then
         echo "Waiting for stack creation..."
         if ! aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME"; then
           echo ""
-          echo "Waiting for '$STACK_NAME' ended with an error: either the create failed or the"
-          echo "waiter gave up while CloudFormation was still working. Reading the outcome ..."
+          echo "Waiting for '$STACK_NAME' ended with an error (details above). That alone"
+          echo "does not establish the stack's outcome; reading its current state ..."
           aws cloudformation describe-stack-events \
             --stack-name "$STACK_NAME" \
             --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
@@ -742,8 +742,8 @@ if [[ "$OPERATION" == "deploy" ]]; then
           echo "Waiting for stack update..."
           if ! aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"; then
             echo ""
-            echo "Waiting for '$STACK_NAME' ended with an error: either the update failed or the"
-            echo "waiter gave up while CloudFormation was still working. Reading the outcome ..."
+            echo "Waiting for '$STACK_NAME' ended with an error (details above). That alone"
+            echo "does not establish the stack's outcome; reading its current state ..."
             aws cloudformation describe-stack-events \
               --stack-name "$STACK_NAME" \
               --query "StackEvents[?ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId, ResourceStatusReason]" \
@@ -916,8 +916,9 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
           echo "  Deleted GuardDuty security group $sg"
         else
           echo "  WARNING: deletion of GuardDuty security group $sg could not be confirmed. If it"
-          echo "           remains, it may block VPC deletion (a dependency on an endpoint that is"
-          echo "           still being removed clears on its own); check the error and the group:"
+          echo "           remains, it may block VPC deletion. If an endpoint is still using this group,"
+          echo "           wait for confirmed endpoint removal and retry deleting the group."
+          echo "           Check the error and the group:"
           echo "           $sg_out"
           if grep -qiE 'UnauthorizedOperation|AccessDenied|not authorized' <<<"$sg_out"; then
             echo "           This needs ec2:DeleteSecurityGroup on a resource GuardDuty owns (no Workshop tag)."
@@ -941,7 +942,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       --filters "Name=tag:Workshop,Values=AgentCore-Platform" \
       --query 'Vpcs[].VpcId' --output text 2>&1); then
       echo "  WARNING: could not list the workshop VPCs, so the GuardDuty unblock is skipped;"
-      echo "           a VPC that still has endpoints will fail its stack delete below."
+      echo "           Remaining GuardDuty resources may block a VPC delete; inspect the VPC if deletion fails."
       echo "           $WORKSHOP_VPCS"
     elif [[ -z "${WORKSHOP_VPCS//[[:space:]]/}" ]]; then
       echo "  No workshop-tagged VPCs found -- nothing to unblock"
