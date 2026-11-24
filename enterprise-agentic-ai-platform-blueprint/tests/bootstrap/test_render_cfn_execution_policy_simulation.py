@@ -179,16 +179,23 @@ def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(bound
     log_group = f"arn:aws:logs:{REGION}:{AUDIT}:log-group:/centralized/555555555555/{REGION}/aws/spans"
     allowed = decisions(
         ADMINISTRATOR_DOCUMENT,
-        ["logs:GetLogEvents", "logs:StartQuery", "logs:PutLogEvents", "logs:IntegrateWithDataset"],
+        ["logs:GetLogEvents", "logs:StartQuery", "logs:GetQueryResults", "logs:PutLogEvents", "logs:IntegrateWithDataset"],
         [log_group],
         boundary=boundary_document,
     )
     assert set(allowed.values()) == {"allowed"}
     # Actions without a resource type are authorized against "*"; the Service
-    # Authorization Reference lists these four that way, so the ceiling must too.
+    # Authorization Reference lists these that way, so the ceiling must too.
     resourceless = decisions(
         ADMINISTRATOR_DOCUMENT,
-        ["bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations", "logs:PutIndexPolicy", "logs:DescribeIndexPolicies"],
+        [
+            "bedrock-agentcore:StartBatchEvaluation",
+            "bedrock-agentcore:ListBatchEvaluations",
+            "logs:PutIndexPolicy",
+            "logs:DescribeIndexPolicies",
+            "logs:StopQuery",
+            "logs:DescribeQueries",
+        ],
         ["*"],
         boundary=boundary_document,
     )

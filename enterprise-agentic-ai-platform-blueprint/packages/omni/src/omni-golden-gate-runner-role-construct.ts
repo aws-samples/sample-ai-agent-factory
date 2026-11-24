@@ -155,13 +155,16 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
             new PolicyStatement({
               sid: 'SourceCopiesQuery',
               effect: Effect.ALLOW,
-              actions: ['logs:StartQuery', 'logs:GetLogEvents', 'logs:DescribeLogStreams', 'logs:FilterLogEvents'],
+              // GetQueryResults takes the queried log groups (Service Authorization
+              // Reference), so it is pinned with StartQuery.
+              actions: ['logs:StartQuery', 'logs:GetQueryResults', 'logs:GetLogEvents', 'logs:DescribeLogStreams', 'logs:FilterLogEvents'],
               resources: [...sourceLogGroupArns, ...resultLogGroupArns, ...resultLogGroupArns.map((a) => `${a}:*`)],
             }),
             new PolicyStatement({
               sid: 'QueryLifecycleNoResourceType',
               effect: Effect.ALLOW,
-              actions: ['logs:GetQueryResults', 'logs:StopQuery', 'logs:DescribeLogGroups', 'logs:DescribeQueries'],
+              // No resource type in the Service Authorization Reference: "*" only.
+              actions: ['logs:StopQuery', 'logs:DescribeLogGroups', 'logs:DescribeQueries'],
               resources: ['*'],
             }),
             new PolicyStatement({
@@ -204,7 +207,7 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs and batch-evaluation Get/Stop/Delete to its batch-evaluate/* ARNs (the documented minimum policy); StartBatchEvaluation, ListBatchEvaluations, logs:GetQueryResults/StopQuery/DescribeLogGroups/DescribeQueries have no resource type (Service Authorization Reference) and take "*"; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
+            'SEC-037: dataset reads are scoped to this account\'s dataset ARNs and batch-evaluation Get/Stop/Delete to its batch-evaluate/* ARNs (the documented minimum policy); StartBatchEvaluation, ListBatchEvaluations, logs:StopQuery/DescribeLogGroups/DescribeQueries have no resource type (Service Authorization Reference) and take "*"; cloudwatch:PutMetricData is pinned to one namespace; log-group wildcards cover only the named source accounts\' centralized copies and the result prefix.',
         },
         {
           id: 'NIST.800.53.R5-IAMNoInlinePolicy',

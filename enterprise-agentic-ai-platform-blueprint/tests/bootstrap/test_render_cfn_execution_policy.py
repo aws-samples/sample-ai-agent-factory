@@ -534,12 +534,13 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
         "logs:DescribeIndexPolicies",
         "logs:DescribeLogGroups",
         "logs:DescribeQueries",
-        "logs:GetQueryResults",
         "logs:PutIndexPolicy",
         "logs:StopQuery",
     }
     assert not {"bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations"} & set(sids["HubEvaluations"]["Action"])
     assert not {"logs:PutIndexPolicy", "logs:DescribeIndexPolicies"} & set(sids["HubLogGroups"]["Action"])
+    # GetQueryResults and StartQuery take the log group, so they are account-scoped.
+    assert {"logs:GetQueryResults", "logs:StartQuery"} <= set(sids["HubLogGroups"]["Action"])
     for sid, statement in sids.items():
         if sid == "HubResourcelessTelemetry":
             continue

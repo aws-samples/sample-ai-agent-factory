@@ -941,6 +941,7 @@ HUB_ROLE_LOG_GROUP_ACTIONS = [
     "logs:DescribeLogStreams",
     "logs:FilterLogEvents",
     "logs:GetLogEvents",
+    "logs:GetQueryResults",
     "logs:IntegrateWithDataset",
     "logs:ListTagsForResource",
     "logs:PutLogEvents",
@@ -949,10 +950,12 @@ HUB_ROLE_LOG_GROUP_ACTIONS = [
     "logs:TagResource",
     "logs:UntagResource",
 ]
-# No resource type in the Service Authorization Reference: StartBatchEvaluation
-# and ListBatchEvaluations (the batch-evaluate ARN applies only to Get, Stop and
-# Delete), the field-index policy calls, the query lifecycle calls, PutRecords
-# and PutMetricData.
+# No resource type in the Service Authorization Reference (the JSON service
+# reference, confirmed in the IAM policy simulator): StartBatchEvaluation and
+# ListBatchEvaluations (the batch-evaluate ARN applies only to Get, Stop and
+# Delete), the field-index policy calls, DescribeLogGroups, DescribeQueries and
+# StopQuery (GetQueryResults and StartQuery take the log group), PutRecords and
+# PutMetricData.
 HUB_ROLE_RESOURCELESS_ACTIONS = [
     "bedrock-agentcore:ListBatchEvaluations",
     "bedrock-agentcore:StartBatchEvaluation",
@@ -961,7 +964,6 @@ HUB_ROLE_RESOURCELESS_ACTIONS = [
     "logs:DescribeIndexPolicies",
     "logs:DescribeLogGroups",
     "logs:DescribeQueries",
-    "logs:GetQueryResults",
     "logs:PutIndexPolicy",
     "logs:StopQuery",
 ]
