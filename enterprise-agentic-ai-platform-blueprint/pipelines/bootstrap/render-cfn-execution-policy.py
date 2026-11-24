@@ -989,8 +989,6 @@ HUB_ROLE_LOG_GROUP_ACTIONS = [
 # StopQuery (GetQueryResults and StartQuery take the log group), PutRecords and
 # PutMetricData.
 HUB_ROLE_RESOURCELESS_ACTIONS = [
-    "bedrock-agentcore:ListBatchEvaluations",
-    "bedrock-agentcore:StartBatchEvaluation",
     "cloudwatch:PutMetricData",
     "cloudwatch:PutRecords",
     "logs:DescribeIndexPolicies",
@@ -998,6 +996,12 @@ HUB_ROLE_RESOURCELESS_ACTIONS = [
     "logs:DescribeQueries",
     "logs:PutIndexPolicy",
     "logs:StopQuery",
+]
+# Resource-less too, but kept to the hub Region through aws:RequestedRegion (the
+# golden-gate runner's own statement carries the same condition).
+HUB_ROLE_EVALUATION_START_ACTIONS = [
+    "bedrock-agentcore:ListBatchEvaluations",
+    "bedrock-agentcore:StartBatchEvaluation",
 ]
 HUB_ROLE_EVALUATION_ACTIONS = [
     "bedrock-agentcore:DeleteBatchEvaluation",
@@ -1038,6 +1042,13 @@ def hub_role_boundary_policy(account: str, region: str) -> dict[str, Any]:
                 "Effect": "Allow",
                 "Action": HUB_ROLE_RESOURCELESS_ACTIONS,
                 "Resource": "*",
+            },
+            {
+                "Sid": "HubEvaluationStartAndList",
+                "Effect": "Allow",
+                "Action": HUB_ROLE_EVALUATION_START_ACTIONS,
+                "Resource": "*",
+                "Condition": {"StringEquals": {"aws:RequestedRegion": region}},
             },
             {
                 "Sid": "HubEvaluations",

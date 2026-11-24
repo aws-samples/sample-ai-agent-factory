@@ -527,6 +527,7 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
     assert set(sids) == {
         "HubLogGroups",
         "HubResourcelessTelemetry",
+        "HubEvaluationStartAndList",
         "HubEvaluations",
         "HubJudgeModels",
         "HubCodeEvaluators",
@@ -548,8 +549,6 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
     # pinned to an ARN would silently deny them (StartBatchEvaluation and the
     # field-index policy calls included).
     assert set(resourceless["Action"]) == {
-        "bedrock-agentcore:ListBatchEvaluations",
-        "bedrock-agentcore:StartBatchEvaluation",
         "cloudwatch:PutMetricData",
         "cloudwatch:PutRecords",
         "logs:DescribeIndexPolicies",
@@ -558,12 +557,18 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
         "logs:PutIndexPolicy",
         "logs:StopQuery",
     }
+    # Starting and listing batch evaluations is resource-less as well, but pinned
+    # to the hub Region through the request Region.
+    start = sids["HubEvaluationStartAndList"]
+    assert set(start["Action"]) == {"bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations"}
+    assert start["Resource"] == "*"
+    assert start["Condition"] == {"StringEquals": {"aws:RequestedRegion": REGION}}
     assert not {"bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations"} & set(sids["HubEvaluations"]["Action"])
     assert not {"logs:PutIndexPolicy", "logs:DescribeIndexPolicies"} & set(sids["HubLogGroups"]["Action"])
     # GetQueryResults and StartQuery take the log group, so they are account-scoped.
     assert {"logs:GetQueryResults", "logs:StartQuery"} <= set(sids["HubLogGroups"]["Action"])
     for sid, statement in sids.items():
-        if sid == "HubResourcelessTelemetry":
+        if sid in {"HubResourcelessTelemetry", "HubEvaluationStartAndList"}:
             continue
         for resource in resources(statement):
             assert resource.startswith("arn:aws:"), (sid, resource)

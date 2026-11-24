@@ -238,18 +238,15 @@ def test_hub_role_boundary_is_a_ceiling_that_still_lets_the_hub_roles_work(bound
     # Authorization Reference lists these that way, so the ceiling must too.
     resourceless = decisions(
         ADMINISTRATOR_DOCUMENT,
-        [
-            "bedrock-agentcore:StartBatchEvaluation",
-            "bedrock-agentcore:ListBatchEvaluations",
-            "logs:PutIndexPolicy",
-            "logs:DescribeIndexPolicies",
-            "logs:StopQuery",
-            "logs:DescribeQueries",
-        ],
+        ["logs:PutIndexPolicy", "logs:DescribeIndexPolicies", "logs:StopQuery", "logs:DescribeQueries"],
         ["*"],
         boundary=boundary_document,
     )
     assert set(resourceless.values()) == {"allowed"}
+    # Starting and listing batch evaluations: resource-less, but only in the hub Region.
+    batch = ["bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:ListBatchEvaluations"]
+    assert set(decisions(ADMINISTRATOR_DOCUMENT, batch, ["*"], context(("aws:RequestedRegion", REGION)), boundary=boundary_document).values()) == {"allowed"}
+    assert set(decisions(ADMINISTRATOR_DOCUMENT, batch, ["*"], context(("aws:RequestedRegion", "us-east-1")), boundary=boundary_document).values()) == {"implicitDeny"}
     denied = decisions(
         ADMINISTRATOR_DOCUMENT,
         ["logs:DeleteLogGroup", "logs:PutResourcePolicy", "iam:CreateRole", "sts:AssumeRole", "kms:PutKeyPolicy"],

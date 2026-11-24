@@ -423,6 +423,8 @@ describe('OmniGoldenGateRunnerRoleConstruct', () => {
     const start = statements.find((s) => s.Sid === 'BatchEvaluationStartAndList')!;
     expect(start.Action).toEqual(['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:ListBatchEvaluations']);
     expect(start.Resource).toBe('*');
+    // ...kept to the hub Region through the request Region.
+    expect(start.Condition).toEqual({ StringEquals: { 'aws:RequestedRegion': 'eu-west-1' } });
     const batch = statements.find((s) => s.Sid === 'BatchEvaluationLifecycle')!;
     expect(batch.Action).toEqual(
       expect.arrayContaining(['bedrock-agentcore:GetBatchEvaluation', 'bedrock-agentcore:StopBatchEvaluation', 'bedrock-agentcore:DeleteBatchEvaluation']),

@@ -136,9 +136,11 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
               // in the Service Authorization Reference: IAM authorizes them against
               // "*" only, and a grant pinned to batch-evaluate/* never matches (IAM
               // policy simulator, 2026-11-24). The evaluation a start creates is then
-              // governed by the pinned statement below.
+              // governed by the pinned statement below; the Region condition keeps
+              // the resource-less grant to the hub Region.
               actions: ['bedrock-agentcore:StartBatchEvaluation', 'bedrock-agentcore:ListBatchEvaluations'],
               resources: ['*'],
+              conditions: { StringEquals: { 'aws:RequestedRegion': stack.region } },
             }),
             new PolicyStatement({
               sid: 'BatchEvaluationLifecycle',
