@@ -14,10 +14,14 @@
  *   - the AgentCore evaluation execution role for Omni online evaluations
  *     (reads the centralized span groups);
  *   - a customer managed key for the space and Dataset with the documented
- *     key policy, tagged `cw-omni`;
+ *     key policy, tagged `cw-omni` (`createOmniSpaceKey`);
  *   - a second customer managed key for centralized destination log groups,
  *     tagged `LogsManaged=true`, exported for the organization centralization
  *     rule;
+ *     or, with `existingSpaceKey` and `existingCentralizedLogsKey`, neither:
+ *     the keys were deployed ahead of the hub by operators (OmniHubKeysStack)
+ *     and the hub only uses them, which is what the Audit account's scoped
+ *     CloudFormation execution policy allows;
  *   - Transaction Search in this account and Region (required for spans to
  *     arrive and for trace centralization);
  *   - the space itself (AWS::CloudWatch::Space, declared with CfnResource
@@ -33,8 +37,6 @@
  */
 import { CfnOutput, CfnResource, Duration, RemovalPolicy, Stack, Tags, Token, Validations } from 'aws-cdk-lib';
 import {
-  AccountRootPrincipal,
-  ArnPrincipal,
   Effect,
   IManagedPolicy,
   ManagedPolicy,
@@ -43,7 +45,7 @@ import {
   Role,
   ServicePrincipal,
 } from 'aws-cdk-lib/aws-iam';
-import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
+import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { CfnTransactionSearchConfig } from 'aws-cdk-lib/aws-xray';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -52,6 +54,7 @@ import { EvaluationExecutionRoleConstruct } from '@agenticai/agentcore-evaluatio
 
 import { assertOmniHostingRegion, assertOmniSpaceName } from './naming';
 import { OmniCentralizedLogsKeyConstruct } from './omni-centralized-logs-key-construct';
+import { createOmniSpaceKey } from './omni-space-key';
 import { TransactionSearchConstruct } from './transaction-search-construct';
 
 export interface OmniHubSpaceConstructProps {
@@ -94,6 +97,18 @@ export interface OmniHubSpaceConstructProps {
    * the Audit account's scoped CloudFormation execution policy.
    */
   readonly roleBoundary?: IManagedPolicy;
+  /**
+   * Operator-provisioned space key (OmniHubKeysStack output `OmniSpaceKeyArn`).
+   * When set, together with `existingCentralizedLogsKey`, the construct creates
+   * no key: the Audit account's scoped CloudFormation execution policy lets the
+   * hub use keys tagged `agenticai:omni-hub=true` but never create or change
+   * one. The Dataset integration role then receives its key grant as an
+   * identity policy, because a key policy cannot name a role that does not
+   * exist when the key is created.
+   */
+  readonly existingSpaceKey?: IKey;
+  /** Operator-provisioned centralized-logs key (output `OmniCentralizedLogsKeyArn`); see `existingSpaceKey`. */
+  readonly existingCentralizedLogsKey?: IKey;
   /** Transaction Search indexing percentage (0-100). Default 1. */
   readonly transactionSearchIndexingPercentage?: number;
   /** Manage Transaction Search from this stack. Default true. */
@@ -108,8 +123,8 @@ export class OmniHubSpaceConstruct extends Construct {
   readonly operatorRole: Role;
   readonly datasetIntegrationRole: Role;
   readonly evaluationRole: Role;
-  readonly spaceKey: Key;
-  readonly centralizedLogsKey: Key;
+  readonly spaceKey: IKey;
+  readonly centralizedLogsKey: IKey;
   readonly space: CfnResource;
   readonly spaceId: string;
   readonly spaceArn: string;
@@ -135,11 +150,14 @@ export class OmniHubSpaceConstruct extends Construct {
     if (indexing < 0 || indexing > 100) {
       throw new Error('OmniHubSpaceConstruct transactionSearchIndexingPercentage must be between 0 and 100.');
     }
+    if ((props.existingSpaceKey === undefined) !== (props.existingCentralizedLogsKey === undefined)) {
+      throw new Error(
+        'OmniHubSpaceConstruct: pass both existingSpaceKey and existingCentralizedLogsKey (operator-provisioned keys) or neither.',
+      );
+    }
 
     const keyRemovalPolicy = props.keyRemovalPolicy ?? RemovalPolicy.RETAIN;
-    const spaceArnPattern = `arn:${stack.partition}:cloudwatch:${stack.region}:${stack.account}:space/*`;
     const datasetArn = `arn:${stack.partition}:cloudwatch:${stack.region}:${stack.account}:dataset/default`;
-    const cloudwatchService = new ServicePrincipal('cloudwatch.amazonaws.com');
 
     // ---------------------------------------------------------------- roles
     const operatorManagedPolicies = [ManagedPolicy.fromAwsManagedPolicyName('CloudWatchOmniSpaceAccessPolicy')];
@@ -187,6 +205,40 @@ export class OmniHubSpaceConstruct extends Construct {
     const datasetLogGroupArns = datasetPrefixes.flatMap((prefix) => [
       `arn:${stack.partition}:logs:${stack.region}:${stack.account}:log-group:${prefix}*`,
     ]);
+    const datasetForwarding: PolicyStatement[] = [
+      new PolicyStatement({
+        sid: 'IntegrateSelectedLogGroups',
+        effect: Effect.ALLOW,
+        actions: ['logs:IntegrateWithDataset'],
+        resources: datasetLogGroupArns,
+      }),
+      new PolicyStatement({
+        sid: 'PutRecordsIntoDataset',
+        effect: Effect.ALLOW,
+        actions: ['cloudwatch:PutRecords'],
+        resources: ['*'],
+      }),
+    ];
+    if (props.existingSpaceKey) {
+      // An operator-provisioned key names no hub role in its key policy (the
+      // roles do not exist when the key is created), so the Dataset forwarding
+      // grant moves to the role: same actions and conditions as the key-policy
+      // statement the construct writes when it creates the key itself.
+      datasetForwarding.push(
+        new PolicyStatement({
+          sid: 'UseSpaceKeyForDatasetForwarding',
+          effect: Effect.ALLOW,
+          actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt'],
+          resources: [props.existingSpaceKey.keyArn],
+          conditions: {
+            StringEquals: {
+              'kms:EncryptionContext:aws:cloudwatch:arn': datasetArn,
+              'kms:ViaService': `cloudwatch.${stack.region}.amazonaws.com`,
+            },
+          },
+        }),
+      );
+    }
     this.datasetIntegrationRole = new Role(this, 'DatasetIntegrationRole', {
       roleName: `CloudWatchOmniDatasetIntegrationRole-${stack.region}`,
       permissionsBoundary: props.roleBoundary,
@@ -200,22 +252,7 @@ export class OmniHubSpaceConstruct extends Construct {
         },
       }),
       inlinePolicies: {
-        DatasetForwarding: new PolicyDocument({
-          statements: [
-            new PolicyStatement({
-              sid: 'IntegrateSelectedLogGroups',
-              effect: Effect.ALLOW,
-              actions: ['logs:IntegrateWithDataset'],
-              resources: datasetLogGroupArns,
-            }),
-            new PolicyStatement({
-              sid: 'PutRecordsIntoDataset',
-              effect: Effect.ALLOW,
-              actions: ['cloudwatch:PutRecords'],
-              resources: ['*'],
-            }),
-          ],
-        }),
+        DatasetForwarding: new PolicyDocument({ statements: datasetForwarding }),
       },
     });
 
@@ -235,143 +272,22 @@ export class OmniHubSpaceConstruct extends Construct {
     this.evaluationRole = evaluation.role;
 
     // ----------------------------------------------------------------- keys
-    this.spaceKey = new Key(this, 'SpaceKey', {
-      alias: `alias/agenticai/omni-space-${stack.region}`,
-      description: 'CloudWatch Omni space and Dataset encryption (documented Omni key policy).',
-      keySpec: KeySpec.SYMMETRIC_DEFAULT,
-      keyUsage: KeyUsage.ENCRYPT_DECRYPT,
-      enableKeyRotation: true,
-      removalPolicy: keyRemovalPolicy,
-      policy: new PolicyDocument({
-        statements: [
-          new PolicyStatement({
-            sid: 'EnableRootKeyAdministration',
-            effect: Effect.ALLOW,
-            principals: [new AccountRootPrincipal()],
-            actions: ['kms:*'],
-            resources: ['*'],
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchIntelligenceDescribeKey',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:DescribeKey'],
-            resources: ['*'],
-            conditions: { StringEquals: { 'aws:SourceAccount': stack.account } },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchIntelligenceEncryptionService',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'kms:EncryptionContext:aws:cloudwatch:account': stack.account },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowOmniIntelligenceBranchKey',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: [
-              'kms:GenerateDataKey',
-              'kms:GenerateDataKeyWithoutPlaintext',
-              'kms:Encrypt',
-              'kms:Decrypt',
-              'kms:ReEncrypt*',
-            ],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'kms:EncryptionContext:aws-crypto-ec:aws:cloudwatch:account': stack.account },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchDatasetDescribeKey',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:DescribeKey'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'aws:SourceAccount': stack.account },
-              ArnLike: { 'aws:SourceArn': datasetArn },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchDatasetEncryption',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt', 'kms:ReEncrypt*'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: {
-                'aws:SourceAccount': stack.account,
-                'kms:EncryptionContext:aws:cloudwatch:arn': datasetArn,
-              },
-              ArnLike: { 'aws:SourceArn': datasetArn },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchSpaceDescribeKey',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:DescribeKey'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'aws:SourceAccount': stack.account },
-              ArnLike: { 'aws:SourceArn': spaceArnPattern },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCloudWatchSpaceEncryptionService',
-            effect: Effect.ALLOW,
-            principals: [cloudwatchService],
-            actions: ['kms:Encrypt', 'kms:Decrypt', 'kms:GenerateDataKey'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'aws:SourceAccount': stack.account },
-              StringLike: { 'kms:EncryptionContext:aws:cloudwatch:arn': spaceArnPattern },
-              ArnLike: { 'aws:SourceArn': spaceArnPattern },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowCallerDatasetForwarding',
-            effect: Effect.ALLOW,
-            principals: [new ArnPrincipal(this.datasetIntegrationRole.roleArn)],
-            actions: ['kms:GenerateDataKey', 'kms:Encrypt', 'kms:Decrypt'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: {
-                'kms:EncryptionContext:aws:cloudwatch:arn': datasetArn,
-                'kms:ViaService': `cloudwatch.${stack.region}.amazonaws.com`,
-              },
-            },
-          }),
-          new PolicyStatement({
-            sid: 'AllowOperatorRoleDecrypt',
-            effect: Effect.ALLOW,
-            principals: [new ArnPrincipal(this.operatorRole.roleArn)],
-            actions: ['kms:Decrypt'],
-            resources: ['*'],
-            conditions: { StringEquals: { 'kms:ViaService': `cloudwatch.${stack.region}.amazonaws.com` } },
-          }),
-          new PolicyStatement({
-            sid: 'AllowOperatorRoleIntelligenceDecrypt',
-            effect: Effect.ALLOW,
-            principals: [new ArnPrincipal(this.operatorRole.roleArn)],
-            actions: ['kms:Decrypt'],
-            resources: ['*'],
-            conditions: {
-              StringEquals: { 'kms:EncryptionContext:aws-crypto-ec:aws:cloudwatch:account': stack.account },
-            },
-          }),
-        ],
-      }),
-    });
-    Tags.of(this.spaceKey).add('cw-omni', 'true');
-
-    this.centralizedLogsKey = new OmniCentralizedLogsKeyConstruct(this, 'CentralizedLogs', {
-      removalPolicy: keyRemovalPolicy,
-    }).key;
+    if (props.existingSpaceKey && props.existingCentralizedLogsKey) {
+      // Operator-provisioned keys (OmniHubKeysStack): the hub only uses them.
+      this.spaceKey = props.existingSpaceKey;
+      this.centralizedLogsKey = props.existingCentralizedLogsKey;
+    } else {
+      this.spaceKey = createOmniSpaceKey(this, 'SpaceKey', {
+        removalPolicy: keyRemovalPolicy,
+        roleGrants: {
+          operatorRoleArn: this.operatorRole.roleArn,
+          datasetIntegrationRoleArn: this.datasetIntegrationRole.roleArn,
+        },
+      });
+      this.centralizedLogsKey = new OmniCentralizedLogsKeyConstruct(this, 'CentralizedLogs', {
+        removalPolicy: keyRemovalPolicy,
+      }).key;
+    }
 
     // ------------------------------------------------------ transaction search
     if (props.enableTransactionSearch !== false) {

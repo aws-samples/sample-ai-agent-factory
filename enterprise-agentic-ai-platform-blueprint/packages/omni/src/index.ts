@@ -33,6 +33,7 @@ export {
   OmniCentralizedLogsKeyConstruct,
   type OmniCentralizedLogsKeyConstructProps,
 } from './omni-centralized-logs-key-construct';
+export { createOmniSpaceKey, type OmniSpaceKeyProps, type OmniSpaceKeyRoleGrants } from './omni-space-key';
 export { OmniDashboardConstruct, type OmniDashboardConstructProps } from './omni-dashboard-construct';
 export {
   OmniGoldenGateRunnerRoleConstruct,
