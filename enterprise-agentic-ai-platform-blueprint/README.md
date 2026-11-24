@@ -434,8 +434,16 @@ python3 pipelines/bootstrap/render-cfn-execution-policy.py workstream \
 python3 pipelines/bootstrap/render-cfn-execution-policy.py management \
   --account-id <MANAGEMENT_ACCOUNT> \
   --region eu-west-1 \
+  --organization-id <ORGANIZATION_ID> \
   > management-policy.json
+
+python3 pipelines/bootstrap/render-cfn-execution-policy.py audit \
+  --account-id <AUDIT_ACCOUNT> \
+  --region eu-west-1 \
+  > audit-policy.json
 ```
+
+The `management` document carries the Organizations OU and SCP lifecycle pinned to `<ORGANIZATION_ID>` and the CloudWatch Omni organization domain; the `audit` document carries the OAM sink and the Omni hub (space, roles, centralization rule). Each document must fit one IAM managed policy (6,144 characters without whitespace); the renderer exits non-zero instead of emitting a document IAM would refuse.
 
 Validate every generated identity policy:
 

@@ -27,7 +27,15 @@ OAM_SOURCE_LINK_ACTIONS = {
 }
 
 
+AUDIT = "444444444444"
+ORGANIZATION = "o-exampleorg0a"
+IAM_MANAGED_POLICY_MAX_CHARS = 6144
+
+
 def render(role: str, *args: str) -> dict:
+    extra = list(args)
+    if role == "management" and "--organization-id" not in extra:
+        extra += ["--organization-id", ORGANIZATION]
     result = subprocess.run(
         [
             sys.executable,
@@ -38,10 +46,11 @@ def render(role: str, *args: str) -> dict:
                 "platform": PLATFORM,
                 "workstream": WORKSTREAM,
                 "management": MANAGEMENT,
+                "audit": AUDIT,
             }[role],
             "--region",
             REGION,
-            *args,
+            *extra,
         ],
         cwd=ROOT,
         check=True,
@@ -49,6 +58,16 @@ def render(role: str, *args: str) -> dict:
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def all_actions(policy: dict) -> set[str]:
+    return {
+        action
+        for statement in policy["Statement"]
+        for action in (
+            statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
+        )
+    }
 
 
 def by_sid(policy: dict, sid: str) -> dict:
@@ -299,26 +318,119 @@ def test_bootstrap_refuses_application_work_directory(tmp_path: Path) -> None:
     assert result.cdk_calls == []  # type: ignore[attr-defined]
 
 
-def test_management_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
-    policy = render("management")
+def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
+    policy = render("audit")
     by_sid = {statement["Sid"]: statement for statement in policy["Statement"]}
     manage = by_sid["ManageOmniHubRoles"]
     assert all(":role/" in resource for resource in manage["Resource"])
+    assert all(f"::{AUDIT}:" in resource for resource in manage["Resource"])
     assert any(resource.endswith("role/CloudWatchOmniOperatorRole") for resource in manage["Resource"])
-    assert any(resource.endswith("role/CloudWatchOmniDomainAccessRole") for resource in manage["Resource"])
     assert any("AgentCoreEvaluationRole-omni-" in resource for resource in manage["Resource"])
+    # The organization domain and its access role are the management account's.
+    assert not any("CloudWatchOmniDomainAccessRole" in resource for resource in manage["Resource"])
     pass_role = by_sid["PassOmniHubRolesToServices"]
     assert pass_role["Action"] == "iam:PassRole"
     services = set(pass_role["Condition"]["StringEquals"]["iam:PassedToService"])
     assert {"cloudwatch.amazonaws.com", "logs.amazonaws.com", "bedrock-agentcore.amazonaws.com"} <= services
     provision = by_sid["ProvisionOmniHubSpaceAndCentralization"]
     assert "cloudwatch:CreateSpace" in provision["Action"]
-    assert "cloudwatch:CreateDomainForOrganization" in provision["Action"]
+    assert "cloudwatch:GetDomainForOrganization" in provision["Action"]
+    assert "cloudwatch:CreateDomainForOrganization" not in provision["Action"]
     assert "observabilityadmin:CreateCentralizationRuleForOrganization" in provision["Action"]
     assert "xray:UpdateTraceSegmentDestination" in provision["Action"]
     # Never a bare cloudwatch:* or observabilityadmin:* in the hub statement.
     assert "cloudwatch:*" not in provision["Action"]
     assert "observabilityadmin:*" not in provision["Action"]
+    # The sink and the hub keys/log groups are the only service-wide grants.
+    assert set(by_sid["ProvisionGovernanceTelemetryStacks"]["Action"]) == {"kms:*", "logs:*", "oam:*"}
+    assert "organizations:CreatePolicy" not in all_actions(policy)
+
+
+def test_management_policy_grants_scoped_organizations_lifecycle() -> None:
+    policy = render("management")
+    manage = by_sid(policy, "ManageOrganizationUnitsAndScps")
+    assert {
+        "organizations:CreateOrganizationalUnit",
+        "organizations:DeleteOrganizationalUnit",
+        "organizations:CreatePolicy",
+        "organizations:DeletePolicy",
+        "organizations:AttachPolicy",
+        "organizations:DetachPolicy",
+        "organizations:TagResource",
+    } <= set(manage["Action"])
+    assert "organizations:*" not in all_actions(policy)
+    assert set(manage["Resource"]) == {
+        f"arn:aws:organizations::{MANAGEMENT}:root/{ORGANIZATION}/*",
+        f"arn:aws:organizations::{MANAGEMENT}:ou/{ORGANIZATION}/*",
+        f"arn:aws:organizations::{MANAGEMENT}:policy/{ORGANIZATION}/service_control_policy/*",
+        f"arn:aws:organizations::{MANAGEMENT}:account/{ORGANIZATION}/*",
+    }
+    read = by_sid(policy, "ReadOrganizationWithoutResourceScope")
+    assert read["Resource"] == "*"
+    assert set(read["Action"]) == {
+        "organizations:DescribeOrganization",
+        "organizations:ListRoots",
+        "organizations:ListPolicies",
+        "organizations:ListAccounts",
+    }
+    # Account membership (invite/move/remove) is never part of the stage.
+    assert not {"organizations:MoveAccount", "organizations:InviteAccountToOrganization"} & all_actions(policy)
+
+
+def test_management_policy_keeps_the_omni_domain_and_leaves_the_hub_to_audit() -> None:
+    policy = render("management")
+    domain = by_sid(policy, "ProvisionOmniOrganizationDomain")
+    assert "cloudwatch:CreateDomainForOrganization" in domain["Action"]
+    assert "cloudwatch:CreateDomainAccessGrantForOrganization" in domain["Action"]
+    assert "cloudwatch:CreateSpace" not in domain["Action"]
+    role = by_sid(policy, "ManageOmniDomainAccessRole")
+    assert role["Resource"] == f"arn:aws:iam::{MANAGEMENT}:role/CloudWatchOmniDomainAccessRole"
+    pass_role = by_sid(policy, "PassOmniDomainAccessRoleToCloudWatch")
+    assert pass_role["Condition"]["StringEquals"]["iam:PassedToService"] == "cloudwatch.amazonaws.com"
+    granted = all_actions(policy)
+    assert "cloudwatch:CreateSpace" not in granted
+    assert "observabilityadmin:CreateCentralizationRuleForOrganization" not in granted
+    assert "xray:UpdateTraceSegmentDestination" not in granted
+
+
+def test_management_requires_organization_id_and_other_roles_reject_it() -> None:
+    missing = subprocess.run(
+        [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode != 0
+    assert "requires --organization-id" in missing.stderr
+    malformed = subprocess.run(
+        [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION, "--organization-id", "org-123"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert malformed.returncode != 0
+    assert "must look like o-" in malformed.stderr
+    rejected = subprocess.run(
+        [sys.executable, str(SCRIPT), "workstream", "--account-id", WORKSTREAM, "--region", REGION, "--organization-id", ORGANIZATION],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "applies only to the management policy" in rejected.stderr
+
+
+def test_every_rendered_policy_fits_one_iam_managed_policy() -> None:
+    for role, policy in (
+        ("workstream", render("workstream")),
+        ("management", render("management")),
+        ("audit", render("audit")),
+        ("platform", render("platform", "--target-account-id", WORKSTREAM, "--connection-arn", CONNECTION)),
+    ):
+        # IAM counts the document without whitespace; the console-created CDK
+        # execution policy is a single managed policy.
+        size = len(json.dumps(policy, separators=(",", ":"), sort_keys=True))
+        assert size <= IAM_MANAGED_POLICY_MAX_CHARS, f"{role} policy is {size} characters"
 
 
 def test_workstream_and_platform_policies_grant_transaction_search_opt_in() -> None:

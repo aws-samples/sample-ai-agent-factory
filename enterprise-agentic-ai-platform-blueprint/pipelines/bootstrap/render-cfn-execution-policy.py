@@ -15,6 +15,16 @@ Examples:
     --target-account-id 222222222222 --target-account-id 333333333333 \
     --connection-arn arn:aws:codeconnections:us-west-2:111111111111:connection/example
 
+  python3 pipelines/bootstrap/render-cfn-execution-policy.py management \
+    --account-id 333333333333 --region eu-west-1 --organization-id o-exampleorg0a
+
+  python3 pipelines/bootstrap/render-cfn-execution-policy.py audit \
+    --account-id 444444444444 --region eu-west-1
+
+Each rendered document must fit one IAM managed policy (6,144 characters
+without whitespace); the script exits non-zero instead of emitting a document
+IAM would refuse.
+
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
@@ -29,7 +39,11 @@ from typing import Any
 
 ACCOUNT_ID = re.compile(r"^[0-9]{12}$")
 REGION = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$")
-ROLES = ("platform", "workstream", "management")
+ORGANIZATION_ID = re.compile(r"^o-[a-z0-9]{10,32}$")
+ROLES = ("platform", "workstream", "management", "audit")
+# IAM counts a managed policy's characters without whitespace. Each rendered
+# role becomes one CDK CloudFormation execution policy, so it must fit.
+IAM_MANAGED_POLICY_MAX_CHARS = 6144
 POLICY_NAME_PATTERNS = ("*AgenticAI*", "*agenticai*")
 
 
@@ -439,15 +453,136 @@ def platform_policy(
     }
 
 
+# Role lifecycle the Omni stacks need on their own, exactly named roles.
+OMNI_ROLE_MANAGEMENT_ACTIONS = [
+    "iam:AttachRolePolicy",
+    "iam:CreateRole",
+    "iam:DeleteRole",
+    "iam:DeleteRolePolicy",
+    "iam:DetachRolePolicy",
+    "iam:GetRole",
+    "iam:GetRolePolicy",
+    "iam:ListAttachedRolePolicies",
+    "iam:ListInstanceProfilesForRole",
+    "iam:ListRolePolicies",
+    "iam:PutRolePermissionsBoundary",
+    "iam:DeleteRolePermissionsBoundary",
+    "iam:PutRolePolicy",
+    "iam:TagRole",
+    "iam:UntagRole",
+    "iam:UpdateAssumeRolePolicy",
+    "iam:UpdateRole",
+    "iam:UpdateRoleDescription",
+]
+
+# `management` stage (OrgStack): the OU hierarchy and SCPs 01-13. Organizations
+# supports resource-level permissions on roots, OUs, policies and accounts, so
+# the lifecycle is pinned to this organization; the list/describe calls below
+# accept no resource and stay on "*".
+ORGANIZATIONS_LIFECYCLE_ACTIONS = [
+    "organizations:CreateOrganizationalUnit",
+    "organizations:UpdateOrganizationalUnit",
+    "organizations:DeleteOrganizationalUnit",
+    "organizations:DescribeOrganizationalUnit",
+    "organizations:CreatePolicy",
+    "organizations:UpdatePolicy",
+    "organizations:DeletePolicy",
+    "organizations:DescribePolicy",
+    "organizations:AttachPolicy",
+    "organizations:DetachPolicy",
+    "organizations:TagResource",
+    "organizations:UntagResource",
+    "organizations:ListTagsForResource",
+    "organizations:ListPoliciesForTarget",
+    "organizations:ListTargetsForPolicy",
+    "organizations:ListParents",
+    "organizations:ListChildren",
+    "organizations:ListOrganizationalUnitsForParent",
+]
+ORGANIZATIONS_READ_ACTIONS = [
+    "organizations:DescribeOrganization",
+    "organizations:ListRoots",
+    "organizations:ListPolicies",
+    "organizations:ListAccounts",
+]
+
+
+def organizations_statements(account: str, organization_id: str) -> list[dict[str, Any]]:
+    """OU and SCP lifecycle for the `management` stage, scoped to one organization."""
+    scope = [
+        f"arn:aws:organizations::{account}:root/{organization_id}/*",
+        f"arn:aws:organizations::{account}:ou/{organization_id}/*",
+        f"arn:aws:organizations::{account}:policy/{organization_id}/service_control_policy/*",
+        f"arn:aws:organizations::{account}:account/{organization_id}/*",
+    ]
+    return [
+        {
+            "Sid": "ManageOrganizationUnitsAndScps",
+            "Effect": "Allow",
+            "Action": ORGANIZATIONS_LIFECYCLE_ACTIONS,
+            "Resource": scope,
+        },
+        {
+            "Sid": "ReadOrganizationWithoutResourceScope",
+            "Effect": "Allow",
+            "Action": ORGANIZATIONS_READ_ACTIONS,
+            "Resource": "*",
+        },
+    ]
+
+
+def omni_domain_statements(account: str) -> list[dict[str, Any]]:
+    """ADR-15 CloudWatch Omni organization domain (OmniDomainStack), management account.
+
+    Only the organization domain, its access grants and the domain access role
+    live in the management account; the space, the hub roles and the
+    centralization rule belong to the Audit account (`audit_policy`).
+    """
+    domain_role = iam_arn(account, "role/CloudWatchOmniDomainAccessRole")
+    return [
+        {
+            "Sid": "ProvisionOmniOrganizationDomain",
+            "Effect": "Allow",
+            "Action": [
+                "cloudwatch:CreateDomainForOrganization",
+                "cloudwatch:GetDomainForOrganization",
+                "cloudwatch:UpdateDomainForOrganization",
+                "cloudwatch:DeleteDomainForOrganization",
+                "cloudwatch:CreateDomainAccessGrantForOrganization",
+                "cloudwatch:DeleteDomainAccessGrantForOrganization",
+                "cloudwatch:TagResource",
+                "cloudwatch:UntagResource",
+                "cloudwatch:ListTagsForResource",
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "ManageOmniDomainAccessRole",
+            "Effect": "Allow",
+            "Action": OMNI_ROLE_MANAGEMENT_ACTIONS,
+            "Resource": domain_role,
+        },
+        {
+            "Sid": "PassOmniDomainAccessRoleToCloudWatch",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": domain_role,
+            "Condition": {
+                "StringEquals": {"iam:PassedToService": "cloudwatch.amazonaws.com"}
+            },
+        },
+    ]
+
+
 def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     """ADR-15 CloudWatch Omni hub (OmniHubStack) in the Audit/Observability account.
 
     The space, its roles and keys, Transaction Search and the organization
     centralization rule. Role management is pinned to the exact Omni role
-    families; passing roles is pinned per consuming service.
+    families; passing roles is pinned per consuming service. The organization
+    domain itself is the management account's (`omni_domain_statements`).
     """
     omni_roles = [
-        iam_arn(account, "role/CloudWatchOmniDomainAccessRole"),
         iam_arn(account, "role/CloudWatchOmniOperatorRole"),
         iam_arn(account, f"role/CloudWatchOmniDatasetIntegrationRole-{region}"),
         iam_arn(account, "role/service-role/AgentCoreEvaluationRole-omni-*"),
@@ -458,12 +593,7 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             "Sid": "ProvisionOmniHubSpaceAndCentralization",
             "Effect": "Allow",
             "Action": [
-                "cloudwatch:CreateDomainForOrganization",
                 "cloudwatch:GetDomainForOrganization",
-                "cloudwatch:UpdateDomainForOrganization",
-                "cloudwatch:DeleteDomainForOrganization",
-                "cloudwatch:CreateDomainAccessGrantForOrganization",
-                "cloudwatch:DeleteDomainAccessGrantForOrganization",
                 "cloudwatch:CreateSpace",
                 "cloudwatch:GetSpace",
                 "cloudwatch:UpdateSpace",
@@ -484,26 +614,7 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
         {
             "Sid": "ManageOmniHubRoles",
             "Effect": "Allow",
-            "Action": [
-                "iam:AttachRolePolicy",
-                "iam:CreateRole",
-                "iam:DeleteRole",
-                "iam:DeleteRolePolicy",
-                "iam:DetachRolePolicy",
-                "iam:GetRole",
-                "iam:GetRolePolicy",
-                "iam:ListAttachedRolePolicies",
-                "iam:ListInstanceProfilesForRole",
-                "iam:ListRolePolicies",
-                "iam:PutRolePermissionsBoundary",
-                "iam:DeleteRolePermissionsBoundary",
-                "iam:PutRolePolicy",
-                "iam:TagRole",
-                "iam:UntagRole",
-                "iam:UpdateAssumeRolePolicy",
-                "iam:UpdateRole",
-                "iam:UpdateRoleDescription",
-            ],
+            "Action": OMNI_ROLE_MANAGEMENT_ACTIONS,
             "Resource": omni_roles,
         },
         {
@@ -539,7 +650,34 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     ]
 
 
-def management_policy(account: str, region: str) -> dict[str, Any]:
+def audit_policy(account: str, region: str) -> dict[str, Any]:
+    """Audit/Observability account: AuditStack (OAM sink) and the `omni-hub` stage."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ProvisionGovernanceTelemetryStacks",
+                "Effect": "Allow",
+                "Action": ["kms:*", "logs:*", "oam:*"],
+                "Resource": "*",
+            },
+            *omni_hub_statements(account, region),
+            {
+                "Sid": "ReadCdkBootstrapVersion",
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+                "Resource": arn(
+                    "ssm",
+                    region,
+                    account,
+                    "parameter/cdk-bootstrap/hnb659fds/version",
+                ),
+            },
+        ],
+    }
+
+
+def management_policy(account: str, region: str, organization_id: str) -> dict[str, Any]:
     destination_role = iam_arn(account, "role/AgenticAI-LogArchive-CWLDestinationRole")
     provider_role = iam_arn(
         account, "role/Nonprod-LogArchive-CustomS3AutoDeleteObjects*"
@@ -553,7 +691,8 @@ def management_policy(account: str, region: str) -> dict[str, Any]:
                 "Action": ["kms:*", "logs:*", "oam:*", "s3:*"],
                 "Resource": "*",
             },
-            *omni_hub_statements(account, region),
+            *organizations_statements(account, organization_id),
+            *omni_domain_statements(account),
             {
                 "Sid": "ReadCdkBootstrapVersion",
                 "Effect": "Allow",
@@ -708,6 +847,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", required=True)
     parser.add_argument("--target-account-id", action="append", default=[])
     parser.add_argument("--connection-arn")
+    parser.add_argument(
+        "--organization-id",
+        help="AWS Organization id (o-...). Required for the management policy, "
+        "which pins OU and SCP lifecycle to that organization.",
+    )
     parser.add_argument("--application-id", default="demo")
     parser.add_argument("--tenant-id", default="demo")
     parser.add_argument("--agent-id", default="primary")
@@ -732,14 +876,28 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "target accounts and connection ARN apply only to the platform policy"
         )
+    if args.account_role == "management":
+        if not args.organization_id:
+            parser.error("management policy requires --organization-id (o-...)")
+        if not ORGANIZATION_ID.fullmatch(args.organization_id):
+            parser.error("--organization-id must look like o-xxxxxxxxxx")
+    elif args.organization_id:
+        parser.error("--organization-id applies only to the management policy")
     return args
+
+
+def policy_size(policy: dict[str, Any]) -> int:
+    """Characters IAM counts toward the managed-policy limit (whitespace excluded)."""
+    return len(json.dumps(policy, separators=(",", ":"), sort_keys=True))
 
 
 def render(args: argparse.Namespace) -> dict[str, Any]:
     if args.account_role == "workstream":
         return workstream_policy(args.account_id)
     if args.account_role == "management":
-        return management_policy(args.account_id, args.region)
+        return management_policy(args.account_id, args.region, args.organization_id)
+    if args.account_role == "audit":
+        return audit_policy(args.account_id, args.region)
     return platform_policy(
         args.account_id,
         args.region,
@@ -753,7 +911,15 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    print(json.dumps(render(parse_args()), indent=2, sort_keys=True))
+    policy = render(parse_args())
+    size = policy_size(policy)
+    if size > IAM_MANAGED_POLICY_MAX_CHARS:
+        raise SystemExit(
+            f"rendered policy is {size} characters without whitespace; IAM managed "
+            f"policies allow {IAM_MANAGED_POLICY_MAX_CHARS}. Trim or split the role "
+            "before creating the policy."
+        )
+    print(json.dumps(policy, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
