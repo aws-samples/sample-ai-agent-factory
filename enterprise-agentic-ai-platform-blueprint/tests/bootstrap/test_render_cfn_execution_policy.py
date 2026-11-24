@@ -377,13 +377,14 @@ def test_management_policy_pins_organizations_changes_to_the_org_stack() -> None
 
     # Creating an OU (under the root) or an SCP is allowed only inside the
     # OrgStack: CloudFormation sends its reserved stack-name tag in every
-    # Create request.
+    # Create request, and a tagged create also authorizes TagResource.
     create = by_sid(policy, "CreateOuAndScpForStack")
     assert set(create["Action"]) == {
         "organizations:CreateOrganizationalUnit",
         "organizations:CreatePolicy",
+        "organizations:TagResource",
     }
-    assert set(create["Resource"]) == {root, scp}
+    assert set(create["Resource"]) == {root, ou, scp}
     assert create["Condition"] == {"StringEquals": {f"aws:RequestTag/{STACK_TAG}": ORG_STACK}}
 
     # Every change to an existing OU or SCP requires the resource to carry the
@@ -392,9 +393,16 @@ def test_management_policy_pins_organizations_changes_to_the_org_stack() -> None
     assert set(mutate["Action"]) == ORGANIZATIONS_MUTATIONS
     assert set(mutate["Resource"]) == {ou, scp}
     assert mutate["Condition"] == {"StringEquals": {f"aws:ResourceTag/{STACK_TAG}": ORG_STACK}}
+    destructive = ORGANIZATIONS_MUTATIONS - {"organizations:TagResource"}
+    stack_conditions = (
+        {"StringEquals": {f"aws:RequestTag/{STACK_TAG}": ORG_STACK}},
+        {"StringEquals": {f"aws:ResourceTag/{STACK_TAG}": ORG_STACK}},
+    )
     for statement in policy["Statement"]:
-        if ORGANIZATIONS_MUTATIONS & actions(statement):
+        if destructive & actions(statement):
             assert statement["Sid"] == "ChangeStackOwnedOuAndScp"
+        if "organizations:TagResource" in actions(statement):
+            assert statement.get("Condition") in stack_conditions, statement["Sid"]
 
     read = by_sid(policy, "ReadOuAndScp")
     assert "Condition" not in read
@@ -406,29 +414,27 @@ def test_management_policy_pins_organizations_changes_to_the_org_stack() -> None
         "organizations:ListTagsForResource",
         "organizations:ListTargetsForPolicy",
     }
-    unscoped = by_sid(policy, "ManageOrganization")
+    unscoped = by_sid(policy, "ReadOrganization")
     assert unscoped["Resource"] == "*"
     assert set(unscoped["Action"]) == {
-        "organizations:CreateOrganization",
         "organizations:DescribeOrganization",
         "organizations:ListOrganizationalUnitsForParent",
         "organizations:ListPolicies",
         "organizations:ListRoots",
     }
-    slr = by_sid(policy, "CreateOrganizationsSlr")
-    assert slr["Action"] == "iam:CreateServiceLinkedRole"
-    assert slr["Condition"] == {"StringEquals": {"iam:AWSServiceName": "organizations.amazonaws.com"}}
 
     granted = all_actions(policy)
     assert "organizations:*" not in granted
-    # Deleting the Organization, account membership (invite/move/remove/close)
-    # and account ARNs are never part of the stage.
+    # Creating or deleting the Organization, account membership
+    # (invite/move/remove/close) and account ARNs are never part of the stage.
     assert not {
+        "organizations:CreateOrganization",
         "organizations:DeleteOrganization",
         "organizations:MoveAccount",
         "organizations:InviteAccountToOrganization",
         "organizations:RemoveAccountFromOrganization",
         "organizations:CloseAccount",
+        "iam:CreateServiceLinkedRole",
     } & granted
     assert not any(":account/" in r for s in policy["Statement"] for r in resources(s))
 
@@ -473,6 +479,14 @@ def test_management_stack_name_defaults_to_the_org_stack_and_is_validated() -> N
     )
     assert malformed.returncode != 0
     assert "--stack-name must be a CloudFormation stack name" in malformed.stderr
+    without_org = subprocess.run(
+        [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION, "--stack-name", ORG_STACK],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert without_org.returncode != 0
+    assert "--stack-name needs --organization-id" in without_org.stderr
     rejected = subprocess.run(
         [sys.executable, str(SCRIPT), "audit", "--account-id", AUDIT, "--region", REGION, "--stack-name", ORG_STACK],
         cwd=ROOT,
@@ -499,15 +513,27 @@ def test_management_policy_keeps_the_omni_domain_and_leaves_the_hub_to_audit() -
     assert "xray:UpdateTraceSegmentDestination" not in granted
 
 
-def test_management_requires_organization_id_and_other_roles_reject_it() -> None:
-    missing = subprocess.run(
+def test_management_without_organization_id_keeps_the_previous_document() -> None:
+    # Backwards compatible: the pre-existing invocation still renders, carries
+    # no Organizations grant, and says so on stderr (stdout stays pure JSON).
+    previous = subprocess.run(
         [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
-    assert missing.returncode != 0
-    assert "requires --organization-id" in missing.stderr
+    assert previous.returncode == 0
+    policy = json.loads(previous.stdout)
+    assert not any(action.startswith("organizations:") for action in all_actions(policy))
+    assert {s["Sid"] for s in policy["Statement"]} >= {"ProvisionOmniOrganizationDomain", "ManageLogArchiveRoles"}
+    assert "cannot deploy the OrgStack" in previous.stderr
+    pinned = render("management")
+    assert {s["Sid"] for s in pinned["Statement"]} - {s["Sid"] for s in policy["Statement"]} == {
+        "CreateOuAndScpForStack",
+        "ChangeStackOwnedOuAndScp",
+        "ReadOuAndScp",
+        "ReadOrganization",
+    }
     malformed = subprocess.run(
         [sys.executable, str(SCRIPT), "management", "--account-id", MANAGEMENT, "--region", REGION, "--organization-id", "org-123"],
         cwd=ROOT,
@@ -563,6 +589,7 @@ def test_every_rendered_policy_fits_one_iam_managed_policy() -> None:
     for role, policy in (
         ("workstream", render("workstream")),
         ("management", render("management")),
+        ("management --stack-name", render("management", "--stack-name", "A" * 128)),
         ("audit", render("audit")),
         ("platform", render("platform", "--target-account-id", WORKSTREAM, "--connection-arn", CONNECTION)),
     ):

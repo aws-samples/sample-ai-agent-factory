@@ -25,10 +25,15 @@ Each rendered document must fit one IAM managed policy (6,144 characters
 without whitespace); the script exits non-zero instead of emitting a document
 IAM would refuse.
 
-The management document lets CloudFormation create OUs and SCPs only as part
-of the OrgStack (default `--stack-name AgenticAI-Management-OrgStack`) and
-change or delete only the OUs and SCPs that stack created, keyed on the
-reserved aws:cloudformation:stack-name tag CloudFormation applies itself.
+With `--organization-id` the management document also carries the OU and SCP
+lifecycle of that organization: CloudFormation may create OUs and SCPs only
+as part of the OrgStack (default `--stack-name AgenticAI-Management-OrgStack`)
+and change or delete only the OUs and SCPs that stack created, keyed on the
+reserved aws:cloudformation:stack-name tag CloudFormation applies itself. A
+scoped document cannot cover creating the Organization (its id does not exist
+yet): create it once, then render with the id and deploy the stage against
+the existing organization. Without `--organization-id` the document is the
+previous one (Omni domain and LogArchive statements only).
 
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
@@ -39,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -508,17 +514,20 @@ LOG_ARCHIVE_ROLE_ACTIONS = [
     "iam:UpdateRole",
 ]
 
-# `management` stage (OrgStack): the Organization, the OU hierarchy and SCPs
-# 01-13 through the AWS::Organizations::* CloudFormation handlers. Every action
-# below is one those handlers call (their registry schemas list the same set).
+# `management` stage (OrgStack): the OU hierarchy and SCPs 01-13 through the
+# AWS::Organizations::* CloudFormation handlers. Every action below is one
+# those handlers call (their registry schemas list the same set).
 # CloudFormation sends its reserved aws:cloudformation:* tags inside each
 # CreateOrganizationalUnit / CreatePolicy request and the resources keep them,
 # so creation requires the stack-name request tag and every later change
 # requires the matching resource tag: the role cannot rename, delete, detach or
-# re-tag an OU or SCP that an operator or another stack created.
+# re-tag an OU or SCP that an operator or another stack created. A tagged
+# create also authorizes organizations:TagResource (dependent action), which
+# the same request-tag condition covers.
 ORGANIZATIONS_CREATE_ACTIONS = [
     "organizations:CreateOrganizationalUnit",
     "organizations:CreatePolicy",
+    "organizations:TagResource",
 ]
 ORGANIZATIONS_MUTATE_ACTIONS = [
     "organizations:UpdateOrganizationalUnit",
@@ -537,12 +546,11 @@ ORGANIZATIONS_READ_ACTIONS = [
     "organizations:ListTagsForResource",
     "organizations:ListTargetsForPolicy",
 ]
-# The Organization resource (created unless the stage adopts an existing
-# organization) plus the list calls that take no resource or only the root.
-# Deleting the Organization is deliberately absent: a stack delete leaves it
-# to an operator.
-ORGANIZATION_ACTIONS = [
-    "organizations:CreateOrganization",
+# Reads that take no resource, or only the root. Creating or deleting the
+# Organization itself is never granted: a scoped document is pinned to an
+# organization id that only exists once the Organization does, so the stage
+# adopts an existing organization when it deploys through this role.
+ORGANIZATION_READ_ACTIONS = [
     "organizations:DescribeOrganization",
     "organizations:ListOrganizationalUnitsForParent",
     "organizations:ListPolicies",
@@ -553,12 +561,12 @@ ORGANIZATION_ACTIONS = [
 def organizations_statements(
     account: str, organization_id: str, stack_name: str
 ) -> list[dict[str, Any]]:
-    """Organization, OU and SCP lifecycle for the `management` stage.
+    """OU and SCP lifecycle for the `management` stage.
 
-    Resources are pinned to one organization; creating an OU or SCP requires
-    CloudFormation's stack-name request tag for `stack_name`, and changing or
-    deleting one requires the matching resource tag, so only the OUs and SCPs
-    that stack created are ever mutable through this role.
+    Resources are pinned to one organization; creating (and tagging) an OU or
+    SCP requires CloudFormation's stack-name request tag for `stack_name`, and
+    changing or deleting one requires the matching resource tag, so only the
+    OUs and SCPs that stack created are ever mutable through this role.
     """
     root = f"arn:aws:organizations::{account}:root/{organization_id}/*"
     ou = f"arn:aws:organizations::{account}:ou/{organization_id}/*"
@@ -566,11 +574,12 @@ def organizations_statements(
     return [
         {
             # OUs are created directly under the root (the parent is the resource
-            # CreateOrganizationalUnit authorizes against); the stage never nests them.
+            # CreateOrganizationalUnit authorizes against; the stage never nests
+            # them); the dependent TagResource is authorized on the new OU or SCP.
             "Sid": "CreateOuAndScpForStack",
             "Effect": "Allow",
             "Action": ORGANIZATIONS_CREATE_ACTIONS,
-            "Resource": [root, scp],
+            "Resource": [root, ou, scp],
             "Condition": {
                 "StringEquals": {f"aws:RequestTag/{CFN_STACK_NAME_TAG}": stack_name}
             },
@@ -591,21 +600,10 @@ def organizations_statements(
             "Resource": [ou, scp],
         },
         {
-            "Sid": "ManageOrganization",
+            "Sid": "ReadOrganization",
             "Effect": "Allow",
-            "Action": ORGANIZATION_ACTIONS,
+            "Action": ORGANIZATION_READ_ACTIONS,
             "Resource": "*",
-        },
-        {
-            # CreateOrganization provisions AWSServiceRoleForOrganizations; the
-            # service-name condition is how IAM pins a service-linked role.
-            "Sid": "CreateOrganizationsSlr",
-            "Effect": "Allow",
-            "Action": "iam:CreateServiceLinkedRole",
-            "Resource": "*",
-            "Condition": {
-                "StringEquals": {"iam:AWSServiceName": "organizations.amazonaws.com"}
-            },
         },
     ]
 
@@ -757,8 +755,14 @@ def audit_policy(account: str, region: str) -> dict[str, Any]:
 
 
 def management_policy(
-    account: str, region: str, organization_id: str, stack_name: str
+    account: str, region: str, organization_id: str | None, stack_name: str | None
 ) -> dict[str, Any]:
+    """Management account document; the OU/SCP lifecycle needs the organization id."""
+    organizations = (
+        organizations_statements(account, organization_id, stack_name or MANAGEMENT_STACK_NAME)
+        if organization_id
+        else []
+    )
     destination_role = iam_arn(account, "role/AgenticAI-LogArchive-CWLDestinationRole")
     provider_role = iam_arn(
         account, "role/Nonprod-LogArchive-CustomS3AutoDeleteObjects*"
@@ -772,7 +776,7 @@ def management_policy(
                 "Action": ["kms:*", "logs:*", "oam:*", "s3:*"],
                 "Resource": "*",
             },
-            *organizations_statements(account, organization_id, stack_name),
+            *organizations,
             *omni_domain_statements(account),
             {
                 "Sid": "ReadCdkBootstrapVersion",
@@ -894,14 +898,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--connection-arn")
     parser.add_argument(
         "--organization-id",
-        help="AWS Organization id (o-...). Required for the management policy, "
-        "which pins OU and SCP lifecycle to that organization.",
+        help="AWS Organization id (o-...). Management policy only: adds the OU and "
+        "SCP lifecycle pinned to that organization. Without it the document "
+        "cannot deploy the OU/SCP stage.",
     )
     parser.add_argument(
         "--stack-name",
         help="CloudFormation stack name of the management stage (default "
-        f"{MANAGEMENT_STACK_NAME}). The management policy lets the role create "
-        "OUs and SCPs only for this stack and change only the ones it created.",
+        f"{MANAGEMENT_STACK_NAME}; needs --organization-id). The management "
+        "policy lets the role create OUs and SCPs only for this stack and "
+        "change only the ones it created.",
     )
     parser.add_argument("--application-id", default="demo")
     parser.add_argument("--tenant-id", default="demo")
@@ -928,14 +934,21 @@ def parse_args() -> argparse.Namespace:
             "target accounts and connection ARN apply only to the platform policy"
         )
     if args.account_role == "management":
-        if not args.organization_id:
-            parser.error("management policy requires --organization-id (o-...)")
-        if not ORGANIZATION_ID.fullmatch(args.organization_id):
+        if args.organization_id and not ORGANIZATION_ID.fullmatch(args.organization_id):
             parser.error("--organization-id must look like o-xxxxxxxxxx")
-        if args.stack_name is None:
+        if args.stack_name is not None and not args.organization_id:
+            parser.error("--stack-name needs --organization-id")
+        if args.organization_id and args.stack_name is None:
             args.stack_name = MANAGEMENT_STACK_NAME
-        if not STACK_NAME.fullmatch(args.stack_name):
+        if args.stack_name is not None and not STACK_NAME.fullmatch(args.stack_name):
             parser.error("--stack-name must be a CloudFormation stack name")
+        if not args.organization_id:
+            print(
+                "note: no --organization-id, so the management document carries no "
+                "OU/SCP lifecycle and cannot deploy the OrgStack. Create the "
+                "Organization first, then re-render with its id.",
+                file=sys.stderr,
+            )
     elif args.organization_id or args.stack_name:
         parser.error(
             "--organization-id and --stack-name apply only to the management policy"
