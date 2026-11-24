@@ -160,9 +160,11 @@ export interface OmniHubStackProps extends StackProps {
   /**
    * Name of the customer-managed policy every hub role carries as permissions
    * boundary (the operator role keeps the AWS-managed Omni boundary). Render it
-   * with `render-cfn-execution-policy.py hub-role-boundary` and create it once
-   * in this account; required when the stack deploys through the Audit
-   * account's scoped CloudFormation execution policy.
+   * with `render-cfn-execution-policy.py hub-role-boundary` for this Region and
+   * create it once per hub Region in this account
+   * (`AgenticAI-OmniHubRoleBoundary-<region>`: the document pins Regional
+   * resources, so Regions cannot share one policy); required when the stack
+   * deploys through the Audit account's scoped CloudFormation execution policy.
    */
   readonly roleBoundaryPolicyName?: string;
   readonly tags?: Record<string, string>;

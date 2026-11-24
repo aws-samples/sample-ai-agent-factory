@@ -54,7 +54,7 @@ SPACE_ALIAS = f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-space-{REGION}
 OPERATOR_ROLE = f"arn:aws:iam::{AUDIT}:role/CloudWatchOmniOperatorRole"
 EVALUATION_ROLE = f"arn:aws:iam::{AUDIT}:role/service-role/AgentCoreEvaluationRole-omni-{REGION}"
 OMNI_BOUNDARY = "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy"
-HUB_BOUNDARY = f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary"
+HUB_BOUNDARY = f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary-{REGION}"
 ADMINISTRATOR = "arn:aws:iam::aws:policy/AdministratorAccess"
 SCP = f"arn:aws:organizations::{MANAGEMENT}:policy/{ORGANIZATION}/service_control_policy/p-examplepol"
 
@@ -73,6 +73,26 @@ def context(*pairs: tuple[str, str]) -> list[dict]:
     return [{"ContextKeyName": key, "ContextKeyValues": [value], "ContextKeyType": "string"} for key, value in pairs]
 
 
+def decisions_per_resource(
+    document: str,
+    actions: list[str],
+    resources: list[str],
+    ctx: list[dict] | None = None,
+    boundary: str | None = None,
+) -> dict[tuple[str, str], str]:
+    """One decision per (action, resource) pair; nothing is collapsed."""
+    iam = boto3.client("iam", region_name="us-east-1")
+    params = {"PolicyInputList": [document], "ActionNames": actions, "ResourceArns": resources}
+    if ctx:
+        params["ContextEntries"] = ctx
+    if boundary:
+        params["PermissionsBoundaryPolicyInputList"] = [boundary]
+    results = iam.simulate_custom_policy(**params)["EvaluationResults"]
+    decided = {(r["EvalActionName"], r["EvalResourceName"]): r["EvalDecision"] for r in results}
+    assert len(decided) == len(actions) * len(resources), decided
+    return decided
+
+
 def decisions(
     document: str,
     actions: list[str],
@@ -80,13 +100,9 @@ def decisions(
     ctx: list[dict] | None = None,
     boundary: str | None = None,
 ) -> dict[str, str]:
-    iam = boto3.client("iam", region_name="us-east-1")
-    params = {"PolicyInputList": [document], "ActionNames": actions, "ResourceArns": resources}
-    if ctx:
-        params["ContextEntries"] = ctx
-    if boundary:
-        params["PermissionsBoundaryPolicyInputList"] = [boundary]
-    return {r["EvalActionName"]: r["EvalDecision"] for r in iam.simulate_custom_policy(**params)["EvaluationResults"]}
+    """Decision per action for exactly one resource (a second one would be hidden)."""
+    assert len(resources) == 1, "use decisions_per_resource for several resources"
+    return {action: decision for (action, _resource), decision in decisions_per_resource(document, actions, resources, ctx, boundary).items()}
 
 
 ADMINISTRATOR_DOCUMENT = json.dumps(
@@ -126,13 +142,14 @@ def test_audit_role_never_creates_tags_or_changes_a_key(audit_document: str) -> 
         context((f"aws:ResourceTag/{OWNER_TAG}", "true")),
     )
     assert set(owned.values()) == {"implicitDeny"}
-    aliases = decisions(
+    # Alias operations authorize against the alias and the key: both sides denied.
+    aliases = decisions_per_resource(
         audit_document,
         ["kms:CreateAlias", "kms:UpdateAlias", "kms:DeleteAlias"],
         [SPACE_ALIAS, KEY],
         context((f"aws:ResourceTag/{OWNER_TAG}", "true")),
     )
-    assert set(aliases.values()) == {"implicitDeny"}
+    assert len(aliases) == 6 and set(aliases.values()) == {"implicitDeny"}
 
 
 def test_audit_role_uses_only_keys_that_carry_the_hub_tag(audit_document: str) -> None:

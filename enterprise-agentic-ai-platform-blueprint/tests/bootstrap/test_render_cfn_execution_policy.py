@@ -361,7 +361,7 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     assert set(hub_gate["Action"]) == gating
     assert set(hub_gate["Resource"]) == set(manage["Resource"]) - {operator}
     assert hub_gate["Condition"] == {
-        "StringEquals": {"iam:PermissionsBoundary": f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary"}
+        "StringEquals": {"iam:PermissionsBoundary": f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary-{REGION}"}
     }
     assert "iam:DeleteRolePermissionsBoundary" not in all_actions(policy)
     for statement in policy["Statement"]:
@@ -569,6 +569,41 @@ def test_hub_role_boundary_caps_hub_roles_to_what_they_do_in_this_account() -> N
         "lambda:InvokeFunction",
         "kms:Decrypt",
     } <= granted
+
+
+def test_hub_role_boundary_is_rendered_and_gated_per_hub_region() -> None:
+    """A second hub Region gets its own boundary policy, matched by its own audit document.
+
+    IAM policy names are account-wide and the boundary pins Regional resources,
+    so one shared `AgenticAI-OmniHubRoleBoundary` would deny the second
+    Region's evaluations, evaluator functions and keys. Each Region's name
+    carries the Region, and the audit document for that Region gates on it.
+    """
+    regions = ("eu-west-1", "us-east-1")
+    names = {}
+    for region in regions:
+        boundary = subprocess.run(
+            [sys.executable, str(SCRIPT), "hub-role-boundary", "--account-id", AUDIT, "--region", region],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+        audit = json.loads(
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "audit", "--account-id", AUDIT, "--region", region],
+                cwd=ROOT, check=True, capture_output=True, text=True,
+            ).stdout
+        )
+        gate = by_sid(audit, "CreateBoundedHubRoles")
+        names[region] = gate["Condition"]["StringEquals"]["iam:PermissionsBoundary"]
+        assert names[region] == f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary-{region}"
+        # The Regional statements of the boundary name only that Region.
+        sids = {statement["Sid"]: statement for statement in json.loads(boundary)["Statement"]}
+        for sid in ("HubEvaluations", "HubCodeEvaluators", "HubKeys"):
+            for resource in resources(sids[sid]):
+                assert f":{region}:" in resource, (region, sid, resource)
+        assert f"arn:aws:bedrock:{region}:{AUDIT}:inference-profile/*" in resources(sids["HubJudgeModels"])
+    assert names["eu-west-1"] != names["us-east-1"]
+    readme = (ROOT / "README.md").read_text()
+    assert "AgenticAI-OmniHubRoleBoundary-<REGION>" in readme and "once per hub Region" in readme
 
 
 def test_audit_policy_grants_no_key_creation_or_change_so_operators_own_the_hub_keys() -> None:

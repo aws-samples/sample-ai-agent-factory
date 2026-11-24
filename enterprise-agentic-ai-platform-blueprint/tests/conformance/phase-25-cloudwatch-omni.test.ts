@@ -160,7 +160,7 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
           sourceRegions: [REGION],
         },
         goldenGate: { runnerPrincipalArns: [`arn:aws:iam::${CELL}:role/AgenticAI-WorkloadPipeline-Evaluation`] },
-        roleBoundaryPolicyName: "AgenticAI-OmniHubRoleBoundary",
+        roleBoundaryPolicyName: "AgenticAI-OmniHubRoleBoundary-eu-west-1",
         tags: TAGS,
       }),
     );
@@ -171,7 +171,7 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
       if (role.Properties.RoleName === "CloudWatchOmniOperatorRole") {
         expect(boundary).toContain("CloudWatchOmniSpaceAccessPolicy");
       } else {
-        expect(boundary).toContain("AgenticAI-OmniHubRoleBoundary");
+        expect(boundary).toContain("AgenticAI-OmniHubRoleBoundary-eu-west-1");
       }
     }
     // Without the name only the operator role carries a boundary (unchanged default).

@@ -506,7 +506,18 @@ OMNI_ROLE_MANAGEMENT_ACTIONS = [
 # blueprint boundary rendered by `hub-role-boundary`. The actions that set or
 # widen a role's permissions are gated on the boundary that role must carry,
 # and a boundary can never be removed (no iam:DeleteRolePermissionsBoundary).
-OMNI_HUB_ROLE_BOUNDARY_NAME = "AgenticAI-OmniHubRoleBoundary"
+# The boundary document pins datasets, batch evaluations, evaluator functions
+# and keys to one Region, so each hub Region has its own policy (IAM policy
+# names are account-wide): the name carries the Region, and the audit document
+# for that Region gates on exactly that policy.
+OMNI_HUB_ROLE_BOUNDARY_NAME_PREFIX = "AgenticAI-OmniHubRoleBoundary"
+
+
+def hub_role_boundary_name(region: str) -> str:
+    """Name of the hub-role permissions boundary for one hub Region."""
+    return f"{OMNI_HUB_ROLE_BOUNDARY_NAME_PREFIX}-{region}"
+
+
 OPERATOR_ROLE_BOUNDARY_ARN = "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy"
 OPERATOR_ROLE_POLICY_ARNS = [
     OPERATOR_ROLE_BOUNDARY_ARN,
@@ -717,7 +728,7 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     omni_roles = [operator_role, *hub_roles]
     bounded_roles = [*hub_roles, runner_role]
     managed_roles = [operator_role, *bounded_roles]
-    hub_boundary = iam_arn(account, f"policy/{OMNI_HUB_ROLE_BOUNDARY_NAME}")
+    hub_boundary = iam_arn(account, f"policy/{hub_role_boundary_name(region)}")
     return [
         {
             # Actions with no resource type: the space, its dashboards, the
@@ -986,8 +997,10 @@ def hub_role_boundary_policy(account: str, region: str) -> dict[str, Any]:
     groups of the account (any Region, because the tag-propagation role covers a
     backup Region), the account's datasets and batch evaluations, judge models
     and inference profiles, the account's evaluator functions and keys that
-    carry the hub ownership tag. Create it once in the Audit account as
-    `AgenticAI-OmniHubRoleBoundary`; the audit execution policy refuses to
+    carry the hub ownership tag. Create it once per hub Region in the Audit
+    account as `AgenticAI-OmniHubRoleBoundary-<region>` (the document pins that
+    Region's resources and IAM policy names are account-wide, so Regions cannot
+    share one); the audit document rendered for the same Region refuses to
     create or widen a hub role without it, and never lets it be removed.
     """
     return {
