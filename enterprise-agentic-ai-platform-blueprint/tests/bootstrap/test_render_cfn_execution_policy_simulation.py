@@ -183,10 +183,9 @@ def test_audit_role_uses_only_keys_that_carry_the_hub_tag(audit_document: str) -
 
 def test_audit_role_creates_the_operator_role_only_within_the_omni_boundary(audit_document: str) -> None:
     omni = context(("iam:PermissionsBoundary", OMNI_BOUNDARY))
-    assert decisions(audit_document, ["iam:CreateRole", "iam:PutRolePermissionsBoundary"], [OPERATOR_ROLE], omni) == {
-        "iam:CreateRole": "allowed",
-        "iam:PutRolePermissionsBoundary": "allowed",
-    }
+    assert decisions(audit_document, ["iam:CreateRole"], [OPERATOR_ROLE], omni) == {"iam:CreateRole": "allowed"}
+    # The boundary is set at creation only: bounding an existing role is an operator step.
+    assert decisions(audit_document, ["iam:PutRolePermissionsBoundary"], [OPERATOR_ROLE], omni) == {"iam:PutRolePermissionsBoundary": "implicitDeny"}
     # The blueprint boundary is not the operator role's; neither is an inline policy.
     assert decisions(audit_document, ["iam:CreateRole"], [OPERATOR_ROLE], context(("iam:PermissionsBoundary", HUB_BOUNDARY))) == {"iam:CreateRole": "implicitDeny"}
     assert decisions(audit_document, ["iam:PutRolePolicy"], [OPERATOR_ROLE], omni) == {"iam:PutRolePolicy": "implicitDeny"}
@@ -199,8 +198,11 @@ def test_audit_role_creates_the_operator_role_only_within_the_omni_boundary(audi
 
 def test_audit_role_creates_hub_roles_only_within_the_blueprint_boundary(audit_document: str) -> None:
     bounded = context(("iam:PermissionsBoundary", HUB_BOUNDARY))
-    gated = ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:PutRolePermissionsBoundary"]
+    gated = ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"]
     assert set(decisions(audit_document, gated, [EVALUATION_ROLE], bounded).values()) == {"allowed"}
+    # Even when the approved boundary is the one being requested, putting it on an
+    # existing role is not the execution role's to do (an operator bounds legacy roles).
+    assert decisions(audit_document, ["iam:PutRolePermissionsBoundary"], [EVALUATION_ROLE], bounded) == {"iam:PutRolePermissionsBoundary": "implicitDeny"}
     # Without a boundary, with the operator's AWS-managed one, or with an administrator boundary: no.
     assert set(decisions(audit_document, gated, [EVALUATION_ROLE]).values()) == {"implicitDeny"}
     assert set(decisions(audit_document, gated, [EVALUATION_ROLE], context(("iam:PermissionsBoundary", OMNI_BOUNDARY))).values()) == {"implicitDeny"}

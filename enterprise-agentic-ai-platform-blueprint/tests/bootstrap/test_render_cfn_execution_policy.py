@@ -355,12 +355,14 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
         "iam:DeleteRole",
         "iam:DeleteRolePolicy",
         "iam:DetachRolePolicy",
-        "iam:PutRolePermissionsBoundary",
         "iam:PutRolePolicy",
         "iam:UpdateAssumeRolePolicy",
         "iam:UpdateRole",
         "iam:UpdateRoleDescription",
     }
+    # The boundary is set by CreateRole and never granted as a separate step, so
+    # the role cannot bound a legacy role itself (and then change it), nor unbound one.
+    assert not {"iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary"} & all_actions(policy)
     operator = f"arn:aws:iam::{AUDIT}:role/CloudWatchOmniOperatorRole"
     omni_policies = {
         "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy",

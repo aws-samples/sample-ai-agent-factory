@@ -528,17 +528,20 @@ OPERATOR_ROLE_POLICY_ARNS = [
 # (Service Authorization Reference) is gated on the boundary the role must
 # carry: creating a role and setting or widening its permissions, but also
 # changing its trust policy, description or session duration, detaching or
-# deleting policies and deleting the role. A role that predates the boundary
-# (created with operator credentials) therefore cannot be re-trusted or
-# otherwise touched through the execution role until an operator puts the
-# boundary on it. The operator role has no inline policy, so it gets no
-# PutRolePolicy / DeleteRolePolicy.
+# deleting policies and deleting the role. The boundary itself is set by
+# CreateRole and never granted as a separate step: neither
+# PutRolePermissionsBoundary (which IAM gates on the boundary being requested,
+# so the role could otherwise bound a legacy role itself and then change it)
+# nor DeleteRolePermissionsBoundary is in the document. A role that predates
+# the boundary (created with operator credentials) therefore cannot be
+# re-trusted or otherwise touched through the execution role until an operator
+# puts the boundary on it. The operator role has no inline policy, so it gets
+# no PutRolePolicy / DeleteRolePolicy.
 OPERATOR_ROLE_GATED_ACTIONS = [
     "iam:AttachRolePolicy",
     "iam:CreateRole",
     "iam:DeleteRole",
     "iam:DetachRolePolicy",
-    "iam:PutRolePermissionsBoundary",
     "iam:UpdateAssumeRolePolicy",
     "iam:UpdateRole",
     "iam:UpdateRoleDescription",
@@ -549,7 +552,6 @@ ROLE_BOUNDARY_GATED_ACTIONS = [
     "iam:DeleteRole",
     "iam:DeleteRolePolicy",
     "iam:DetachRolePolicy",
-    "iam:PutRolePermissionsBoundary",
     "iam:PutRolePolicy",
     "iam:UpdateAssumeRolePolicy",
     "iam:UpdateRole",
