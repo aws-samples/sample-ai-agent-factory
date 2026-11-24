@@ -15,6 +15,18 @@
  * (named, at most ten per account and Region), so one named policy per
  * blueprint stack is enough and a second copy in another stack is harmless.
  *
+ * Activation is not instant (observed live 2026-11-24, eu-west-1): the
+ * TransactionSearchConfig resource completes only once the trace destination
+ * reports ACTIVE, about six minutes, and while the destination is PENDING the
+ * service refuses updates and deletes ("Updates are not allowed while the
+ * current status is PENDING"), so a failing stack rolls back into
+ * ROLLBACK_FAILED until the destination settles. Resources that need the
+ * CloudWatch Logs destination, such as a CloudWatch Logs TRACES delivery for
+ * an AgentCore Runtime, must declare a dependency on this construct (for
+ * example `runtime.node.addDependency(transactionSearch)`); being in the same
+ * stack is not enough, because CreateDelivery is refused with HTTP 400 until
+ * the destination is ACTIVE.
+ *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */

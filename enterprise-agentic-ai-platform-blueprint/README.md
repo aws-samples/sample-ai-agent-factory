@@ -551,6 +551,8 @@ Live mode fails closed. Missing credentials, probes, resources, or expected deni
 | Teardown stalls on Registry deletion                | AgentCore Registry deletion is asynchronous                      | Retry conflicts while records settle, then poll Registry absence before handling its KMS key.                                 |
 | CloudFormation delete is denied after an IAM update | New policy version has not propagated                            | Wait and verify effective permission with IAM simulation before retrying.                                                     |
 | Management stage fails on the Organization or an OU   | The account already manages an Organization, or an OU with a blueprint name exists | Deploy with `agenticai/importExistingOrganization=true` and `agenticai/existingRootId`; give the blueprint's OU another name with `agenticai/organizationalUnitNames` (never delete or rename a Control Tower OU). |
+| X-Ray `TRACES` delivery fails with 400 `X-Ray Delivery Destination is supported with CloudWatch Logs` | Transaction Search was switched on in the same deployment and is still `PENDING` | Make the delivery (or the Runtime that owns it) depend on `TransactionSearchConstruct`, or add it in a second update once the destination is `ACTIVE`. |
+| `AWS::XRay::TransactionSearchConfig` is `DELETE_FAILED` and the stack `ROLLBACK_FAILED` | The destination cannot be updated or deleted while `PENDING`                | Wait for `aws xray get-trace-segment-destination` to report `ACTIVE`, then delete the stack again.                              |
 
 ---
 
