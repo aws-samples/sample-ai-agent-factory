@@ -371,6 +371,10 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     # calls before a new key's tags count for authorization, stay unconditioned.
     key_any = f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
     owner = "agenticai:omni-hub"
+    alias_arns = {
+        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-space-{REGION}",
+        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-centralized-logs-{REGION}",
+    }
     create_keys = by_sid(policy, "CreateOmniHubKeys")
     assert set(create_keys["Action"]) == {"kms:CreateKey", "kms:TagResource"}
     assert "Resource" not in create_keys
@@ -397,22 +401,23 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         "kms:Decrypt",
         "kms:GenerateDataKey",
     } <= set(change["Action"])
-    unpinned_kms = set(reads["Action"]) | {
-        "kms:ListAliases", "kms:ListKeys", "kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias",
-    }
+    unpinned_kms = set(reads["Action"]) | {"kms:ListAliases", "kms:ListKeys"}
     for statement in policy["Statement"]:
         kms_actions = {action for action in actions(statement) if action.startswith("kms:")}
         if kms_actions - unpinned_kms:
-            assert statement["Sid"] in {"CreateOmniHubKeys", "ChangeAndUseOmniHubKeys"}, statement["Sid"]
+            # Only the two alias names, or keys that carry the ownership tag.
+            assert statement["Sid"] in {"CreateOmniHubKeys", "ChangeAndUseOmniHubKeys"} or set(
+                resources(statement)
+            ) <= alias_arns, statement["Sid"]
     assert not {"kms:Encrypt", "kms:CreateGrant", "kms:ReEncryptFrom", "kms:Sign"} & granted
     # The tag the policy keys on is the one OmniHubStack puts on everything it creates.
     assert f'"{owner}"' in (ROOT / "apps" / "platform-account" / "lib" / "omni-hub-stack.ts").read_text()
     aliases = by_sid(policy, "ManageOmniHubKeyAliases")
-    assert set(aliases["Resource"]) == {
-        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-space-{REGION}",
-        f"arn:aws:kms:{REGION}:{AUDIT}:alias/agenticai/omni-centralized-logs-{REGION}",
-        f"arn:aws:kms:{REGION}:{AUDIT}:key/*",
-    }
+    assert set(aliases["Resource"]) == alias_arns and "Condition" not in aliases
+    assert set(aliases["Action"]) == {"kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"}
+    # The key side of every alias operation goes through the ownership pin, so an
+    # alias can only point at a hub key.
+    assert {"kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"} <= set(change["Action"])
 
     # The sink: tagging unconditioned (tag-on-create), everything else pinned to
     # the two AuditStack deployments through CloudFormation's reserved tag.
@@ -451,6 +456,30 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     assert slr["Resource"].endswith("/AWSServiceRoleForCloudWatchApplicationSignals")
     runner = by_sid(policy, "ManageOmniGoldenGateRunnerRole")
     assert runner["Resource"] == f"arn:aws:iam::{AUDIT}:role/AgenticAIGoldenGateRunner-{REGION}"
+
+
+def test_audit_policy_cannot_tag_a_pre_existing_key_so_upgrades_tag_hub_keys_first() -> None:
+    """Hubs deployed before the ownership tag existed need the README upgrade step.
+
+    Every TagResource grant is either tag-on-create (no key ARN) or pinned to
+    keys that already carry agenticai:omni-hub=true, so the role can never add
+    the tag to an existing key; an operator does that once before the first
+    deployment through the new document.
+    """
+    policy = render("audit")
+    tagging = [s for s in policy["Statement"] if "kms:TagResource" in actions(s)]
+    assert len(tagging) == 2
+    for statement in tagging:
+        condition = statement["Condition"]["StringEquals"]
+        if "NotResource" in statement:
+            assert statement["NotResource"] == "arn:aws:kms:*:*:key/*"
+            assert condition == {"aws:RequestTag/agenticai:omni-hub": "true"}
+        else:
+            assert statement["Resource"] == f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
+            assert condition == {"aws:ResourceTag/agenticai:omni-hub": "true"}
+    readme = (ROOT / "README.md").read_text()
+    assert "kms tag-resource" in readme
+    assert "TagKey=agenticai:omni-hub,TagValue=true" in readme
 
 
 ORG_STACK = "AgenticAI-Management-OrgStack"

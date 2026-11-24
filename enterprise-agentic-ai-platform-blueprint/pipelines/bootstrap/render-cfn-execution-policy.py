@@ -751,10 +751,14 @@ KMS_KEY_READ_ACTIONS = [
     "kms:GetKeyRotationStatus",
     "kms:ListResourceTags",
 ]
-# AWS::KMS::Key update and delete handler actions, plus the space key's use that
-# the AWS::CloudWatch::Space handler checks on the caller's behalf.
+# AWS::KMS::Key update and delete handler actions, the key side of the
+# AWS::KMS::Alias operations (KMS authorizes those against the alias and the
+# target key), and the space key's use that the AWS::CloudWatch::Space handler
+# checks on the caller's behalf.
 KMS_KEY_CHANGE_ACTIONS = [
+    "kms:CreateAlias",
     "kms:Decrypt",
+    "kms:DeleteAlias",
     "kms:DisableKey",
     "kms:DisableKeyRotation",
     "kms:EnableKey",
@@ -763,6 +767,7 @@ KMS_KEY_CHANGE_ACTIONS = [
     "kms:ScheduleKeyDeletion",
     "kms:TagResource",
     "kms:UntagResource",
+    "kms:UpdateAlias",
     "kms:UpdateKeyDescription",
 ]
 APPLICATION_SIGNALS_SLR = (
@@ -824,15 +829,15 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
             },
         },
         {
-            # Alias operations authorize against the alias and the target key, and
-            # alias resources accept no condition keys.
+            # The alias side of the two hub aliases; alias resources accept no
+            # condition keys, so the key side lives in ChangeAndUseOmniHubKeys and
+            # an alias can only point at a key that carries the ownership tag.
             "Sid": "ManageOmniHubKeyAliases",
             "Effect": "Allow",
             "Action": ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"],
             "Resource": [
                 arn("kms", region, account, f"alias/agenticai/omni-space-{region}"),
                 arn("kms", region, account, f"alias/agenticai/omni-centralized-logs-{region}"),
-                key_any,
             ],
         },
         {
