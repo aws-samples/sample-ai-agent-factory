@@ -501,12 +501,23 @@ OMNI_ROLE_MANAGEMENT_ACTIONS = [
 # boundary, so a template deployed through the execution role cannot turn one of
 # them into an administrator through an inline policy, a managed-policy
 # attachment or a new trust policy. The operator role keeps the AWS-managed
-# boundary the Omni documentation prescribes; every other hub role carries the
+# boundary the Omni documentation prescribes and may only receive the AWS-managed
+# Omni policies (it has no inline policy); every other hub role carries the
 # blueprint boundary rendered by `hub-role-boundary`. The actions that set or
-# widen a role's permissions are gated on one of those two boundaries, and the
-# boundary can never be removed (no iam:DeleteRolePermissionsBoundary).
+# widen a role's permissions are gated on the boundary that role must carry,
+# and a boundary can never be removed (no iam:DeleteRolePermissionsBoundary).
 OMNI_HUB_ROLE_BOUNDARY_NAME = "AgenticAI-OmniHubRoleBoundary"
 OPERATOR_ROLE_BOUNDARY_ARN = "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy"
+OPERATOR_ROLE_POLICY_ARNS = [
+    OPERATOR_ROLE_BOUNDARY_ARN,
+    "arn:aws:iam::aws:policy/CloudWatchOmniModelInferencePolicy",
+    "arn:aws:iam::aws:policy/CloudWatchOmniAWSIntegrationPolicy",
+]
+OPERATOR_ROLE_GATED_ACTIONS = [
+    "iam:AttachRolePolicy",
+    "iam:CreateRole",
+    "iam:PutRolePermissionsBoundary",
+]
 ROLE_BOUNDARY_GATED_ACTIONS = [
     "iam:AttachRolePolicy",
     "iam:CreateRole",
@@ -694,26 +705,28 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
     consuming service. The organization domain itself is the management
     account's (`omni_domain_statements`).
     """
-    omni_roles = [
-        iam_arn(account, "role/CloudWatchOmniOperatorRole"),
+    operator_role = iam_arn(account, "role/CloudWatchOmniOperatorRole")
+    hub_roles = [
         iam_arn(account, f"role/CloudWatchOmniDatasetIntegrationRole-{region}"),
         iam_arn(account, "role/service-role/AgentCoreEvaluationRole-omni-*"),
         iam_arn(account, "role/AgenticAI-Omni-HubStack-*"),
     ]
     # The golden-gate runner (agenticai/omniGoldenGateRunnerPrincipalArns) is
     # assumed by the workload pipeline, never passed to a service.
-    managed_roles = [*omni_roles, iam_arn(account, f"role/AgenticAIGoldenGateRunner-{region}")]
-    boundaries = [iam_arn(account, f"policy/{OMNI_HUB_ROLE_BOUNDARY_NAME}"), OPERATOR_ROLE_BOUNDARY_ARN]
+    runner_role = iam_arn(account, f"role/AgenticAIGoldenGateRunner-{region}")
+    omni_roles = [operator_role, *hub_roles]
+    bounded_roles = [*hub_roles, runner_role]
+    managed_roles = [operator_role, *bounded_roles]
+    hub_boundary = iam_arn(account, f"policy/{OMNI_HUB_ROLE_BOUNDARY_NAME}")
     return [
         {
             # Actions with no resource type: the space, its dashboards, the
             # centralization rule, Transaction Search and its Application Signals
-            # discovery, and the alias listing the AWS::KMS::Alias handler reads.
+            # discovery.
             "Sid": "ProvisionOmniHubUnscoped",
             "Effect": "Allow",
             "Action": [
                 "application-signals:StartDiscovery",
-                "kms:ListAliases",
                 "cloudwatch:GetDomainForOrganization",
                 "cloudwatch:CreateSpace",
                 "cloudwatch:GetSpace",
@@ -733,14 +746,27 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
             "Resource": "*",
         },
         {
-            # Creating a role, or setting or widening its permissions, only with
-            # one of the two boundaries (CreateRole checks the requested boundary,
-            # the others the boundary the role already carries).
-            "Sid": "CreateBoundedOmniHubRoles",
+            # The operator role: created only with the AWS-managed Omni boundary
+            # and given only the documented AWS-managed Omni policies; it has no
+            # inline policy, so iam:PutRolePolicy is not granted on it.
+            "Sid": "CreateBoundedOperatorRole",
+            "Effect": "Allow",
+            "Action": OPERATOR_ROLE_GATED_ACTIONS,
+            "Resource": operator_role,
+            "Condition": {
+                "StringEquals": {"iam:PermissionsBoundary": OPERATOR_ROLE_BOUNDARY_ARN},
+                "StringEqualsIfExists": {"iam:PolicyARN": OPERATOR_ROLE_POLICY_ARNS},
+            },
+        },
+        {
+            # Every other hub role: created, or given or widened permissions, only
+            # while it carries the blueprint boundary (CreateRole checks the
+            # requested boundary, the other actions the one the role carries).
+            "Sid": "CreateBoundedHubRoles",
             "Effect": "Allow",
             "Action": ROLE_BOUNDARY_GATED_ACTIONS,
-            "Resource": managed_roles,
-            "Condition": {"StringEquals": {"iam:PermissionsBoundary": boundaries}},
+            "Resource": bounded_roles,
+            "Condition": {"StringEquals": {"iam:PermissionsBoundary": hub_boundary}},
         },
         {
             "Sid": "ManageOmniHubRoles",
@@ -788,42 +814,17 @@ def omni_hub_statements(account: str, region: str) -> list[dict[str, Any]]:
 # sink lifecycle is pinned to those stacks the way the management document pins
 # OUs and SCPs. Extend the list when the AuditStack is deployed under another name.
 AUDIT_STACK_NAMES = ["AgenticAI-Platform-AuditStack", "Nonprod-Audit"]
-# OmniHubStack tags everything it creates agenticai:omni-hub=true. CloudFormation
-# applies no system tags to KMS keys (the live AWS::KMS::Key schema sets
-# cloudFormationSystemTags false), so that tag is the ownership signal for the
-# hub's keys: the role creates keys only with the tag in the request, changes or
-# uses only keys that carry it, and can never add it to an existing key because
-# the tag-on-create grant excludes every key ARN.
+# The hub's keys are deployed by operators (OmniHubKeysStack, `omni-hub-keys`
+# stage) and carry agenticai:omni-hub=true; OmniHubStack puts the same tag on
+# everything it creates. CloudFormation applies no system tags to KMS keys (the
+# live AWS::KMS::Key schema sets cloudFormationSystemTags false), so that tag is
+# how the audit document recognizes a hub key: the role may use a key that
+# carries it (the AWS::CloudWatch::Space handler encrypts with the space key on
+# the caller's behalf) and read key metadata, and never creates, tags or changes
+# a key. Tagging a key at creation would need kms:TagResource on every key of
+# the account and Region (KMS, "Controlling access to tags"), which is the
+# claim-any-key path this keeps out of the pipeline role.
 OMNI_HUB_OWNERSHIP_TAG = "agenticai:omni-hub"
-# AWS::KMS::Key read handler plus EnableKeyRotation, which the create handler
-# calls right after CreateKey. KMS can take minutes before a key's tags count for
-# authorization, so these stay unconditioned on the account's keys.
-KMS_KEY_READ_ACTIONS = [
-    "kms:DescribeKey",
-    "kms:EnableKeyRotation",
-    "kms:GetKeyPolicy",
-    "kms:GetKeyRotationStatus",
-    "kms:ListResourceTags",
-]
-# AWS::KMS::Key update and delete handler actions, the key side of the
-# AWS::KMS::Alias operations (KMS authorizes those against the alias and the
-# target key), and the space key's use that the AWS::CloudWatch::Space handler
-# checks on the caller's behalf.
-KMS_KEY_CHANGE_ACTIONS = [
-    "kms:CreateAlias",
-    "kms:Decrypt",
-    "kms:DeleteAlias",
-    "kms:DisableKey",
-    "kms:DisableKeyRotation",
-    "kms:EnableKey",
-    "kms:GenerateDataKey",
-    "kms:PutKeyPolicy",
-    "kms:ScheduleKeyDeletion",
-    "kms:TagResource",
-    "kms:UntagResource",
-    "kms:UpdateAlias",
-    "kms:UpdateKeyDescription",
-]
 APPLICATION_SIGNALS_SLR = (
     "role/aws-service-role/application-signals.cloudwatch.amazonaws.com/"
     "AWSServiceRoleForCloudWatchApplicationSignals"
@@ -831,59 +832,36 @@ APPLICATION_SIGNALS_SLR = (
 
 
 def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]]:
-    """KMS, Logs, OAM and Transaction Search prerequisites for the Audit account.
+    """KMS use, Logs, OAM and Transaction Search prerequisites for the Audit account.
 
-    Every action is one the CloudFormation handlers for AWS::KMS::Key,
-    AWS::KMS::Alias, AWS::Oam::Sink, AWS::CloudWatch::Space and
-    AWS::XRay::TransactionSearchConfig call (registry schemas plus the
-    Transaction Search prerequisites), pinned to the hub's keys (ownership tag)
-    and aliases, the AuditStack's sink and the two Transaction Search log groups.
+    Every action is one the CloudFormation handlers for AWS::Oam::Sink,
+    AWS::CloudWatch::Space and AWS::XRay::TransactionSearchConfig call (registry
+    schemas plus the Transaction Search prerequisites), pinned to the hub's
+    operator-provisioned keys (ownership tag), the AuditStack's sink and the two
+    Transaction Search log groups. No AWS::KMS::Key or AWS::KMS::Alias handler
+    action is granted: the hub stage imports its keys (`omni-hub-keys`).
     """
     key_any = arn("kms", region, account, "key/*")
     sink_any = arn("oam", region, account, "sink/*")
     return [
         {
-            # Tag-on-create: KMS authorizes CreateKey and its dependent TagResource
-            # without a key ARN, so excluding every key ARN leaves exactly that
-            # path, and a TagResource on an existing key never matches here. The
-            # Region condition stands in for the ARN the other statements carry.
-            "Sid": "CreateOmniHubKeys",
+            # The AWS::CloudWatch::Space handler encrypts with the space key on the
+            # caller's behalf; only keys that carry the ownership tag.
+            "Sid": "UseOmniHubKeys",
             "Effect": "Allow",
-            "Action": ["kms:CreateKey", "kms:TagResource"],
-            "NotResource": "arn:aws:kms:*:*:key/*",
-            "Condition": {
-                "StringEquals": {
-                    f"aws:RequestTag/{OMNI_HUB_OWNERSHIP_TAG}": "true",
-                    "aws:RequestedRegion": region,
-                }
-            },
-        },
-        {
-            "Sid": "ReadKeysAndEnableRotation",
-            "Effect": "Allow",
-            "Action": KMS_KEY_READ_ACTIONS,
-            "Resource": key_any,
-        },
-        {
-            "Sid": "ChangeAndUseOmniHubKeys",
-            "Effect": "Allow",
-            "Action": KMS_KEY_CHANGE_ACTIONS,
+            "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
             "Resource": key_any,
             "Condition": {
                 "StringEquals": {f"aws:ResourceTag/{OMNI_HUB_OWNERSHIP_TAG}": "true"}
             },
         },
         {
-            # The alias side of the two hub aliases; alias resources accept no
-            # condition keys, so the key side lives in ChangeAndUseOmniHubKeys and
-            # an alias can only point at a key that carries the ownership tag.
-            "Sid": "ManageOmniHubKeyAliases",
+            # The Space and TransactionSearchConfig handlers describe the keys they
+            # are given; metadata only, no key material and no change.
+            "Sid": "ReadKeyMetadata",
             "Effect": "Allow",
-            "Action": ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"],
-            "Resource": [
-                arn("kms", region, account, f"alias/agenticai/omni-space-{region}"),
-                arn("kms", region, account, f"alias/agenticai/omni-centralized-logs-{region}"),
-            ],
+            "Action": "kms:DescribeKey",
+            "Resource": key_any,
         },
         {
             # Tag-on-create: CloudFormation puts its reserved stack-name tag in the
@@ -950,14 +928,57 @@ def audit_telemetry_statements(account: str, region: str) -> list[dict[str, Any]
     ]
 
 
-def hub_role_boundary_policy() -> dict[str, Any]:
+# What the hub roles' own policies use (OmniHubSpaceConstruct, the evaluation
+# execution role, the centralization tag-propagation role and the golden-gate
+# runner), and nothing more: the boundary below is their ceiling.
+HUB_ROLE_LOG_GROUP_ACTIONS = [
+    "logs:AssociateKmsKey",
+    "logs:CreateLogGroup",
+    "logs:CreateLogStream",
+    "logs:DescribeIndexPolicies",
+    "logs:DescribeLogStreams",
+    "logs:FilterLogEvents",
+    "logs:GetLogEvents",
+    "logs:IntegrateWithDataset",
+    "logs:ListTagsForResource",
+    "logs:PutIndexPolicy",
+    "logs:PutLogEvents",
+    "logs:PutRetentionPolicy",
+    "logs:StartQuery",
+    "logs:TagResource",
+    "logs:UntagResource",
+]
+# Actions with no resource type in the Service Authorization Reference.
+HUB_ROLE_RESOURCELESS_ACTIONS = [
+    "cloudwatch:PutMetricData",
+    "cloudwatch:PutRecords",
+    "logs:DescribeLogGroups",
+    "logs:DescribeQueries",
+    "logs:GetQueryResults",
+    "logs:StopQuery",
+]
+HUB_ROLE_EVALUATION_ACTIONS = [
+    "bedrock-agentcore:DeleteBatchEvaluation",
+    "bedrock-agentcore:GetBatchEvaluation",
+    "bedrock-agentcore:GetDataset",
+    "bedrock-agentcore:ListBatchEvaluations",
+    "bedrock-agentcore:ListDatasetExamples",
+    "bedrock-agentcore:ListDatasetVersions",
+    "bedrock-agentcore:StartBatchEvaluation",
+    "bedrock-agentcore:StopBatchEvaluation",
+]
+
+
+def hub_role_boundary_policy(account: str, region: str) -> dict[str, Any]:
     """Permissions boundary for the roles the Audit account's OmniHubStack creates.
 
     A boundary grants nothing: it caps what a role's own policies can grant to
-    the telemetry services the hub roles use (Dataset forwarding, evaluations,
-    centralization tag propagation, the golden-dataset gate), so a template
-    deployed through the execution role cannot turn one of those roles into an
-    administrator. Create it once in the Audit account as
+    what the hub roles do (Dataset forwarding, evaluations, centralization tag
+    propagation, the golden-dataset gate), in this account and Region: log
+    groups of the account (any Region, because the tag-propagation role covers a
+    backup Region), the account's datasets and batch evaluations, judge models
+    and inference profiles, the account's evaluator functions and keys that
+    carry the hub ownership tag. Create it once in the Audit account as
     `AgenticAI-OmniHubRoleBoundary`; the audit execution policy refuses to
     create or widen a hub role without it, and never lets it be removed.
     """
@@ -965,23 +986,51 @@ def hub_role_boundary_policy() -> dict[str, Any]:
         "Version": "2012-10-17",
         "Statement": [
             {
-                "Sid": "OmniHubRoleCeiling",
+                "Sid": "HubLogGroups",
                 "Effect": "Allow",
-                "Action": [
-                    "bedrock-agentcore:*",
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                    "cloudwatch:*",
-                    "kms:Decrypt",
-                    "kms:DescribeKey",
-                    "kms:Encrypt",
-                    "kms:GenerateDataKey*",
-                    "lambda:GetFunction",
-                    "lambda:InvokeFunction",
-                    "logs:*",
-                ],
+                "Action": HUB_ROLE_LOG_GROUP_ACTIONS,
+                "Resource": f"arn:aws:logs:*:{account}:log-group:*",
+            },
+            {
+                "Sid": "HubResourcelessTelemetry",
+                "Effect": "Allow",
+                "Action": HUB_ROLE_RESOURCELESS_ACTIONS,
                 "Resource": "*",
-            }
+            },
+            {
+                "Sid": "HubEvaluations",
+                "Effect": "Allow",
+                "Action": HUB_ROLE_EVALUATION_ACTIONS,
+                "Resource": [
+                    arn("bedrock-agentcore", region, account, "dataset/*"),
+                    arn("bedrock-agentcore", region, account, "batch-evaluate/*"),
+                ],
+            },
+            {
+                "Sid": "HubJudgeModels",
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                "Resource": [
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    arn("bedrock", region, account, "inference-profile/*"),
+                    arn("bedrock", region, account, "application-inference-profile/*"),
+                ],
+            },
+            {
+                "Sid": "HubCodeEvaluators",
+                "Effect": "Allow",
+                "Action": ["lambda:GetFunction", "lambda:InvokeFunction"],
+                "Resource": arn("lambda", region, account, "function:*"),
+            },
+            {
+                "Sid": "HubKeys",
+                "Effect": "Allow",
+                "Action": ["kms:Decrypt", "kms:DescribeKey", "kms:Encrypt", "kms:GenerateDataKey*"],
+                "Resource": arn("kms", region, account, "key/*"),
+                "Condition": {
+                    "StringEquals": {f"aws:ResourceTag/{OMNI_HUB_OWNERSHIP_TAG}": "true"}
+                },
+            },
         ],
     }
 
@@ -1225,7 +1274,7 @@ def render(args: argparse.Namespace) -> dict[str, Any]:
     if args.account_role == "audit":
         return audit_policy(args.account_id, args.region)
     if args.account_role == "hub-role-boundary":
-        return hub_role_boundary_policy()
+        return hub_role_boundary_policy(args.account_id, args.region)
     return platform_policy(
         args.account_id,
         args.region,
