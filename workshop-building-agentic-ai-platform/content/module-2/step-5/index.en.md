@@ -154,7 +154,7 @@ time curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "What is 2+2?"}], "max_tokens": 10, "temperature": 0}' > /dev/null
 :::
 
-::alert[**Expected behaviour in this workshop.** Both calls take similar time. The workshop's task definition and setup scripts do not configure response caching, so the gateway never serves a cached response here. The `reference/litellm-config.yaml` file in `source/module-2-llm-gateway` illustrates one way to enable it (`litellm_settings: cache: true`); in a production deployment you would also add a Redis backend (`cache_params:`) so hits are shared across all gateway tasks instead of living in one container's memory.]{type="info"}
+::alert[**Expected behaviour in this workshop.** Timings can differ even when response caching is disabled; latency alone does not establish a cache hit. The workshop's task definition and setup scripts do not configure response caching, so the gateway never serves a cached response here. The `reference/litellm-config.yaml` file in `source/module-2-llm-gateway` illustrates one way to enable it (`litellm_settings: cache: true`); in a production deployment you would also add a Redis backend (`cache_params:`) so hits are shared across all gateway tasks instead of living in one container's memory.]{type="info"}
 
 ## 5.6 Platform governance summary
 

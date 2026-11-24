@@ -117,14 +117,14 @@ Open your space and choose **Agent traces** (under *Agent observability*). Searc
 
 Read the tree top to bottom and match it to the platform you built:
 
-| Span | What it proves |
-|------|----------------|
+| Span | What to check |
+|------|---------------|
 | `invoke_agent travel_agent` root | One trace per turn; the session ID and user ID from `trace_attributes` in `travel_agent.py` are on it |
 | `execute_event_loop_cycle` | One Strands reasoning cycle; a turn that calls tools has several, nested |
-| `chat` (with its `POST`) and `gen_ai.*` attributes, `server.address` = the LLM Gateway URL | Every model call went through Module 2's gateway, with the prompt and response text attached (the Module 4 patch); the token count sits on the span |
+| `chat` (with its `POST`) and `gen_ai.*` attributes, `server.address` = the LLM Gateway URL | Each model call's `server.address` is Module 2's gateway and its status is OK, with the prompt and response text attached (the Module 4 patch); the token count sits on the span |
 | `execute_tool gateway_tg-workshop-…` → `mcp tools/call tg-workshop-…` | The agent's tool call and, nested under it, the runtime's client-side span for the MCP request it sent to the AgentCore Gateway (every span in this tree carries the runtime's service name, so this is the call as the agent saw it, not the Gateway's own span); latency and status per tool, and a `Fault` marker when the tool returned an error |
-| `Bedrock AgentCore.CreateEvent` | The session manager stored a turn in AgentCore Memory |
-| `execute_tool execute_python_securely` → `Bedrock AgentCore.StartCodeInterpreterSession` / `InvokeCodeInterpreter` (third turn) | The Code Interpreter sandbox ran; usually the longest tool span in the trace |
+| `Bedrock AgentCore.CreateEvent` | The session manager stored a turn in AgentCore Memory; check the span completed without error |
+| `execute_tool execute_python_securely` → `Bedrock AgentCore.StartCodeInterpreterSession` / `InvokeCodeInterpreter` (third turn) | The Code Interpreter sandbox ran: check its status and result; usually the longest tool span in the trace |
 
 Choose **Agent sessions** to see the three traces as one conversation, and **Agent topology** to see the agent, the gateway and the tools as a graph derived from these spans. Open **Agent overview** for the agent's headline numbers — evaluations, sessions, traces, total tokens, error rate and average latency — with charts over time (tokens, failed traces, latency, volume) and an Omni-generated latency-percentile table. Token usage is the number that drives cost.
 

@@ -35,7 +35,7 @@ The agent should:
 3. Use the Code Interpreter to calculate total costs
 4. Present a structured itinerary with flight options, hotel recommendations, and pricing
 
-You should see tool chips like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat. A chip names the tool the agent requested and the gateway target it asked; click it and check that the expanded result is real flight data, not an error, before concluding the call went through the gateway rather than being answered from the model's own knowledge.
+You should see tool chips like `gw_tg-workshop-flights-mcp___search_flights_by_budget` in the chat. A chip names the tool the agent requested and the gateway target encoded in its name; click it and check that the expanded result is real flight data, not an error, before concluding the call went through the gateway rather than being answered from the model's own knowledge.
 
 The name has two halves, and both are evidence. The prefix is the `prefix=` argument you gave `MCPClient` in `tools/gateway.py`, so it depends on which connect page you followed:
 

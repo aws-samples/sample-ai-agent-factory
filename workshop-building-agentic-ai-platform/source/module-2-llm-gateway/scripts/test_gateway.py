@@ -100,9 +100,9 @@ def test_caching(client: LLMGatewayClient) -> None:
     section("5. Caching Demonstration")
     prompt = "What is 2 + 2? Reply with just the number."
 
-    print("  Sending the same request twice. The workshop gateway does not enable LiteLLM")
-    print("  response caching, so expect similar timings; a cache-enabled gateway would")
-    print("  answer the second request without calling the model.")
+    print("  Sending the same request twice. The default workshop deployment does not")
+    print("  configure response caching. Timings may vary; latency alone does not")
+    print("  establish whether requests to another gateway were served from a cache.")
     print()
 
     start = time.time()
@@ -127,8 +127,8 @@ def test_caching(client: LLMGatewayClient) -> None:
         print(f"\n  Second request was {t1/t2:.1f}x faster. Timing alone does not establish a cache"
               " hit; the default workshop deployment does not configure response caching.")
     else:
-        print("\n  Both requests took similar time. Timing alone does not establish a cache hit; the"
-              " default workshop deployment does not configure response caching, so both reached the model.")
+        print("\n  Timing alone does not establish a cache hit. The default workshop"
+              " configuration does not enable response caching.")
 
 
 def test_multi_model(client: LLMGatewayClient) -> None:

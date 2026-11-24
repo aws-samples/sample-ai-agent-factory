@@ -86,6 +86,13 @@ cfn_says_absent() {
   grep -qE '\(ValidationError\) when calling the Describe(Stacks|StackResource) operation: (Stack with id [^ ]+ does not exist|Resource [^ ]+ does not exist for stack)' <<<"$1"
 }
 
+# s3_says_absent <error text>: true only for HeadBucket's own 404. "Not Found" or
+# "does not exist" in some other error (a credential error, for example) is not
+# proof that the bucket is gone.
+s3_says_absent() {
+  grep -qE '\(404\) when calling the HeadBucket operation' <<<"$1"
+}
+
 # current_stack_status <stack>: the stack's status, DOES_NOT_EXIST, or UNKNOWN when
 # the read itself failed (access, network, throttling), so that no message guesses
 # what CloudFormation did from the failure of an API call alone.
@@ -229,8 +236,9 @@ override_names_caller() {
 # created, the grant after it failed, stack CREATE_FAILED). First the OmniSpaceId
 # output of a completed workshop-agentcore-stack; failing that, the physical ID
 # of the stack's OmniSpace resource (cloudformation:DescribeStackResource is in
-# self-service-deploy-policy-1). Both guarded with || true: a missing stack is
-# the normal case on a first deploy. Read for every deploy so the summary below
+# self-service-deploy-policy-1). Both reads treat a missing stack or resource as
+# normal (a first deploy); any other read failure stops the deploy. Read for
+# every deploy so the summary below
 # says whether this run creates the space or updates an existing one; destroy
 # and cleanup never use it.
 # Both reads distinguish "the stack (or resource) does not exist" from "the read
@@ -364,14 +372,14 @@ S3_BUCKET="${S3_BUCKET:-cfn-deploy-${DIR_NAME}${BUCKET_SUFFIX}}"
 if HEAD_ERR=$(aws s3api head-bucket --bucket "$S3_BUCKET" --region "$REGION" \
      --expected-bucket-owner "$ACCOUNT_ID" 2>&1 >/dev/null); then
   : # Exists, and this account owns it.
-elif printf '%s' "$HEAD_ERR" | grep -q '404' && [[ "$OPERATION" == "destroy" ]]; then
+elif s3_says_absent "$HEAD_ERR" && [[ "$OPERATION" == "destroy" ]]; then
   # Nothing to create for a teardown: `destroy` uploads nothing (CloudFormation
   # deletes from the template it already stored) and removes this bucket at the
   # end. Creating it here made a re-run of `destroy` create an empty bucket only
   # to delete it again -- and if anything in between exited early, leave it
   # behind, which is the exact residue this bucket removal exists to prevent.
   echo "Deploy bucket '$S3_BUCKET' is already gone -- nothing to upload for a destroy."
-elif printf '%s' "$HEAD_ERR" | grep -q '404'; then
+elif s3_says_absent "$HEAD_ERR"; then
   echo "Creating S3 bucket '$S3_BUCKET' in $REGION ..."
   if [[ "$REGION" == "us-east-1" ]]; then
     # us-east-1 must NOT pass a LocationConstraint (the API rejects it).
@@ -782,8 +790,8 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
       if ! aws cloudformation deploy "${DEPLOY_ARGS[@]}"; then
         echo ""
-        echo "The deploy call for '$STACK_NAME' returned an error: the stack failed, or the call"
-        echo "gave up while CloudFormation was still working. Reading the outcome ..."
+        echo "The deploy call for '$STACK_NAME' returned an error (details above). That alone"
+        echo "does not establish the stack's outcome; reading its current state ..."
         echo ""
         # `|| true`: the stack may not exist (a rejected create) or the events read
         # may be refused; neither should stop the failure from being recorded.
@@ -854,81 +862,97 @@ if [[ "$OPERATION" == "deploy" ]]; then
 
   echo "All $TEMPLATES stack(s) deployed."
 elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
-  # Pre-cleanup: delete GuardDuty VPC endpoints and managed SGs (always block VPC deletion)
-  # Wrapped so an empty result (grep finds nothing) cannot stop the run under
-  # `set -euo pipefail`: grep returns 1 on no match, which pipefail would treat
-  # as fatal and skip the actual stack deletions below, leaving costly resources.
-  # GuardDuty creates these itself, so they carry no Workshop tag and always block
-  # VPC deletion. An empty result must not abort the run under `set -euo pipefail`,
-  # but a *failed* delete has to be reported: swallowing it turns a missing
-  # permission into an unexplained VPC dependency error several minutes later.
-  echo "Pre-cleanup: removing GuardDuty VPC endpoints and managed security groups..."
-  # Scope this to the workshop's own VPCs. GuardDuty's endpoints and managed SGs
-  # carry no Workshop tag, so there is nothing on the endpoint itself to filter
-  # on -- but the VPC that contains them does, because the stack-level
-  # Workshop=AgentCore-Platform tag propagates to it. Without this the queries
-  # below are account-wide, and in an account that also runs unrelated workloads
-  # a self-service teardown would strip GuardDuty coverage from every one of
-  # their VPCs. The workshop VPC still exists at this point -- an undeletable
-  # endpoint inside it is the whole reason this block runs.
-  if ! WORKSHOP_VPCS=$(aws ec2 describe-vpcs \
-    --filters "Name=tag:Workshop,Values=AgentCore-Platform" \
-    --query 'Vpcs[].VpcId' --output text 2>&1); then
-    echo "  WARNING: could not list the workshop VPCs, so the GuardDuty unblock is skipped;"
-    echo "           a VPC that still has endpoints will fail its stack delete below."
-    echo "           $WORKSHOP_VPCS"
-  elif [[ -z "${WORKSHOP_VPCS//[[:space:]]/}" ]]; then
-    echo "  No workshop-tagged VPCs found -- nothing to unblock"
-  else
-    # describe-* wants one comma-separated Values list, not whitespace.
-    VPC_FILTER=$(printf '%s' "$WORKSHOP_VPCS" | tr -s '[:space:]' ',')
-    VPC_FILTER="${VPC_FILTER%,}"
-    echo "  Limiting to workshop VPCs: $VPC_FILTER"
-
-    if ! GD_ENDPOINTS=$(aws ec2 describe-vpc-endpoints \
+  # unblock_guardduty_in_vpcs <vpc-id ...>: remove GuardDuty's VPC endpoints and
+  # managed security groups in exactly these VPCs. GuardDuty creates them itself,
+  # so they carry no Workshop tag and always block VPC deletion; without this a
+  # stack delete fails minutes later on a VPC dependency. A read that fails is
+  # reported, never taken as "nothing there"; a delete that errors is reported as
+  # unconfirmed, not as rejected (a transport error can follow an accepted
+  # request, and endpoint removal is asynchronous). Only an authorization error
+  # gets the missing-permission explanation.
+  unblock_guardduty_in_vpcs() {
+    local vpc_filter gd_endpoints gd_sgs ep sg ep_out sg_out
+    vpc_filter=$(printf '%s ' "$@" | tr -s '[:space:]' ',')
+    vpc_filter="${vpc_filter%,}"
+    [[ -n "$vpc_filter" ]] || return 0
+    echo "  Removing GuardDuty VPC endpoints and managed security groups in: $vpc_filter"
+    if ! gd_endpoints=$(aws ec2 describe-vpc-endpoints \
       --filters "Name=vpc-endpoint-state,Values=available,pending" \
-                "Name=vpc-id,Values=${VPC_FILTER}" \
+                "Name=vpc-id,Values=${vpc_filter}" \
       --query "VpcEndpoints[?contains(ServiceName,'guardduty')].VpcEndpointId" \
       --output text 2>&1); then
       echo "  WARNING: could not list GuardDuty VPC endpoints; none is removed here."
-      echo "           $GD_ENDPOINTS"
-    elif [[ -z "${GD_ENDPOINTS//[[:space:]]/}" ]]; then
+      echo "           $gd_endpoints"
+    elif [[ -z "${gd_endpoints//[[:space:]]/}" ]]; then
       echo "  No GuardDuty VPC endpoints found"
     else
-      for ep in $GD_ENDPOINTS; do
+      for ep in $gd_endpoints; do
         # A successful call can still report the endpoint under "Unsuccessful";
         # and deletion is asynchronous, so success here is a request, not removal.
-        if EP_OUT=$(aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$ep" --output json 2>&1) \
-           && ! grep -q '"Error"' <<<"$EP_OUT"; then
+        if ep_out=$(aws ec2 delete-vpc-endpoints --vpc-endpoint-ids "$ep" --output json 2>&1) \
+           && ! grep -q '"Error"' <<<"$ep_out"; then
           echo "  Deletion requested for GuardDuty VPC endpoint $ep (removal completes asynchronously)"
         else
-          echo "  WARNING: could not delete GuardDuty VPC endpoint $ep -- it will block"
-          echo "           VPC deletion. Requires ec2:DeleteVpcEndpoints on a resource"
-          echo "           GuardDuty owns (it carries no Workshop tag)."
+          echo "  WARNING: deletion of GuardDuty VPC endpoint $ep could not be confirmed. If it"
+          echo "           remains, it may block VPC deletion; check the error and the endpoint:"
+          echo "           $ep_out"
+          if grep -qiE 'UnauthorizedOperation|AccessDenied|not authorized' <<<"$ep_out"; then
+            echo "           This needs ec2:DeleteVpcEndpoints on a resource GuardDuty owns (no Workshop tag)."
+          fi
         fi
       done
     fi
-
-    if ! GD_SGS=$(aws ec2 describe-security-groups \
+    if ! gd_sgs=$(aws ec2 describe-security-groups \
       --filters "Name=group-name,Values=GuardDutyManagedSecurityGroup*" \
-                "Name=vpc-id,Values=${VPC_FILTER}" \
+                "Name=vpc-id,Values=${vpc_filter}" \
       --query "SecurityGroups[*].GroupId" --output text 2>&1); then
       echo "  WARNING: could not list GuardDuty managed security groups; none is removed here."
-      echo "           $GD_SGS"
-    elif [[ -z "${GD_SGS//[[:space:]]/}" ]]; then
+      echo "           $gd_sgs"
+    elif [[ -z "${gd_sgs//[[:space:]]/}" ]]; then
       echo "  No GuardDuty managed security groups found"
     else
-      for sg in $GD_SGS; do
-        if aws ec2 delete-security-group --group-id "$sg" >/dev/null 2>&1; then
+      for sg in $gd_sgs; do
+        if sg_out=$(aws ec2 delete-security-group --group-id "$sg" 2>&1); then
           echo "  Deleted GuardDuty security group $sg"
         else
-          echo "  WARNING: could not delete GuardDuty security group $sg -- it will"
-          echo "           block VPC deletion. Requires ec2:DeleteSecurityGroup on a"
-          echo "           resource GuardDuty owns (it carries no Workshop tag)."
+          echo "  WARNING: deletion of GuardDuty security group $sg could not be confirmed. If it"
+          echo "           remains, it may block VPC deletion (a dependency on an endpoint that is"
+          echo "           still being removed clears on its own); check the error and the group:"
+          echo "           $sg_out"
+          if grep -qiE 'UnauthorizedOperation|AccessDenied|not authorized' <<<"$sg_out"; then
+            echo "           This needs ec2:DeleteSecurityGroup on a resource GuardDuty owns (no Workshop tag)."
+          fi
         fi
       done
     fi
+  }
+
+  if [[ "$OPERATION" == "destroy" ]]; then
+    # Scope this to the workshop's own VPCs. GuardDuty's endpoints and managed SGs
+    # carry no Workshop tag, so there is nothing on the endpoint itself to filter
+    # on -- but the VPC that contains them does, because the stack-level
+    # Workshop=AgentCore-Platform tag propagates to it. Without this the queries
+    # would be account-wide, and in an account that also runs unrelated workloads
+    # a self-service teardown would strip GuardDuty coverage from every one of
+    # their VPCs. The workshop VPC still exists at this point -- an undeletable
+    # endpoint inside it is the whole reason this block runs.
+    echo "Pre-cleanup: removing GuardDuty VPC endpoints and managed security groups..."
+    if ! WORKSHOP_VPCS=$(aws ec2 describe-vpcs \
+      --filters "Name=tag:Workshop,Values=AgentCore-Platform" \
+      --query 'Vpcs[].VpcId' --output text 2>&1); then
+      echo "  WARNING: could not list the workshop VPCs, so the GuardDuty unblock is skipped;"
+      echo "           a VPC that still has endpoints will fail its stack delete below."
+      echo "           $WORKSHOP_VPCS"
+    elif [[ -z "${WORKSHOP_VPCS//[[:space:]]/}" ]]; then
+      echo "  No workshop-tagged VPCs found -- nothing to unblock"
+    else
+      # shellcheck disable=SC2086
+      unblock_guardduty_in_vpcs $WORKSHOP_VPCS
+    fi
   fi
+  # For `cleanup` the unblock runs per stack, inside the loop below, only once the
+  # stack is confirmed as a deletion target (never for a healthy, absent or
+  # unreadable stack) and only in the VPCs that stack or its nested stacks own.
 
   # Destroy in reverse order to handle potential dependencies.
   #
@@ -942,9 +966,10 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
   # Every stack is now attempted, failures are collected, and the script exits
   # non-zero at the end naming each one.
   # Newline-delimited string, not an array: the shebang is /bin/bash, which on
-  # macOS is still bash 3.2, and there `${#arr[@]}` on an EMPTY array is an
-  # unbound-variable error under `set -u` -- it would abort the run at the final
-  # summary, which is the exact failure mode this block exists to prevent.
+  # macOS is still bash 3.2, and there expanding an EMPTY array as `${arr[@]}`
+  # under `set -u` can raise an unbound-variable error -- it would abort the run
+  # at the final summary, which is the exact failure mode this block exists to
+  # prevent. This string avoids that expansion.
   DELETED=0
   FAILED_STACKS=""
   for ((i = TEMPLATES - 1; i >= 0; i--)); do
@@ -971,6 +996,34 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       fi
 
       echo "Stack '$STACK_NAME' is in state '$STATUS', cleaning up ..."
+
+      # VPCs owned by this stack and its nested stacks, read from CloudFormation,
+      # so a healthy sibling stack's VPC is never touched by the GuardDuty unblock.
+      STACK_VPCS=""
+      if ! NESTED=$(aws cloudformation describe-stack-resources --stack-name "$STACK_NAME" \
+          --query "StackResources[?ResourceType=='AWS::CloudFormation::Stack'].PhysicalResourceId" \
+          --output text 2>&1); then
+        echo "  WARNING: could not list the nested stacks of '$STACK_NAME'; GuardDuty resources in"
+        echo "           their VPCs are not removed here."
+        echo "           $NESTED"
+        NESTED=""
+      fi
+      [[ "$NESTED" != "None" ]] || NESTED=""
+      for s in "$STACK_NAME" $NESTED; do
+        if ! V=$(aws cloudformation describe-stack-resources --stack-name "$s" \
+            --query "StackResources[?ResourceType=='AWS::EC2::VPC' && ResourceStatus!='DELETE_COMPLETE'].PhysicalResourceId" \
+            --output text 2>&1); then
+          echo "  WARNING: could not read the resources of '$s'; GuardDuty resources in its VPC are"
+          echo "           not removed here."
+          echo "           $V"
+          continue
+        fi
+        [[ "$V" == "None" || -z "${V//[[:space:]]/}" ]] || STACK_VPCS="$STACK_VPCS $V"
+      done
+      if [[ -n "${STACK_VPCS//[[:space:]]/}" ]]; then
+        # shellcheck disable=SC2086
+        unblock_guardduty_in_vpcs $STACK_VPCS
+      fi
     else
       # `delete-stack` on a stack that does not exist succeeds, and
       # `wait stack-delete-complete` then returns immediately -- so without this
@@ -1028,8 +1081,8 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       STATE_NOW=$(current_stack_status "$STACK_NAME")
       case "$STATE_NOW" in
         DOES_NOT_EXIST)
-          # The waiter gave up, but the stack is gone: the delete finished late.
-          echo "Stack '$STACK_NAME' deleted (the waiter returned before the delete finished)."
+          # The waiter returned an error, but the stack is confirmed gone.
+          echo "Stack '$STACK_NAME' is confirmed gone despite the waiter error."
           DELETED=$((DELETED + 1)) ;;
         *_IN_PROGRESS)
           echo "ERROR: waiting for '$STACK_NAME' ended while CloudFormation is still deleting it"
@@ -1175,20 +1228,29 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
         continue
       fi
       [[ -n "${FOUND//[[:space:]]/}" ]] || continue
-      if aws logs delete-log-group --log-group-name "$lg" >/dev/null 2>&1; then
+      if DEL_OUT=$(aws logs delete-log-group --log-group-name "$lg" 2>&1); then
         echo "  Deleted orphaned log group $lg"
         ORPHANS=$((ORPHANS + 1))
+      elif STILL=$(aws logs describe-log-groups --log-group-name-prefix "$lg" \
+             --query "logGroups[?logGroupName=='$lg'].logGroupName" --output text 2>&1) \
+           && [[ -z "${STILL//[[:space:]]/}" ]]; then
+        # The delete call returned an error, but the group is confirmed gone.
+        echo "  Deleted orphaned log group $lg (the delete call returned an error, but the group is gone)"
+        ORPHANS=$((ORPHANS + 1))
       elif printf '%s\n' "$DECLARED" | grep -qxF "$lg"; then
-        echo "  WARNING: could not delete orphaned log group $lg -- the next deploy"
-        echo "           will fail AWS::EarlyValidation::ResourceExistenceCheck"
-        echo "           because the template declares a name that already exists."
+        echo "  WARNING: removal of orphaned log group $lg could not be confirmed:"
+        echo "           $DEL_OUT"
+        echo "           If it remains, the next deploy may fail AWS::EarlyValidation::ResourceExistenceCheck"
+        echo "           because the template declares that name."
+        SWEEP_UNCONFIRMED=1
       else
-        # Not declared anywhere, so it cannot collide -- leaving it behind costs
-        # a few cents of storage, not a broken redeploy. Do not send anyone
-        # hunting for an EarlyValidation failure that will not happen.
-        echo "  NOTE: could not delete leftover log group $lg (Lambda created it,"
-        echo "        not CloudFormation). Harmless, but yours to delete:"
-        echo "        aws logs delete-log-group --log-group-name $lg"
+        # Not declared anywhere, so it cannot collide with a redeploy -- leaving it
+        # behind costs a few cents of storage, not a broken deploy.
+        echo "  NOTE: removal of leftover log group $lg (Lambda created it, not CloudFormation)"
+        echo "        could not be confirmed:"
+        echo "        $DEL_OUT"
+        echo "        It is yours to delete: aws logs delete-log-group --log-group-name $lg"
+        SWEEP_UNCONFIRMED=1
       fi
     done
   done
@@ -1196,7 +1258,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     echo "  No orphaned log groups were deleted"
   fi
   if [[ "$SWEEP_UNCONFIRMED" == "1" ]]; then
-    FAILED_STACKS="${FAILED_STACKS}log-group sweep incomplete (a stack or log-group state could not be read)\n"
+    FAILED_STACKS="${FAILED_STACKS}log-group sweep incomplete (a stack or log-group state could not be read, or a log group could not be removed)\n"
   fi
   echo ""
 
@@ -1240,15 +1302,28 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     if HB_OUT=$(aws s3api head-bucket --bucket "$S3_BUCKET" --region "$REGION" \
          --expected-bucket-owner "$ACCOUNT_ID" 2>&1); then
       echo "Removing assets bucket '$S3_BUCKET' ..."
-      if aws s3 rm "s3://$S3_BUCKET" --recursive --only-show-errors &&
-         aws s3api delete-bucket --bucket "$S3_BUCKET" --region "$REGION"; then
+      RB_OUT=""
+      if RM_OUT=$(aws s3 rm "s3://$S3_BUCKET" --recursive --only-show-errors 2>&1) &&
+         RB_OUT=$(aws s3api delete-bucket --bucket "$S3_BUCKET" --region "$REGION" 2>&1); then
         echo "Assets bucket removed."
       else
-        echo "WARNING: '$S3_BUCKET' could not be removed. It holds only templates and"
-        echo "         a copy of source/, so it costs very little, but it is yours to"
-        echo "         delete: aws s3 rb s3://$S3_BUCKET --force"
+        echo "WARNING: removing '$S3_BUCKET' returned an error:"
+        echo "         ${RM_OUT}${RB_OUT}"
+        # Read back rather than assume: the error may have followed the removal.
+        if HB2=$(aws s3api head-bucket --bucket "$S3_BUCKET" --region "$REGION" \
+             --expected-bucket-owner "$ACCOUNT_ID" 2>&1); then
+          echo "         The bucket still exists. It holds only templates and a copy of source/,"
+          echo "         so it costs very little, but it is yours to delete:"
+          echo "         aws s3 rb s3://$S3_BUCKET --force"
+          BUCKET_UNCONFIRMED=1
+        elif s3_says_absent "$HB2"; then
+          echo "         The bucket is gone despite the error."
+        else
+          echo "         Whether it still exists could not be confirmed: $HB2"
+          BUCKET_UNCONFIRMED=1
+        fi
       fi
-    elif grep -qE '\(404\)|Not Found' <<<"$HB_OUT"; then
+    elif s3_says_absent "$HB_OUT"; then
       # Only HeadBucket's own 404 means gone; a 403, a timeout or a credential
       # error leaves presence unconfirmed.
       echo "Assets bucket '$S3_BUCKET' is already gone."
