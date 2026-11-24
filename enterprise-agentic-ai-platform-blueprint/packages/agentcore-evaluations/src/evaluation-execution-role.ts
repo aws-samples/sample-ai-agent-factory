@@ -23,6 +23,7 @@
 import { Stack } from 'aws-cdk-lib';
 import {
   Effect,
+  IManagedPolicy,
   PolicyDocument,
   PolicyStatement,
   Role,
@@ -62,6 +63,12 @@ export interface EvaluationExecutionRoleConstructProps {
    * write to. The reserved prefix is always allowed.
    */
   readonly additionalResultLogGroupNames?: readonly string[];
+
+  /**
+   * Permissions boundary for the role. The CloudWatch Omni hub passes the
+   * boundary its account's scoped CloudFormation execution policy requires.
+   */
+  readonly permissionsBoundary?: IManagedPolicy;
 }
 
 export class EvaluationExecutionRoleConstruct extends Construct {
@@ -136,6 +143,7 @@ export class EvaluationExecutionRoleConstruct extends Construct {
     this.role = new Role(this, 'Role', {
       roleName: `AgentCoreEvaluationRole-${props.nameSuffix}`,
       path: '/service-role/',
+      permissionsBoundary: props.permissionsBoundary,
       description:
         'Amazon Bedrock AgentCore Evaluations execution role: reads agent spans, writes evaluation results, invokes only the judges and code evaluators granted here.',
       assumedBy: new ServicePrincipal('bedrock-agentcore.amazonaws.com', {

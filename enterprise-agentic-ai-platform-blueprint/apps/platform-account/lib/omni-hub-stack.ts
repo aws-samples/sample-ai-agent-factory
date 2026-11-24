@@ -32,6 +32,7 @@
  * SPDX-License-Identifier: MIT-0
  */
 import { CfnOutput, RemovalPolicy, Stack, Tags, type StackProps } from "aws-cdk-lib";
+import { ManagedPolicy } from "aws-cdk-lib/aws-iam";
 import type { Key } from "aws-cdk-lib/aws-kms";
 import { Construct } from "constructs";
 
@@ -97,6 +98,14 @@ export interface OmniHubStackProps extends StackProps {
     readonly resultLogGroupPrefix?: string;
     readonly metricsNamespace?: string;
   };
+  /**
+   * Name of the customer-managed policy every hub role carries as permissions
+   * boundary (the operator role keeps the AWS-managed Omni boundary). Render it
+   * with `render-cfn-execution-policy.py hub-role-boundary` and create it once
+   * in this account; required when the stack deploys through the Audit
+   * account's scoped CloudFormation execution policy.
+   */
+  readonly roleBoundaryPolicyName?: string;
   readonly tags?: Record<string, string>;
 }
 
@@ -124,6 +133,7 @@ export class OmniHubStack extends Stack {
       enableTransactionSearch,
       keyRemovalPolicy,
       goldenGate,
+      roleBoundaryPolicyName,
       tags,
       ...stackProps
     } = props;
@@ -134,6 +144,11 @@ export class OmniHubStack extends Stack {
     // system tags to KMS keys, so the policy pins key administration and use to
     // this tag, which the hub stack puts on everything it creates.
     Tags.of(this).add("agenticai:omni-hub", "true");
+    // The same policy creates or widens a hub role only when it carries the
+    // boundary (the operator role keeps the AWS-managed Omni one).
+    const roleBoundary = roleBoundaryPolicyName
+      ? ManagedPolicy.fromManagedPolicyName(this, "HubRoleBoundary", roleBoundaryPolicyName)
+      : undefined;
 
     if (existingSpaceId !== undefined) {
       if (!SPACE_ID_PATTERN.test(existingSpaceId)) {
@@ -178,6 +193,7 @@ export class OmniHubStack extends Stack {
         transactionSearchIndexingPercentage,
         enableTransactionSearch,
         keyRemovalPolicy,
+        roleBoundary,
         tags,
       });
       this.spaceId = this.hub.spaceId;
@@ -197,6 +213,7 @@ export class OmniHubStack extends Stack {
           destinationRegion: this.region,
           destinationLogsKmsKeyArn: this.centralizedLogsKey.keyArn,
           backupRegion: centralization.backupRegion,
+          tagPropagationRoleBoundary: roleBoundary,
           tags,
         },
       );
@@ -210,6 +227,7 @@ export class OmniHubStack extends Stack {
         sourceAccountIds: goldenGate.sourceAccountIds,
         resultLogGroupPrefix: goldenGate.resultLogGroupPrefix,
         metricsNamespace: goldenGate.metricsNamespace,
+        permissionsBoundary: roleBoundary,
         tags,
       });
     }

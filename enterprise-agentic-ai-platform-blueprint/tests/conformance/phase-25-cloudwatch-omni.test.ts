@@ -143,6 +143,40 @@ describe("Phase 25 — Omni hub space (Audit account)", () => {
     }
   });
 
+  it("puts the configured permissions boundary on every hub role but the operator, which keeps the Omni one", () => {
+    const app = new App();
+    const t = Template.fromStack(
+      new OmniHubStack(app, "BoundedHub", {
+        env: { account: HUB, region: REGION },
+        domainId: "d-1a2b3c4d5e",
+        keyRemovalPolicy: RemovalPolicy.DESTROY,
+        centralization: {
+          organizationId: "o-abc123def4",
+          sourceScope: `AccountId IN ('${CELL}')`,
+          sourceRegions: [REGION],
+        },
+        goldenGate: { runnerPrincipalArns: [`arn:aws:iam::${CELL}:role/AgenticAI-WorkloadPipeline-Evaluation`] },
+        roleBoundaryPolicyName: "AgenticAI-OmniHubRoleBoundary",
+        tags: TAGS,
+      }),
+    );
+    const roles = Object.values(t.findResources("AWS::IAM::Role")) as any[];
+    expect(roles.length).toBeGreaterThanOrEqual(5);
+    for (const role of roles) {
+      const boundary = JSON.stringify(role.Properties.PermissionsBoundary ?? null);
+      if (role.Properties.RoleName === "CloudWatchOmniOperatorRole") {
+        expect(boundary).toContain("CloudWatchOmniSpaceAccessPolicy");
+      } else {
+        expect(boundary).toContain("AgenticAI-OmniHubRoleBoundary");
+      }
+    }
+    // Without the name only the operator role carries a boundary (unchanged default).
+    const plain = Object.values(hubTemplate().findResources("AWS::IAM::Role")) as any[];
+    expect(
+      plain.filter((r) => r.Properties.PermissionsBoundary !== undefined).map((r) => r.Properties.RoleName),
+    ).toEqual(["CloudWatchOmniOperatorRole"]);
+  });
+
   it("points the centralization rule at this account and encrypts every destination group under the hub key", () => {
     const t = hubTemplate();
     const rule = Object.values(

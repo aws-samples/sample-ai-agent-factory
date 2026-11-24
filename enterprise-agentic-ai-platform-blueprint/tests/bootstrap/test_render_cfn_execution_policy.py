@@ -51,6 +51,7 @@ def render(role: str, *args: str) -> dict:
                 "workstream": WORKSTREAM,
                 "management": MANAGEMENT,
                 "audit": AUDIT,
+                "hub-role-boundary": AUDIT,
             }[role],
             "--region",
             REGION,
@@ -332,11 +333,30 @@ def test_audit_policy_pins_omni_hub_roles_and_pass_role_services() -> None:
     assert any("AgentCoreEvaluationRole-omni-" in resource for resource in manage["Resource"])
     # The organization domain and its access role are the management account's.
     assert not any("CloudWatchOmniDomainAccessRole" in resource for resource in manage["Resource"])
+    # The golden-gate runner is managed here but never passed to a service.
+    assert any(resource.endswith(f"role/AgenticAIGoldenGateRunner-{REGION}") for resource in manage["Resource"])
+    # Creating a role, or setting or widening its permissions, is gated on one of
+    # the two boundaries; the lifecycle statement carries none of those actions
+    # and the boundary can never be removed.
+    gating = {"iam:AttachRolePolicy", "iam:CreateRole", "iam:PutRolePermissionsBoundary", "iam:PutRolePolicy"}
+    assert not gating & set(manage["Action"])
+    gated = by_sid["CreateBoundedOmniHubRoles"]
+    assert set(gated["Action"]) == gating
+    assert gated["Resource"] == manage["Resource"]
+    assert set(gated["Condition"]["StringEquals"]["iam:PermissionsBoundary"]) == {
+        f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary",
+        "arn:aws:iam::aws:policy/CloudWatchOmniSpaceAccessPolicy",
+    }
+    assert "iam:DeleteRolePermissionsBoundary" not in all_actions(policy)
+    for statement in policy["Statement"]:
+        if gating & actions(statement):
+            assert statement["Sid"] == "CreateBoundedOmniHubRoles", statement["Sid"]
     pass_role = by_sid["PassOmniHubRolesToServices"]
     assert pass_role["Action"] == "iam:PassRole"
+    assert not any("GoldenGateRunner" in resource for resource in pass_role["Resource"])
     services = set(pass_role["Condition"]["StringEquals"]["iam:PassedToService"])
     assert {"cloudwatch.amazonaws.com", "logs.amazonaws.com", "bedrock-agentcore.amazonaws.com"} <= services
-    provision = by_sid["ProvisionOmniHubSpaceAndCentralization"]
+    provision = by_sid["ProvisionOmniHubUnscoped"]
     assert "cloudwatch:CreateSpace" in provision["Action"]
     assert "cloudwatch:GetDomainForOrganization" in provision["Action"]
     assert "cloudwatch:CreateDomainForOrganization" not in provision["Action"]
@@ -355,15 +375,12 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     # No service-wide or wildcard action anywhere in the audit document.
     assert not any(action.endswith(":*") or "*" in action for action in granted)
 
-    wildcard_only = by_sid(policy, "ListTelemetryAndStartDiscovery")
-    assert wildcard_only["Resource"] == "*"
-    assert "Condition" not in wildcard_only
-    assert set(wildcard_only["Action"]) == {
-        "application-signals:StartDiscovery",
-        "kms:ListAliases",
-        "kms:ListKeys",
-        "oam:ListSinks",
-    }
+    # Resource-less actions share the hub's unscoped statement; list-handler-only
+    # calls CloudFormation never makes during stack operations are absent.
+    unscoped = by_sid(policy, "ProvisionOmniHubUnscoped")
+    assert unscoped["Resource"] == "*" and "Condition" not in unscoped
+    assert {"application-signals:StartDiscovery", "kms:ListAliases"} <= set(unscoped["Action"])
+    assert not {"kms:ListKeys", "oam:ListSinks", "oam:CreateSink", "kms:CreateKey"} & set(unscoped["Action"])
 
     # Keys: created only with the ownership tag in the request (the grant excludes
     # every key ARN, so it can never tag an existing key), changed and used only
@@ -379,7 +396,9 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
     assert set(create_keys["Action"]) == {"kms:CreateKey", "kms:TagResource"}
     assert "Resource" not in create_keys
     assert create_keys["NotResource"] == "arn:aws:kms:*:*:key/*"
-    assert create_keys["Condition"] == {"StringEquals": {f"aws:RequestTag/{owner}": "true"}}
+    assert create_keys["Condition"] == {
+        "StringEquals": {f"aws:RequestTag/{owner}": "true", "aws:RequestedRegion": REGION}
+    }
     reads = by_sid(policy, "ReadKeysAndEnableRotation")
     assert reads["Resource"] == key_any and "Condition" not in reads
     assert set(reads["Action"]) == {
@@ -401,7 +420,7 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         "kms:Decrypt",
         "kms:GenerateDataKey",
     } <= set(change["Action"])
-    unpinned_kms = set(reads["Action"]) | {"kms:ListAliases", "kms:ListKeys"}
+    unpinned_kms = set(reads["Action"]) | {"kms:ListAliases"}
     for statement in policy["Statement"]:
         kms_actions = {action for action in actions(statement) if action.startswith("kms:")}
         if kms_actions - unpinned_kms:
@@ -463,7 +482,7 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         "logs:DeleteLogGroup",
         "logs:DescribeLogGroups",
     } & granted
-    prerequisites = by_sid(policy, "CreateApplicationSignalsPrerequisites")
+    prerequisites = by_sid(policy, "ApplicationSignalsPrerequisites")
     assert set(prerequisites["Action"]) == {
         "cloudtrail:CreateServiceLinkedChannel",
         "iam:CreateServiceLinkedRole",
@@ -473,8 +492,20 @@ def test_audit_policy_enumerates_kms_logs_and_oam_for_the_hub_and_the_sink() -> 
         f"arn:aws:iam::{AUDIT}:role/aws-service-role/application-signals.cloudwatch.amazonaws.com/AWSServiceRoleForCloudWatchApplicationSignals",
         f"arn:aws:cloudtrail:{REGION}:{AUDIT}:channel/aws-service-channel/application-signals/*",
     }
-    runner = by_sid(policy, "ManageOmniGoldenGateRunnerRole")
-    assert runner["Resource"] == f"arn:aws:iam::{AUDIT}:role/AgenticAIGoldenGateRunner-{REGION}"
+    assert "ManageOmniGoldenGateRunnerRole" not in {s["Sid"] for s in policy["Statement"]}
+
+
+def test_hub_role_boundary_caps_hub_roles_to_telemetry_services() -> None:
+    boundary = render("hub-role-boundary")
+    assert len(boundary["Statement"]) == 1
+    ceiling = boundary["Statement"][0]
+    assert ceiling["Effect"] == "Allow" and ceiling["Resource"] == "*"
+    granted = set(ceiling["Action"])
+    # What the Dataset integration, evaluation, tag-propagation and golden-gate
+    # roles' own policies need, and nothing that could administer the account.
+    assert {"logs:*", "cloudwatch:*", "bedrock-agentcore:*", "bedrock:InvokeModel", "lambda:InvokeFunction", "kms:Decrypt"} <= granted
+    assert not any(action.split(":")[0] in {"iam", "sts", "organizations", "ec2", "s3", "kms"} and action.endswith("*") and action != "kms:GenerateDataKey*" for action in granted)
+    assert not {"iam:*", "sts:AssumeRole", "kms:*", "kms:PutKeyPolicy", "kms:ScheduleKeyDeletion"} & granted
 
 
 def test_audit_policy_cannot_tag_a_pre_existing_key_so_upgrades_tag_hub_keys_first() -> None:
@@ -492,7 +523,7 @@ def test_audit_policy_cannot_tag_a_pre_existing_key_so_upgrades_tag_hub_keys_fir
         condition = statement["Condition"]["StringEquals"]
         if "NotResource" in statement:
             assert statement["NotResource"] == "arn:aws:kms:*:*:key/*"
-            assert condition == {"aws:RequestTag/agenticai:omni-hub": "true"}
+            assert condition == {"aws:RequestTag/agenticai:omni-hub": "true", "aws:RequestedRegion": REGION}
         else:
             assert statement["Resource"] == f"arn:aws:kms:{REGION}:{AUDIT}:key/*"
             assert condition == {"aws:ResourceTag/agenticai:omni-hub": "true"}
@@ -754,6 +785,7 @@ def test_every_rendered_policy_fits_one_iam_managed_policy() -> None:
         ("management", render("management")),
         ("management --stack-name", render("management", "--stack-name", "A" * 128)),
         ("audit", render("audit")),
+        ("hub-role-boundary", render("hub-role-boundary")),
         ("platform", render("platform", "--target-account-id", WORKSTREAM, "--connection-arn", CONNECTION)),
     ):
         # IAM counts the document without whitespace; the console-created CDK

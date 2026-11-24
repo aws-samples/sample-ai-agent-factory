@@ -120,6 +120,20 @@ def test_audit_role_points_hub_aliases_only_at_owned_keys(audit_document: str) -
     assert other_alias == {"kms:CreateAlias": "implicitDeny"}
 
 
+def test_audit_role_creates_hub_roles_only_within_the_boundary(audit_document: str) -> None:
+    role = f"arn:aws:iam::{AUDIT}:role/service-role/AgentCoreEvaluationRole-omni-{REGION}"
+    boundary = f"arn:aws:iam::{AUDIT}:policy/AgenticAI-OmniHubRoleBoundary"
+    bounded = decisions(audit_document, ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"], [role], context("iam:PermissionsBoundary", boundary))
+    assert set(bounded.values()) == {"allowed"}
+    unbounded = decisions(audit_document, ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"], [role])
+    assert set(unbounded.values()) == {"implicitDeny"}
+    other = decisions(audit_document, ["iam:CreateRole"], [role], context("iam:PermissionsBoundary", "arn:aws:iam::aws:policy/AdministratorAccess"))
+    assert other == {"iam:CreateRole": "implicitDeny"}
+    assert decisions(audit_document, ["iam:DeleteRolePermissionsBoundary"], [role]) == {"iam:DeleteRolePermissionsBoundary": "implicitDeny"}
+    # Any other role name in the account is out of reach, boundary or not.
+    assert decisions(audit_document, ["iam:CreateRole"], [f"arn:aws:iam::{AUDIT}:role/SomethingElse"], context("iam:PermissionsBoundary", boundary)) == {"iam:CreateRole": "implicitDeny"}
+
+
 def test_management_role_changes_only_the_org_stacks_scps(management_document: str) -> None:
     mutations = ["organizations:UpdatePolicy", "organizations:DeletePolicy", "organizations:DetachPolicy"]
     owned = decisions(management_document, mutations, [SCP], context(f"aws:ResourceTag/{STACK_TAG}", "AgenticAI-Management-OrgStack"))

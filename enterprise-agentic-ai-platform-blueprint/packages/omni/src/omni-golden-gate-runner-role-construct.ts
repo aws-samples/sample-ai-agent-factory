@@ -26,6 +26,7 @@ import {
   AccountPrincipal,
   CompositePrincipal,
   Effect,
+  IManagedPolicy,
   IPrincipal,
   PolicyDocument,
   PolicyStatement,
@@ -62,6 +63,8 @@ export interface OmniGoldenGateRunnerRoleConstructProps {
   readonly metricsNamespace?: string;
   /** Default `AgenticAIGoldenGateRunner-<region>`. */
   readonly roleName?: string;
+  /** Permissions boundary for the runner role (required through the Audit account's scoped execution policy). */
+  readonly permissionsBoundary?: IManagedPolicy;
   readonly tags?: Record<string, string>;
 }
 
@@ -112,6 +115,7 @@ export class OmniGoldenGateRunnerRoleConstruct extends Construct {
 
     this.role = new Role(this, 'Role', {
       roleName: props.roleName ?? `AgenticAIGoldenGateRunner-${stack.region}`,
+      permissionsBoundary: props.permissionsBoundary,
       description:
         'Assumed by the workload pipeline to run the golden-dataset promotion gate in the hub: dataset read, batch evaluation, result write.',
       assumedBy: new CompositePrincipal(...trusted),

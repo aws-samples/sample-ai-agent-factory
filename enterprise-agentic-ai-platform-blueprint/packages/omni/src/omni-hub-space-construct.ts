@@ -36,6 +36,7 @@ import {
   AccountRootPrincipal,
   ArnPrincipal,
   Effect,
+  IManagedPolicy,
   ManagedPolicy,
   PolicyDocument,
   PolicyStatement,
@@ -86,6 +87,13 @@ export interface OmniHubSpaceConstructProps {
   readonly judgeModelArns?: readonly string[];
   /** Code-based evaluator function ARNs the evaluation role may invoke. */
   readonly codeEvaluatorFunctionArns?: readonly string[];
+  /**
+   * Permissions boundary for the Dataset integration and evaluation roles (the
+   * operator role keeps the AWS-managed CloudWatchOmniSpaceAccessPolicy boundary
+   * the Omni documentation prescribes). Required when the stack deploys through
+   * the Audit account's scoped CloudFormation execution policy.
+   */
+  readonly roleBoundary?: IManagedPolicy;
   /** Transaction Search indexing percentage (0-100). Default 1. */
   readonly transactionSearchIndexingPercentage?: number;
   /** Manage Transaction Search from this stack. Default true. */
@@ -181,6 +189,7 @@ export class OmniHubSpaceConstruct extends Construct {
     ]);
     this.datasetIntegrationRole = new Role(this, 'DatasetIntegrationRole', {
       roleName: `CloudWatchOmniDatasetIntegrationRole-${stack.region}`,
+      permissionsBoundary: props.roleBoundary,
       description: 'Assumed by CloudWatch Logs to forward the hub log groups and traces into the CloudWatch Dataset.',
       assumedBy: new ServicePrincipal('logs.amazonaws.com', {
         conditions: {
@@ -218,6 +227,7 @@ export class OmniHubSpaceConstruct extends Construct {
     ];
     const evaluation = new EvaluationExecutionRoleConstruct(this, 'EvaluationRole', {
       nameSuffix: `omni-${stack.region}`,
+      permissionsBoundary: props.roleBoundary,
       spanLogGroupArns: centralizedSpanGroupArns,
       judgeModelArns: props.allowModelInference ? props.judgeModelArns : undefined,
       codeEvaluatorFunctionArns: props.codeEvaluatorFunctionArns,

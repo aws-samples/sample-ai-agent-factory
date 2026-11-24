@@ -604,6 +604,17 @@ switch (stage) {
         "Context agenticai/omniGoldenGateSourceAccountIds needs agenticai/omniGoldenGateRunnerPrincipalArns (the pipeline roles allowed to assume the runner).",
       );
     }
+    // Permissions boundary every hub role carries (render-cfn-execution-policy.py
+    // hub-role-boundary); the Audit account's scoped execution policy requires it.
+    const hubRoleBoundary = app.node.tryGetContext("agenticai/omniHubRoleBoundary");
+    if (
+      hubRoleBoundary !== undefined &&
+      (typeof hubRoleBoundary !== "string" || !/^[\w+=,.@-]{1,128}$/.test(hubRoleBoundary))
+    ) {
+      throw new Error(
+        "Context agenticai/omniHubRoleBoundary must be the name of an IAM managed policy in the hub account.",
+      );
+    }
     new OmniHubStack(app, `AgenticAI-Omni-HubStack-${deploymentRegion()}`, {
       env: { account: hubAccount, region: deploymentRegion() },
       synthesizer: omniSynthesizer(),
@@ -633,6 +644,7 @@ switch (stage) {
             sourceAccountIds: goldenGateSourceAccountIds,
           }
         : undefined,
+      roleBoundaryPolicyName: hubRoleBoundary,
       tags: omniAllocationTags(),
     });
     break;

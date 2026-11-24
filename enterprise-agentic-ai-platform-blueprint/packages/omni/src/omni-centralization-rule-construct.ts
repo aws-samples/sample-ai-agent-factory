@@ -28,6 +28,7 @@ import { CfnOutput, CfnResource, Stack, Token } from 'aws-cdk-lib';
 import {
   ArnPrincipal,
   Effect,
+  IManagedPolicy,
   PolicyDocument,
   PolicyStatement,
   Role,
@@ -105,6 +106,8 @@ export interface OmniCentralizationRuleConstructProps {
   readonly organizationId?: string;
   /** Existing tag-propagation role ARN in the destination account. */
   readonly tagPropagationRoleArn?: string;
+  /** Permissions boundary for the tag-propagation role this construct creates. */
+  readonly tagPropagationRoleBoundary?: IManagedPolicy;
   readonly tags?: Record<string, string>;
 }
 
@@ -165,6 +168,7 @@ export class OmniCentralizationRuleConstruct extends Construct {
       // assumes this role to tag destination log groups.
       this.tagPropagationRole = new Role(this, 'TagPropagationRole', {
         description: 'CloudWatch Logs centralization tag propagation role (destination log groups only).',
+        permissionsBoundary: props.tagPropagationRoleBoundary,
         assumedBy: new ArnPrincipal(
           `arn:${stack.partition}:iam::${props.destinationAccountId}:role/aws-service-role/logs-centralization.observabilityadmin.amazonaws.com/AWSServiceRoleForObservabilityAdmin_LogsCentralization`,
         ).withConditions({ StringEquals: { 'sts:ExternalId': props.organizationId } }),
