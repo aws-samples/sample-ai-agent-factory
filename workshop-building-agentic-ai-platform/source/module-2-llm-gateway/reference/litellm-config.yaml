@@ -27,12 +27,7 @@ model_list:
       model: bedrock/global.anthropic.claude-sonnet-4-6
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  # Claude 4.5
-  - model_name: claude-opus-4.5
-    litellm_params:
-      model: bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
+  # Claude 4.5 (Haiku only: Opus 4.5 and Sonnet 4.5 are Legacy, see below)
   - model_name: claude-haiku-4.5
     litellm_params:
       model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
@@ -121,8 +116,9 @@ model_list:
   # EOL 2027-03-30); Mistral 7B, Mixtral 8x7B and Devstral 2; DeepSeek R1 and
   # V3.1; Gemma 3; Nemotron Nano 9B/12B; Qwen3 Coder 30B/480B; MiniMax M2/M2.1;
   # Kimi K2 Thinking; GLM 4.7 and 4.7 Flash (all EOL 2027-03-30); Palmyra X4/X5
-  # (EOL 2027-03-09/-21); Cohere Command R/R+ (EOL 2026-08-19). Re-check the
-  # page before adding an alias: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle-legacy.html
+  # (EOL 2027-03-09/-21); Cohere Command R/R+ (EOL 2026-08-19). Removed on
+  # 2026-11-24: Claude Opus 4.5 (Legacy 2026-11-23, EOL 2027-05-23). Re-check
+  # the page before adding an alias: https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle-legacy.html
 
   # ─────────────────────────────────────────────────────────
   # DeepSeek

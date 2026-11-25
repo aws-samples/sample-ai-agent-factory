@@ -913,7 +913,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
     else
       for sg in $gd_sgs; do
         if sg_out=$(aws ec2 delete-security-group --group-id "$sg" 2>&1); then
-          echo "  Deleted GuardDuty security group $sg"
+          echo "  GuardDuty security-group delete call succeeded for $sg"
         else
           echo "  WARNING: deletion of GuardDuty security group $sg could not be confirmed. If it"
           echo "           remains, it may block VPC deletion. If an endpoint is still using this group,"
@@ -1086,12 +1086,12 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
           echo "Stack '$STACK_NAME' is confirmed gone despite the waiter error."
           DELETED=$((DELETED + 1)) ;;
         *_IN_PROGRESS)
-          echo "ERROR: waiting for '$STACK_NAME' ended while CloudFormation is still deleting it"
-          echo "       (state $STATE_NOW). Check the stack in the console, then run destroy again."
+          echo "ERROR: waiting for '$STACK_NAME' ended while CloudFormation reports an operation in progress"
+          echo "       (state $STATE_NOW). Check the stack in the console, then run '$0 $OPERATION' again."
           FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (still $STATE_NOW)\n" ;;
         UNKNOWN)
           echo "ERROR: waiting for '$STACK_NAME' ended with an error and its state could not be read."
-          echo "       Check the stack in the console, then run destroy again."
+          echo "       Check the stack in the console, then run '$0 $OPERATION' again."
           FAILED_STACKS="${FAILED_STACKS}${STACK_NAME} (state could not be read)\n" ;;
         *)
           echo "ERROR: stack '$STACK_NAME' failed to delete (state $STATE_NOW)."
@@ -1230,7 +1230,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       fi
       [[ -n "${FOUND//[[:space:]]/}" ]] || continue
       if DEL_OUT=$(aws logs delete-log-group --log-group-name "$lg" 2>&1); then
-        echo "  Deleted orphaned log group $lg"
+        echo "  Log-group delete call succeeded for $lg"
         ORPHANS=$((ORPHANS + 1))
       elif STILL=$(aws logs describe-log-groups --log-group-name-prefix "$lg" \
              --query "logGroups[?logGroupName=='$lg'].logGroupName" --output text 2>&1) \
@@ -1306,7 +1306,7 @@ elif [[ "$OPERATION" == "destroy" || "$OPERATION" == "cleanup" ]]; then
       RB_OUT=""
       if RM_OUT=$(aws s3 rm "s3://$S3_BUCKET" --recursive --only-show-errors 2>&1) &&
          RB_OUT=$(aws s3api delete-bucket --bucket "$S3_BUCKET" --region "$REGION" 2>&1); then
-        echo "Assets bucket removed."
+        echo "Assets-bucket delete call succeeded."
       else
         echo "WARNING: removing '$S3_BUCKET' returned an error:"
         echo "         ${RM_OUT}${RB_OUT}"

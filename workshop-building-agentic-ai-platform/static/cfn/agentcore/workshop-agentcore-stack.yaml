@@ -2088,7 +2088,8 @@ Resources:
                       }
                   target_configuration = {"mcp": {"mcpServer": mcp_server_config}}
                   host = re.sub(r"^https?://", "", server_url).split("/", 1)[0].lower()
-                  if re.search(r"\.bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$", host):
+                  # Gateway hosts carry a leading label, Runtime invocation hosts are bare.
+                  if re.search(r"(^|\.)bedrock-agentcore\.[a-z0-9-]+\.amazonaws\.com(:\d+)?$", host):
                       signing_service = "bedrock-agentcore"
                   elif re.search(r"\.lambda-url\.[a-z0-9-]+\.on\.aws(:\d+)?$", host):
                       signing_service = "lambda"

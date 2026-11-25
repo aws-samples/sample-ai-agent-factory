@@ -143,29 +143,29 @@ parametrized cases and are higher than a `def test_` grep.
 
 Two catalogs, and they are deliberately different sizes.
 
-**What the deployed gateway serves (13 aliases).** `scripts/setup_keys.py` registers these through
+**What the deployed gateway serves (12 aliases).** `scripts/setup_keys.py` registers these through
 `/model/new`; the proxy runs with `STORE_MODEL_IN_DB=True` and no mounted config file, so this table
 *is* the live catalog. Each entry is resolved against the deploy region at registration time and
 skipped if the region has no invocable flavor.
 
 | Provider | Aliases |
 |----------|---------|
-| Anthropic Claude | `claude-opus`, `claude-sonnet`, `claude-haiku`, `claude-opus-4.6`, `claude-sonnet-4.6`, `claude-opus-4.5`, `claude-haiku-4.5` |
+| Anthropic Claude | `claude-opus`, `claude-sonnet`, `claude-haiku`, `claude-opus-4.6`, `claude-sonnet-4.6`, `claude-haiku-4.5` |
 | Amazon Nova | `nova-pro`, `nova-lite`, `nova-2-lite` |
 | Mistral AI | `mistral-large-3`, `mistral-large` |
 | DeepSeek | `deepseek-v3.2` |
 
-**The wider reference catalog (24 aliases).** `reference/litellm-config.yaml` is documentation only —
+**The wider reference catalog (23 aliases).** `reference/litellm-config.yaml` is documentation only —
 it is not mounted into the container. Use it as a menu when you want to add models to the table above.
 It lists only models Bedrock reports ACTIVE: Legacy models cannot be adopted by new accounts, so the
 Llama, Gemma, Palmyra, GLM, MiniMax, Qwen3 Coder, Nemotron 9B/12B, Mistral 7B/Mixtral/Devstral 2,
 DeepSeek R1/V3.1, Claude Sonnet 4.5 and Cohere entries were removed against the
 [Model lifecycle (Legacy)](https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle-legacy.html)
-page on 2026-11-08.
+page on 2026-11-08, and Claude Opus 4.5 (Legacy 2026-11-23, EOL 2027-05-23) on 2026-11-24.
 
 | Provider | Models |
 |----------|--------|
-| Anthropic Claude | Opus 4.6, Sonnet 4.6, Opus 4.5, Haiku 4.5 (plus the `claude-opus`/`claude-sonnet`/`claude-haiku` rolling aliases) |
+| Anthropic Claude | Opus 4.6, Sonnet 4.6, Haiku 4.5 (plus the `claude-opus`/`claude-sonnet`/`claude-haiku` rolling aliases) |
 | Amazon Nova | Pro, Lite, 2 Lite, 2 Sonic |
 | Mistral AI | Large 3, Magistral Small, Ministral (14B/8B/3B), Large |
 | DeepSeek | V3.2 |

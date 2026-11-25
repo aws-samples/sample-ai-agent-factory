@@ -30,7 +30,7 @@ pip install -r requirements.txt --quiet
 python scripts/setup_keys.py --stack-name workshop-llm-gateway-stack
 :::
 
-This registers 13 Bedrock model aliases (Claude, Nova, Mistral, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
+This registers 12 Bedrock model aliases (Claude, Nova, Mistral, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
 
 ## Retrieve the LLM Gateway credentials
 
